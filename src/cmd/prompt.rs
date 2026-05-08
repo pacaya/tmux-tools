@@ -97,33 +97,39 @@ fn send_prompt(pane: &str, text: &str) -> Result<()> {
 }
 
 fn extract_after_prompt(before: &str, after: &str, prompt_text: &str) -> String {
-    let before_line_count = before.lines().count();
+    // Find the line in `after` where the just-sent prompt was rendered, and
+    // return everything below it.
+    //
+    // For TUI-style panes (codex, REPLs, etc.), `capture-pane -p` is visible-only
+    // and always returns exactly pane_height lines — a line-count-based diff
+    // between before/after collapses to empty even when new content was rendered.
+    // Instead, locate the prompt text within `after`: prefer the FIRST occurrence
+    // on a line that did NOT appear in `before` (that's the just-rendered prompt;
+    // anything after it is the response). Fall back to the LAST occurrence
+    // anywhere in `after` if no strictly-new line matches (e.g., the prompt text
+    // happens to overlap a pre-existing pane line).
+    let before_lines: std::collections::HashSet<&str> = before.lines().collect();
 
-    let mut line_index = 0_usize;
-    let mut offset = 0_usize;
-    let mut boundary_offset = None;
-
+    let mut first_new_match_end: Option<usize> = None;
+    let mut last_match_end: Option<usize> = None;
+    let mut offset = 0usize;
     for line in after.split_inclusive('\n') {
-        if line_index == before_line_count {
-            boundary_offset = Some(offset);
+        if line.contains(prompt_text) {
+            let end = offset + line.len();
+            last_match_end = Some(end);
+            // A "new" match is a line that wasn't in `before` (compare without
+            // the trailing newline, since lines() strips it).
+            let trimmed = line.strip_suffix('\n').unwrap_or(line);
+            if first_new_match_end.is_none() && !before_lines.contains(trimmed) {
+                first_new_match_end = Some(end);
+            }
         }
-
-        if line_index >= before_line_count && line.contains(prompt_text) {
-            return after[offset + line.len()..].to_owned();
-        }
-
-        line_index += 1;
         offset += line.len();
     }
 
-    // Handle the case where `after` ends exactly at the boundary line count
-    // without a trailing newline (so the loop exits before assigning the boundary).
-    if boundary_offset.is_none() && line_index == before_line_count {
-        boundary_offset = Some(offset);
-    }
-
-    boundary_offset
-        .map(|index| after[index..].to_owned())
+    first_new_match_end
+        .or(last_match_end)
+        .map(|i| after[i..].to_owned())
         .unwrap_or_default()
 }
 
@@ -140,13 +146,27 @@ mod tests {
     }
 
     #[test]
-    fn prompt_not_found_falls_back_to_diff_beyond_before_line_count() {
+    fn prompt_not_found_returns_empty() {
+        // If the prompt text never appears in `after`, we have no anchor for
+        // where the response begins, so return empty rather than guessing.
         let before = "one\ntwo\n";
         let after = "one\ntwo\nthree\nfour\n";
 
+        assert_eq!(extract_after_prompt(before, after, "missing"), "");
+    }
+
+    #[test]
+    fn same_line_count_visible_pane_capture_extracts_response() {
+        // Regression: tmux `capture-pane -p` returns exactly pane_height lines
+        // (visible-only, padded with blanks). Before and after will have the same
+        // line count even when new content was rendered. Extraction must still
+        // anchor on the prompt's own line.
+        let before = "old line one\nold line two\nold line three\n\n\n";
+        let after = "old line two\nold line three\n› What's 2+2?\n• 4\n\n";
+
         assert_eq!(
-            extract_after_prompt(before, after, "missing"),
-            "three\nfour\n"
+            extract_after_prompt(before, after, "What's 2+2?"),
+            "• 4\n\n"
         );
     }
 
