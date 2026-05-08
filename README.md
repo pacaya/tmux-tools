@@ -35,13 +35,13 @@ Most pane verbs accept `--target <name|id>`, `--format concise|json|raw`, `--ses
 
 | Verb | Signature | Notes |
 | --- | --- | --- |
-| `launch` | `--cmd <SHELL> [--name NAME] [--split h\|v] [--size N]` | Creates a pane/window and registers optional `@tt-name`; splits only inside tmux. |
+| `launch` | `--cmd <SHELL> [--name NAME] [--split h\|v\|window] [--size N] [--bare]` | Creates a pane/window and registers optional `@tt-name`. Inside tmux the default is a horizontal split that gives the new pane 70% of the width (caller stays visible at 30% on the left); pass `--split window` to revert to the legacy "new window" behavior. `--split h\|v` keeps tmux's native 50/50 unless `--size N` overrides it; `--size N` also overrides the default 70% under the implicit split. By default the command is wrapped as `<cmd>; exec $SHELL` so the pane survives the command's exit and output is preserved; pass `--bare` for raw `tmux split-window <cmd>` semantics. |
 | `send` | `<TEXT> [--enter] [--literal] [--verify]` | Sends keys; `--enter` appends Enter (sent once). Add `--verify` to capture-and-retry Enter up to 3 times if the bottom line is unchanged (opt-in: can double-submit to non-echoing programs like password prompts). |
 | `capture` | `[--lines N \| --all]` | Captures visible pane by default; `--all` captures full history. |
 | `execute` | `<CMD> [--timeout SEC] [--no-wait]` | Wraps a command with markers and reports output, duration, timeout, and exit code. |
 | `wait-idle` | `[--idle-seconds F] [--timeout SEC] [--until REGEX]` | Waits for quiet output, explicit regex, or timeout. |
 | `prompt` | `<TEXT> [--idle-seconds F] [--timeout SEC] [--until REGEX]` | Sends text plus Enter, waits, then returns output since the prompt. |
-| `spawn-agent` | `<AGENT> [--access PROFILE] [--name NAME] [--cwd PATH] [--split h\|v] [--size N] [-- EXTRA_ARGS...]` | Launches a configured agent profile and registers `@tt-agent`/`@tt-access`. |
+| `spawn-agent` | `<AGENT> [--access PROFILE] [--name NAME] [--cwd PATH] [--split h\|v\|window] [--size N] [--bare] [-- EXTRA_ARGS...]` | Launches a configured agent profile and registers `@tt-agent`/`@tt-access`. Same default-split (30:70 horizontal) and `--split window` opt-out as `launch`. Same keep-open wrap as `launch`; pass `--bare` to opt out. The `agent=` column from `list` reflects the *original* launch — if the agent crashes the pane survives as a plain shell, but `@tt-agent` is not cleared. |
 | `kill` | `[--target name\|id]` | Kills the target pane. |
 | `interrupt` | `[--target name\|id]` | Sends `C-c`. |
 | `escape` | `[--target name\|id]` | Sends `Escape`. |

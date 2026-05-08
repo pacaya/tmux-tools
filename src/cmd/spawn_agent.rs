@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 use crate::{
     agents::Registry,
-    cmd::launch::{launch_pane, resolve_launch_target, Split},
+    cmd::launch::{launch_pane, resolve_launch_target, resolve_layout, wrap_keep_open, Layout, Split},
     format::{display_value, Format},
     names,
     util::rfc3339_utc_now,
@@ -28,6 +28,11 @@ pub struct SpawnAgentArgs {
     pub(crate) split: Option<Split>,
     #[arg(long, value_name = "N")]
     pub(crate) size: Option<u32>,
+    /// Skip the keep-alive shell wrap and run the agent bare. The pane closes
+    /// the instant the agent exits (or fails to start). Useful when you want
+    /// today's tmux-default behavior.
+    #[arg(long, action = clap::ArgAction::SetTrue)]
+    pub(crate) bare: bool,
     #[command(flatten)]
     pub(crate) common: CommonArgs,
 }
@@ -47,19 +52,26 @@ pub fn run(args: &SpawnAgentArgs) -> Result<()> {
     let registry = Registry::load()?;
     let (binary, profile_args) = registry.launch_argv(&args.agent, args.access.as_deref())?;
     let argv = launch_argv(binary.clone(), profile_args, &args.extra_args);
-    let cmd = launch_command(&argv, args.cwd.as_ref())?;
-    let split_arg = args.split.map(Split::tmux_flag);
+    let cmd = launch_command(&argv, args.cwd.as_ref(), args.bare)?;
+    let layout = resolve_layout(
+        args.split,
+        args.size,
+        args.common.target.is_some(),
+        args.common.session.is_some(),
+        args.common.window.is_some(),
+    );
+    let (split_arg, size_arg) = layout.split_args();
     let launch_target = resolve_launch_target(
         args.common.target.as_ref().map(|target| target.as_str()),
         args.common.session.as_deref(),
         args.common.window.as_deref(),
-        split_arg.is_some(),
+        matches!(layout, Layout::Split { .. }),
     )?;
     let pane_id = launch_pane(
         &cmd,
         args.name.as_deref(),
         split_arg,
-        args.size,
+        size_arg,
         launch_target.as_ref(),
     )?;
     let launched_at = rfc3339_utc_now()?;
@@ -86,23 +98,41 @@ fn launch_argv(binary: String, profile_args: Vec<String>, extra_args: &[String])
         .collect()
 }
 
-fn launch_command(argv: &[String], cwd: Option<&PathBuf>) -> Result<String> {
+fn launch_command(argv: &[String], cwd: Option<&PathBuf>, bare: bool) -> Result<String> {
     let command = argv
         .iter()
         .map(|arg| shell_quote(arg))
         .collect::<Vec<_>>()
         .join(" ");
 
-    if let Some(cwd) = cwd {
-        let cwd = cwd
-            .to_str()
-            .ok_or_else(|| anyhow!("--cwd path is not valid UTF-8: {}", cwd.display()))?;
-        // `cd --` makes the next argument a positional path even if it starts
-        // with `-`, so a relative cwd like `-foo` is not parsed as a flag.
-        Ok(format!("cd -- {} && {command}", shell_quote(cwd)))
-    } else {
-        Ok(command)
+    // `cd --` makes the next argument a positional path even if it starts
+    // with `-`, so a relative cwd like `-foo` is not parsed as a flag.
+    let cwd_prefix = match cwd {
+        Some(cwd) => {
+            let cwd = cwd
+                .to_str()
+                .ok_or_else(|| anyhow!("--cwd path is not valid UTF-8: {}", cwd.display()))?;
+            Some(format!("cd -- {} &&", shell_quote(cwd)))
+        }
+        None => None,
+    };
+
+    if bare {
+        return Ok(match cwd_prefix {
+            Some(prefix) => format!("{prefix} {command}"),
+            None => command,
+        });
     }
+
+    // Keep the optional `cd` in the outer shell so the fallback shell inherits
+    // the cwd if `cd` succeeded. `&&` binds tighter than `;`, so `cd && (cmd);
+    // exec <shell>` runs the exec whether `cd` or the inner command fails —
+    // output is preserved in every branch.
+    let wrapped = wrap_keep_open(&command);
+    Ok(match cwd_prefix {
+        Some(prefix) => format!("{prefix} {wrapped}"),
+        None => wrapped,
+    })
 }
 
 pub(crate) fn shell_quote(value: &str) -> String {

@@ -19,10 +19,24 @@
 
 use std::io::Read;
 use std::process::{Command, Stdio};
+use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
 const BIN: &str = env!("CARGO_BIN_EXE_tmux-tools");
+
+/// Serializes the integration suite. Each test calls `tmux-tools launch ...`
+/// against the test runner's pane via `tmux split-window`; running multiple
+/// tests in parallel races on the shared tmux server (concurrent splits
+/// against the same pane hit tmux's size constraints and pane-id lookups
+/// see partially-registered panes). Hold this guard for the lifetime of a
+/// test to keep things deterministic under default `cargo test`.
+fn serial_guard() -> MutexGuard<'static, ()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+}
 
 #[derive(Debug)]
 struct CmdOutput {
@@ -169,6 +183,8 @@ fn wait_for_pane_ready(name: &str, timeout: Duration) {
 
 #[test]
 fn full_smoke() {
+    let _serial = serial_guard();
+
     // Skip entirely if tmux is missing — there is nothing meaningful to test.
     if Command::new("tmux").arg("-V").output().is_err() {
         eprintln!("SKIP: tmux not on PATH");
@@ -188,12 +204,18 @@ fn full_smoke() {
     let mut deferred_failures: Vec<String> = Vec::new();
 
     // ---- 1. launch ---------------------------------------------------------
+    // `--bare` so the launched bash is exactly what the test inspects below;
+    // the default keep-open wrap would replace bash with `$SHELL` if that bash
+    // ever exited. Bash never exits during this test (we only send commands to
+    // it), but `--bare` makes the intent explicit and removes a future
+    // debugger's surprise.
     let launched = run_bin(&[
         "launch",
         "--cmd",
         "bash --norc --noprofile",
         "--name",
         &shell_name,
+        "--bare",
         "--format",
         "json",
     ]);
@@ -459,4 +481,104 @@ fn full_smoke() {
             deferred_failures.len()
         );
     }
+}
+
+/// Default `launch` wraps the command so the pane survives its exit. A
+/// non-zero-exit command should leave its output visible in scrollback.
+#[test]
+fn launch_keeps_pane_alive_after_cmd_exit() {
+    let _serial = serial_guard();
+
+    if Command::new("tmux").arg("-V").output().is_err() {
+        eprintln!("SKIP: tmux not on PATH");
+        return;
+    }
+
+    let pid = std::process::id();
+    let name = format!("keepopen-{pid}");
+    let mut guard = PaneGuard::new();
+    guard.track(&name);
+
+    // Command prints "hello" then exits non-zero. Without the keep-open wrap,
+    // tmux would reap the pane and "hello" would be lost.
+    let launched = run_bin(&[
+        "launch",
+        "--cmd",
+        "printf hello; exit 1",
+        "--name",
+        &name,
+        "--format",
+        "json",
+    ]);
+    launched.assert_success("launch with default keep-open wrap");
+
+    wait_for_pane_ready(&name, Duration::from_secs(5));
+
+    // Give the wrap shell a moment to take over after `exit 1`.
+    thread::sleep(Duration::from_millis(500));
+
+    let cap = run_bin(&[
+        "capture",
+        "--target",
+        &name,
+        "--lines",
+        "20",
+        "--format",
+        "raw",
+    ]);
+    cap.assert_success("capture after wrapped cmd exit");
+    assert!(
+        cap.stdout.contains("hello"),
+        "capture should retain output from the exited command:\n{}",
+        cap.stdout
+    );
+
+    assert!(
+        pane_id_by_name(&name).is_some(),
+        "pane should still be alive after the wrapped command exited"
+    );
+}
+
+/// `--bare` opts out of the wrap. The pane should disappear once the launched
+/// command exits.
+#[test]
+fn launch_bare_pane_closes_when_cmd_exits() {
+    let _serial = serial_guard();
+
+    if Command::new("tmux").arg("-V").output().is_err() {
+        eprintln!("SKIP: tmux not on PATH");
+        return;
+    }
+
+    let pid = std::process::id();
+    let name = format!("bare-{pid}");
+
+    // `sleep 0.3` keeps the pane alive long enough for `launch` to register
+    // `@tt-name` before tmux reaps it.
+    let launched = run_bin(&[
+        "launch",
+        "--cmd",
+        "sleep 0.3",
+        "--bare",
+        "--name",
+        &name,
+        "--format",
+        "json",
+    ]);
+    launched.assert_success("launch --bare");
+
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < deadline {
+        if pane_id_by_name(&name).is_none() {
+            return;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+
+    // Best-effort cleanup if the pane unexpectedly outlived the sleep.
+    let _ = run_bin(&["kill", "--target", &name]);
+    panic!(
+        "bare pane {name} should have closed after the command exited; \
+         it was still listed after 3s"
+    );
 }

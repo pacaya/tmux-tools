@@ -24,6 +24,10 @@ pub struct LaunchArgs {
     pub(crate) split: Option<Split>,
     #[arg(long, value_name = "N")]
     pub(crate) size: Option<u8>,
+    /// Skip the keep-alive shell wrap and run the command bare. The pane closes
+    /// the instant the command exits, just like raw `tmux split-window <cmd>`.
+    #[arg(long, action = clap::ArgAction::SetTrue)]
+    pub(crate) bare: bool,
     #[command(flatten)]
     pub(crate) common: CommonArgs,
 }
@@ -34,6 +38,25 @@ pub enum Split {
     H,
     #[value(name = "v")]
     V,
+    /// Force the legacy "new window" behavior even though the implicit default
+    /// inside tmux is now a horizontal split. Outside tmux this is the only
+    /// behavior available regardless.
+    #[value(name = "window")]
+    Window,
+}
+
+/// Resolved layout for a launch invocation. Computed up-front so both
+/// `launch` and `spawn-agent` apply the same default rules.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Layout {
+    /// Use `tmux split-window` with the given direction flag and optional size
+    /// percentage for the new pane.
+    Split {
+        direction: &'static str,
+        size: Option<u32>,
+    },
+    /// Use `tmux new-window`.
+    NewWindow,
 }
 
 #[derive(Serialize)]
@@ -44,19 +67,32 @@ struct LaunchJson<'a> {
 }
 
 pub fn run(args: &LaunchArgs) -> Result<()> {
-    let split_arg = args.split.map(Split::tmux_flag);
+    let layout = resolve_layout(
+        args.split,
+        args.size.map(u32::from),
+        args.common.target.is_some(),
+        args.common.session.is_some(),
+        args.common.window.is_some(),
+    );
+    let (split_arg, size_arg) = layout.split_args();
     let launch_target = resolve_launch_target(
         args.common.target.as_ref().map(|target| target.as_str()),
         args.common.session.as_deref(),
         args.common.window.as_deref(),
-        split_arg.is_some(),
+        matches!(layout, Layout::Split { .. }),
     )?;
 
+    let cmd_for_tmux = if args.bare {
+        args.cmd.clone()
+    } else {
+        wrap_keep_open(&args.cmd)
+    };
+
     let pane_id = launch_pane(
-        &args.cmd,
+        &cmd_for_tmux,
         args.name.as_deref(),
         split_arg,
-        args.size.map(u32::from),
+        size_arg,
         launch_target.as_ref(),
     )?;
     let launched_at = rfc3339_utc_now()?;
@@ -112,6 +148,24 @@ fn session_for_pane(pane_id: &str) -> Result<String> {
         ));
     }
     Ok(session)
+}
+
+/// Wrap a command so the pane survives its exit by `exec`-ing into a fallback
+/// shell. Without this, `tmux split-window <cmd>` reaps the pane the instant
+/// `<cmd>` exits — taking error output with it.
+///
+/// The user's command runs in a `(...)` subshell so an embedded `exit` only
+/// terminates that subshell, not the wrapping shell that performs the `exec`.
+/// The fallback shell is taken from `$SHELL`, falling back to `/bin/sh`. We
+/// resolve it at tmux-tools launch time and embed the literal path so the
+/// wrapper string only relies on POSIX `(...)`, `;`, and `exec`, which every
+/// shell tmux might dispatch via `default-shell -c` understands.
+pub(crate) fn wrap_keep_open(cmd: &str) -> String {
+    let shell = std::env::var("SHELL")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "/bin/sh".to_owned());
+    format!("({cmd}); exec {shell}")
 }
 
 pub fn launch_pane(
@@ -255,11 +309,61 @@ fn render_output(args: &LaunchArgs, pane_id: &str, launched_at: &str) -> Result<
     Ok(())
 }
 
-impl Split {
-    pub(crate) fn tmux_flag(self) -> &'static str {
+impl Layout {
+    /// Project a layout into the `(split_flag, size)` pair that `launch_pane`
+    /// expects.
+    pub(crate) fn split_args(self) -> (Option<&'static str>, Option<u32>) {
         match self {
-            Self::H => "-h",
-            Self::V => "-v",
+            Layout::Split { direction, size } => (Some(direction), size),
+            Layout::NewWindow => (None, None),
+        }
+    }
+}
+
+/// Resolve the effective layout from the user's flags. The implicit default
+/// inside tmux is a horizontal split with the new pane occupying 70% of the
+/// width — so that the caller (compressed to 30%) and the callee remain
+/// visible side-by-side. `--split window` opts back into the legacy
+/// new-window behavior. `--split h|v` keeps tmux's native 50/50 default
+/// unless `--size` is supplied.
+///
+/// `--session`/`--window` without `--target` indicates window-scope intent
+/// (there is no caller pane to split into), so we fall back to a new window
+/// even under the implicit default.
+///
+/// Outside tmux there is no current pane to split, so the result is always
+/// [`Layout::NewWindow`] regardless of the flags. (Explicit `--split h|v`
+/// without an explicit `--target` is silently absorbed by the launch
+/// dispatcher, which falls back to creating a new window in the managed
+/// session — preserving long-standing behavior.)
+pub(crate) fn resolve_layout(
+    split: Option<Split>,
+    size: Option<u32>,
+    has_target: bool,
+    has_session: bool,
+    has_window: bool,
+) -> Layout {
+    match split {
+        Some(Split::H) => Layout::Split {
+            direction: "-h",
+            size,
+        },
+        Some(Split::V) => Layout::Split {
+            direction: "-v",
+            size,
+        },
+        Some(Split::Window) => Layout::NewWindow,
+        None => {
+            let in_tmux = env::var_os("TMUX").is_some();
+            let window_scope_implied = !has_target && (has_session || has_window);
+            if in_tmux && !window_scope_implied {
+                Layout::Split {
+                    direction: "-h",
+                    size: size.or(Some(70)),
+                }
+            } else {
+                Layout::NewWindow
+            }
         }
     }
 }
