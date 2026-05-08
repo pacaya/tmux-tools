@@ -615,6 +615,187 @@ fn capture_lines_tails_visible_pane() {
     }
 }
 
+/// Regression: when several tmux sessions are opened in a short window by
+/// other means, `tmux-tools launch` (no target flags) used to split whichever
+/// pane was most-recently-active on the tmux server — i.e. the decoy session
+/// — instead of the calling pane. Fix passes `$TMUX_PANE` as `-t` explicitly.
+///
+/// The test simulates the bug by:
+///   1. creating a `harness` session whose pane id we pretend is the caller,
+///   2. creating a `decoy` session afterward (so tmux considers it the
+///      most-recently-active pane),
+///   3. invoking `tmux-tools launch` with `TMUX` and `TMUX_PANE` set to point
+///      at the harness pane,
+///   4. asserting the new pane's `#{session_name}` is the harness session,
+///      not the decoy.
+#[test]
+fn launch_targets_calling_pane_not_most_recent_client() {
+    let _serial = serial_guard();
+
+    if Command::new("tmux").arg("-V").output().is_err() {
+        eprintln!("SKIP: tmux not on PATH");
+        return;
+    }
+
+    let pid = std::process::id();
+    let harness_session = format!("tt-harness-{pid}");
+    let decoy_session = format!("tt-decoy-{pid}");
+    let name = format!("calling-{pid}");
+
+    struct SessionGuard(String);
+    impl Drop for SessionGuard {
+        fn drop(&mut self) {
+            let _ = Command::new("tmux")
+                .args(["kill-session", "-t", &self.0])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        }
+    }
+    let _harness_guard = SessionGuard(harness_session.clone());
+    let _decoy_guard = SessionGuard(decoy_session.clone());
+    let mut pane_guard = PaneGuard::new();
+    pane_guard.track(&name);
+
+    // Best-effort cleanup of any lingering sessions from a previous run with
+    // the same pid (highly unlikely but cheap).
+    let _ = run_tmux(&["kill-session", "-t", &harness_session]);
+    let _ = run_tmux(&["kill-session", "-t", &decoy_session]);
+
+    // 1. Create the harness session first, then capture its pane id.
+    run_tmux(&["new-session", "-d", "-s", &harness_session]).assert_success("create harness session");
+    let harness_pane = run_tmux(&[
+        "display-message",
+        "-p",
+        "-t",
+        &harness_session,
+        "#{pane_id}",
+    ]);
+    harness_pane.assert_success("query harness pane id");
+    let harness_pane_id = harness_pane.stdout.trim().to_owned();
+    assert!(
+        harness_pane_id.starts_with('%'),
+        "harness pane id must look like %N: {harness_pane_id}"
+    );
+
+    // 2. Create the decoy session AFTER, so it becomes the
+    //    most-recently-active session on the server. With TMUX_PANE absent
+    //    (next step) and no `-t`, `tmux split-window` would land here —
+    //    that's the bug.
+    run_tmux(&["new-session", "-d", "-s", &decoy_session]).assert_success("create decoy session");
+
+    // 3. Build a TMUX env var pointing at the *harness* session, but
+    //    deliberately leave TMUX_PANE *unset*. Format:
+    //    "<socket>,<server_pid>,<session_id_numeric>". This is the most
+    //    realistic reproduction of the user-reported bug: TMUX is set
+    //    correctly to the caller's session but TMUX_PANE was lost somewhere
+    //    in process spawning (e.g. when a long-lived agent inherits TMUX
+    //    from a wrapper). Without our fix, tmux's implicit "current pane"
+    //    falls back to most-recently-active across the whole server — i.e.
+    //    the decoy.
+    let socket_q = run_tmux(&["display-message", "-p", "#{socket_path}"]);
+    socket_q.assert_success("query socket_path");
+    let socket = socket_q.stdout.trim().to_owned();
+    let server_pid_q = run_tmux(&["display-message", "-p", "#{pid}"]);
+    server_pid_q.assert_success("query server pid");
+    let server_pid = server_pid_q.stdout.trim().to_owned();
+    let harness_session_id_q = run_tmux(&[
+        "display-message",
+        "-p",
+        "-t",
+        &harness_session,
+        "#{session_id}",
+    ]);
+    harness_session_id_q.assert_success("query harness session_id");
+    let harness_session_id_num = harness_session_id_q
+        .stdout
+        .trim()
+        .trim_start_matches('$')
+        .to_owned();
+    let tmux_env = format!("{socket},{server_pid},{harness_session_id_num}");
+
+    // Avoid using `harness_pane_id` directly via TMUX_PANE: we want this
+    // test to simulate the case where TMUX_PANE is missing. Suppress the
+    // unused-binding warning explicitly.
+    let _ = &harness_pane_id;
+
+    // Invoke `tmux-tools launch` with TMUX set but TMUX_PANE explicitly
+    // *unset*. The fix must still resolve the calling session via TMUX and
+    // pass `-t` so the split lands in the harness, not in the decoy.
+    let mut child = Command::new(BIN)
+        .args([
+            "launch",
+            "--cmd",
+            "sleep 30",
+            "--name",
+            &name,
+            "--bare",
+            "--format",
+            "json",
+        ])
+        .env("TMUX", &tmux_env)
+        .env_remove("TMUX_PANE")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap_or_else(|e| panic!("failed to spawn {BIN} launch: {e}"));
+
+    let started = Instant::now();
+    let timeout = Duration::from_secs(15);
+    let (status, stdout, stderr) = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let mut stdout = String::new();
+                let mut stderr = String::new();
+                if let Some(mut s) = child.stdout.take() {
+                    let _ = s.read_to_string(&mut stdout);
+                }
+                if let Some(mut s) = child.stderr.take() {
+                    let _ = s.read_to_string(&mut stderr);
+                }
+                break (status.code().unwrap_or(-1), stdout, stderr);
+            }
+            Ok(None) => {
+                if started.elapsed() > timeout {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    panic!("tmux-tools launch timed out after {timeout:?}");
+                }
+                thread::sleep(Duration::from_millis(50));
+            }
+            Err(e) => panic!("error waiting for tmux-tools launch: {e}"),
+        }
+    };
+
+    assert_eq!(
+        status, 0,
+        "launch should succeed with TMUX_PANE override; stdout={stdout} stderr={stderr}"
+    );
+    let launch_json: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("launch JSON should parse");
+    let new_pane = launch_json
+        .get("pane_id")
+        .and_then(|v| v.as_str())
+        .expect("launch JSON must include pane_id")
+        .to_owned();
+
+    // 4. The new pane must live in the harness session, not the decoy.
+    let session_q = run_tmux(&[
+        "display-message",
+        "-p",
+        "-t",
+        &new_pane,
+        "#{session_name}",
+    ]);
+    session_q.assert_success("query session_name for new pane");
+    let actual_session = session_q.stdout.trim();
+    assert_eq!(
+        actual_session, harness_session,
+        "new pane should land in harness session ({harness_session}), not {actual_session} \
+         (decoy was {decoy_session}) — regression for $TMUX_PANE-based targeting"
+    );
+}
+
 /// `--bare` opts out of the wrap. The pane should disappear once the launched
 /// command exits.
 #[test]

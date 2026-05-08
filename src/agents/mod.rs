@@ -96,10 +96,6 @@ impl Registry {
 
         Ok((agent_spec.binary.clone(), profile.args.clone()))
     }
-
-    pub fn list(&self) -> impl Iterator<Item = &AgentSpec> {
-        self.agents.values()
-    }
 }
 
 #[derive(Debug, Deserialize)]

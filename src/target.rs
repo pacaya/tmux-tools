@@ -67,7 +67,43 @@ pub(crate) fn scoped_target(session: Option<&str>, window: Option<&str>) -> Stri
 }
 
 fn current_pane() -> Result<String> {
+    // Prefer $TMUX_PANE: tmux sets it per-pane and child processes inherit it,
+    // so it identifies the *calling* pane unambiguously. `tmux display -p` with
+    // no `-t` falls back to the most-recently-active pane on the server, which
+    // races when other tmux sessions/clients are opened concurrently.
+    if let Ok(pane) = env::var("TMUX_PANE") {
+        let trimmed = pane.trim();
+        if !trimmed.is_empty() {
+            return Ok(trimmed.to_owned());
+        }
+    }
+    // Fallback: parse $TMUX (`<socket>,<server_pid>,<session_id_numeric>`) to
+    // recover at least the caller's *session*, and resolve that session's
+    // active pane. Without this, a bare `tmux display -p` would return the
+    // most-recently-active pane across all sessions.
+    if let Some(session_target) = caller_session_from_tmux_env() {
+        if let Ok(pane) = display_pane_id(&[
+            "display", "-p", "-t", &session_target, "#{pane_id}",
+        ]) {
+            return Ok(pane);
+        }
+    }
     display_pane_id(&["display", "-p", "#{pane_id}"])
+}
+
+/// Extract the caller's session-id target (e.g. `$3`) from the `$TMUX` env
+/// var. The format is `<socket>,<server_pid>,<session_id_numeric>`; the last
+/// comma-separated field is the numeric session id (no leading `$`).
+fn caller_session_from_tmux_env() -> Option<String> {
+    let tmux = env::var("TMUX").ok()?;
+    if tmux.is_empty() {
+        return None;
+    }
+    let session_id_num = tmux.rsplit(',').next()?.trim();
+    if session_id_num.is_empty() || !session_id_num.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    Some(format!("${session_id_num}"))
 }
 
 /// Return the pane id of the pane that invoked `tmux-tools`, when running

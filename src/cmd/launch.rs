@@ -193,10 +193,18 @@ pub fn launch_pane(
         }
         None => {
             if env::var_os("TMUX").is_some() {
+                // Pin the target to the calling pane via $TMUX_PANE. Without
+                // an explicit `-t`, tmux operates on the most-recently-active
+                // pane on the server, which races when other sessions are
+                // opened concurrently — the new pane lands in the wrong
+                // session.
+                let calling = target::calling_pane_id().ok_or_else(|| {
+                    anyhow!("$TMUX is set but no calling pane id is available")
+                })?;
                 if let Some(split) = split {
-                    split_window_args(cmd, split, size, None)
+                    split_window_args(cmd, split, size, Some(&calling))
                 } else {
-                    new_window_args(cmd, None)
+                    new_window_args(cmd, Some(&calling))
                 }
             } else {
                 // Outside tmux: ensure the managed session exists, then add a
