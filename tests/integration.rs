@@ -539,6 +539,82 @@ fn launch_keeps_pane_alive_after_cmd_exit() {
     );
 }
 
+/// `capture --lines N` is documented as a tail. Regression for the bug where
+/// it was wired as `tmux capture-pane -S -N -E -` (a *lookback* — include N
+/// rows of scrollback before the visible pane) so on a fresh pane all small
+/// N values returned the same full visible buffer.
+#[test]
+fn capture_lines_tails_visible_pane() {
+    let _serial = serial_guard();
+
+    if Command::new("tmux").arg("-V").output().is_err() {
+        eprintln!("SKIP: tmux not on PATH");
+        return;
+    }
+
+    let pid = std::process::id();
+    let name = format!("tail-{pid}");
+    let mut guard = PaneGuard::new();
+    guard.track(&name);
+
+    let launched = run_bin(&[
+        "launch",
+        "--cmd",
+        "bash --norc --noprofile",
+        "--name",
+        &name,
+        "--bare",
+        "--format",
+        "json",
+    ]);
+    launched.assert_success("launch tail pane");
+
+    wait_for_pane_ready(&name, Duration::from_secs(5));
+
+    let sent = run_bin(&[
+        "send",
+        "--target",
+        &name,
+        "for i in $(seq 1 30); do echo line-$i; done",
+        "--enter",
+    ]);
+    sent.assert_success("send seq 1..30 burst");
+
+    thread::sleep(Duration::from_millis(500));
+
+    let cap = run_bin(&[
+        "capture",
+        "--target",
+        &name,
+        "--lines",
+        "5",
+        "--format",
+        "raw",
+    ]);
+    cap.assert_success("capture --lines 5 after 30-line burst");
+
+    // The tail also includes the trailing shell prompt, so `--lines 5` yields
+    // ~4 numeric lines + the prompt. Assert the latest output is present and
+    // that earlier lines are absent — the latter is the regression signal:
+    // the buggy lookback wiring would have included the entire visible pane,
+    // which contains every `line-1` … `line-30` row.
+    for tail_line in ["line-29", "line-30"] {
+        assert!(
+            cap.stdout.contains(tail_line),
+            "capture --lines 5 should include {tail_line}; got:\n{}",
+            cap.stdout
+        );
+    }
+    for early_line in ["line-1\n", "line-10", "line-20"] {
+        assert!(
+            !cap.stdout.contains(early_line),
+            "capture --lines 5 must not include {early_line:?} \
+             (proves we tailed rather than captured the whole visible pane); got:\n{}",
+            cap.stdout
+        );
+    }
+}
+
 /// `--bare` opts out of the wrap. The pane should disappear once the launched
 /// command exits.
 #[test]

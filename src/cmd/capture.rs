@@ -25,10 +25,35 @@ pub fn run(args: &CaptureArgs) -> Result<()> {
     }
 
     let tmux_args = build_tmux_capture_args(&pane, args.lines, args.all);
-    let output = tmux::run_checked_owned(&tmux_args)?;
-    let rendered = crate::format::render_capture(&output, args.common.format);
+    let raw = tmux::run_checked_owned(&tmux_args)?;
+    let to_render = match (args.lines, args.all) {
+        (Some(n), false) if n > 0 => tail_lines(&raw, n),
+        _ => raw,
+    };
+    let rendered = crate::format::render_capture(&to_render, args.common.format);
 
     render_output(args.common.format, &pane, &rendered)
+}
+
+/// Trim trailing blank/whitespace-only rows from a raw tmux capture, then
+/// keep only the last `n` lines. Anchors the tail at the bottom of pane
+/// content rather than the literal bottom of the visible buffer, so a sparse
+/// pane with the cursor near the top doesn't return `n` blank rows.
+fn tail_lines(raw: &str, n: u32) -> String {
+    if n == 0 {
+        return String::new();
+    }
+    let mut lines: Vec<&str> = raw.lines().collect();
+    while lines.last().is_some_and(|line| line.trim().is_empty()) {
+        lines.pop();
+    }
+    if lines.is_empty() {
+        return String::new();
+    }
+    let start = lines.len().saturating_sub(n as usize);
+    let mut out = lines[start..].join("\n");
+    out.push('\n');
+    out
 }
 
 fn build_tmux_capture_args(pane: &str, lines: Option<u32>, all: bool) -> Vec<String> {
@@ -99,5 +124,33 @@ mod tests {
     #[test]
     fn all_captures_from_start_of_history() {
         assert_eq!(build_capture_args(None, true), vec!["-p", "-S", "-"]);
+    }
+
+    #[test]
+    fn tail_lines_takes_last_n_when_buffer_has_more() {
+        assert_eq!(tail_lines("a\nb\nc\nd\ne\n", 3), "c\nd\ne\n");
+    }
+
+    #[test]
+    fn tail_lines_returns_all_when_n_exceeds_buffer() {
+        assert_eq!(tail_lines("a\nb\nc\nd\ne\n", 10), "a\nb\nc\nd\ne\n");
+    }
+
+    #[test]
+    fn tail_lines_strips_trailing_blank_lines_before_tailing() {
+        assert_eq!(
+            tail_lines("alpha\nbeta\ngamma\n   \n\n\n", 2),
+            "beta\ngamma\n"
+        );
+    }
+
+    #[test]
+    fn tail_lines_zero_returns_empty() {
+        assert_eq!(tail_lines("a\nb\nc\n", 0), "");
+    }
+
+    #[test]
+    fn tail_lines_all_blank_input_returns_empty() {
+        assert_eq!(tail_lines("\n\n   \n", 5), "");
     }
 }
