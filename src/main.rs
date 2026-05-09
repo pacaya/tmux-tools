@@ -13,7 +13,8 @@ mod util;
 use crate::cmd::{
     capture::CaptureArgs, escape::EscapeArgs, execute::ExecuteArgs, interrupt::InterruptArgs,
     kill::KillArgs, launch::LaunchArgs, list::ListArgs, prompt::PromptArgs, send::SendArgs,
-    spawn_agent::SpawnAgentArgs, status::StatusArgs, wait_idle::WaitIdleArgs,
+    send_enter::SendEnterArgs, spawn_agent::SpawnAgentArgs, status::StatusArgs,
+    wait_idle::WaitIdleArgs,
 };
 pub use crate::format::Format;
 
@@ -29,6 +30,8 @@ struct Cli {
 enum Commands {
     Launch(LaunchArgs),
     Send(SendArgs),
+    #[command(name = "send-enter")]
+    SendEnter(SendEnterArgs),
     Capture(CaptureArgs),
     Execute(ExecuteArgs),
     #[command(name = "wait-idle")]
@@ -82,6 +85,7 @@ fn main() -> Result<()> {
     match cli.command {
         Commands::Launch(args) => crate::cmd::launch::run(&args)?,
         Commands::Send(args) => crate::cmd::send::run(&args)?,
+        Commands::SendEnter(args) => crate::cmd::send_enter::run(&args)?,
         Commands::Capture(args) => crate::cmd::capture::run(&args)?,
         Commands::Execute(args) => crate::cmd::execute::run(&args)?,
         Commands::WaitIdle(args) => crate::cmd::wait_idle::run(&args)?,

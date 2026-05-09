@@ -45,6 +45,7 @@ Most pane verbs accept `--target <name|id>`, `--format concise|json|raw`, `--ses
 | `kill` | `[--target name\|id]` | Kills the target pane. |
 | `interrupt` | `[--target name\|id]` | Sends `C-c`. |
 | `escape` | `[--target name\|id]` | Sends `Escape`. |
+| `send-enter` | `[--target name\|id]` | Sends `Enter`. Same `--force`/`--any` guards as `kill`. Useful when an agent didn't process the Enter from `send --enter`/`prompt`. |
 | `list` | `[--session NAME] [--all]` | Lists panes in the managed/current scope by default. |
 | `status` | `[--target name\|id]` | Shows session, window, pane, name, and agent metadata. |
 

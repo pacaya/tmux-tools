@@ -40,6 +40,8 @@ Most pane verbs accept `--target <name|id>`, `--format concise|json|raw`, `--ses
 
 `escape`: send `Escape` to the target pane. Same `--force` (self-pane) and `--any` (non-owned or cross-cwd) safety guards as `kill`. Example: `tmux-tools escape --target claude-plan`.
 
+`send-enter`: send a standalone `Enter` to the target pane. Same `--force` (self-pane) and `--any` (non-owned or cross-cwd) safety guards as `kill`. Use when an agent didn't act on the Enter that `send --enter` or `prompt` already submitted; this nudges only Enter, never re-types the prompt. Example: `tmux-tools send-enter --target codex-helper`.
+
 `list [--session NAME] [--all]`: list panes with registered name, agent, session, pane label, access, launch time, and status. By default it lists the managed `tmux-tools` session plus the current session when inside tmux. Example: `tmux-tools list --format json`.
 
 `status [--target name|id]`: show current or target pane status. With no target outside tmux, it reports `not in tmux`. Example: `tmux-tools status --target shell --format json`.

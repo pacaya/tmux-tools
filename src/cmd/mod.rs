@@ -8,6 +8,7 @@ pub mod list;
 pub mod prompt;
 pub mod safety;
 pub mod send;
+pub mod send_enter;
 pub mod spawn_agent;
 pub mod status;
 pub mod wait_idle;
