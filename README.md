@@ -31,7 +31,7 @@ $ tmux-tools prompt --target codex-helper "explain src/main.rs" --idle-seconds 3
 
 ## Verb Summary
 
-Most pane verbs accept `--target <name|id>`, `--format concise|json|raw`, `--session NAME`, and `--window NAME`. Defaults: `--format concise`, `--idle-seconds 2.0`, `--timeout 120.0`.
+Most pane verbs accept `--target <name|id>`, `--format concise|json|raw`, `--session NAME`, and `--window NAME`. Defaults: `--format concise`, `--idle-seconds 2.0`, `--ready-stable-seconds 2.0`, `--timeout 120.0`.
 
 | Verb | Signature | Notes |
 | --- | --- | --- |
@@ -39,8 +39,8 @@ Most pane verbs accept `--target <name|id>`, `--format concise|json|raw`, `--ses
 | `send` | `<TEXT> [--enter] [--literal] [--verify]` | Sends keys; `--enter` appends Enter (sent once). Add `--verify` to capture-and-retry Enter up to 3 times if the bottom line is unchanged (opt-in: can double-submit to non-echoing programs like password prompts). |
 | `capture` | `[--lines N \| --all]` | Captures visible pane by default; `--all` captures full history. |
 | `execute` | `<CMD> [--timeout SEC] [--no-wait]` | Wraps a command with markers and reports output, duration, timeout, and exit code. |
-| `wait-idle` | `[--idle-seconds F] [--timeout SEC] [--until REGEX]` | Waits for quiet output, explicit regex, or timeout. |
-| `prompt` | `<TEXT> [--idle-seconds F] [--timeout SEC] [--until REGEX]` | Sends text plus Enter, waits, then returns output since the prompt. |
+| `wait-idle` | `[--idle-seconds F] [--ready-stable-seconds F] [--timeout SEC] [--until REGEX]` | Waits for quiet output, explicit regex, or timeout. `--ready-stable-seconds` (default 2.0) is how long a `ready_regex` match must hold before completing. |
+| `prompt` | `<TEXT> [--idle-seconds F] [--ready-stable-seconds F] [--timeout SEC] [--until REGEX]` | Sends text plus Enter, waits, then returns output since the prompt. |
 | `spawn-agent` | `<AGENT> [--access PROFILE] [--name NAME] [--cwd PATH] [--split h\|v\|window] [--size N] [--bare] [-- EXTRA_ARGS...]` | Launches a configured agent profile and registers `@tt-agent`/`@tt-access`. Same default-split (30:70 horizontal) and `--split window` opt-out as `launch`. Same keep-open wrap as `launch`; pass `--bare` to opt out. The `agent=` column from `list` reflects the *original* launch — if the agent crashes the pane survives as a plain shell, but `@tt-agent` is not cleared. |
 | `kill` | `[--target name\|id]` | Kills the target pane. |
 | `interrupt` | `[--target name\|id]` | Sends `C-c`. |
@@ -123,6 +123,31 @@ args = ["--dangerously-skip-permissions"]
 ```
 
 `ready_regex` is tested against the bottom non-blank line of the pane by default. Some agents (e.g. Cursor) render a status/footer row *below* their input prompt; set `ready_lines = N` to test the regex against the bottom `N` non-blank lines instead (the regex matches if any of them match). Defaults to `1`.
+
+A `ready_regex` match must hold continuously for `--ready-stable-seconds` (default 2.0) before `wait-idle`/`prompt` complete with `ready_matched`. This debounce guards against a stale indicator that is visible for only a single poll — e.g. a previous turn's status line still showing right after a new prompt is submitted — triggering a premature, wrong completion. Set `--ready-stable-seconds 0` to fire on the first match (legacy behavior).
+
+### Detecting readiness from a custom Claude status line
+
+The built-in `claude` profile keys readiness off the permission-mode footer's idle-only `← for agents` suffix, which works on any install. If you customize Claude Code's status line (`~/.claude/statusline-command.sh`) to emit a Codex-style **state indicator** as the leading segment, you can point `claude`'s `ready_regex` at that instead for a cleaner signal. A typical indicator vocabulary, always rendered as `<indicator> | 🤖 <model> | …` on one line:
+
+- `⚡ working` — generating (keep waiting)
+- `🔐 permission` — awaiting an approval prompt (still busy)
+- `⚙ N bg (…)` — background tasks/subagents still running (still busy)
+- `⏸ waiting` — idle, awaiting input (**ready**)
+- `✓ done` — turn complete (**ready**)
+
+Point `claude`'s readiness at the two ready states in your `agents.toml`:
+
+```toml
+[claude]
+binary = "claude"
+ready_regex = "(✓ done|⏸ waiting) \\| 🤖"
+ready_lines = 15
+```
+
+The ` | 🤖` suffix anchors the match to the real status-line segment, so conversation text that merely contains "✓ done" can't false-match. `ready_lines = 15` is needed because background-task/subagent rows render *below* the status line — everything below the input box is status + task rows (no conversation text), and the ` | 🤖` anchor is unique, so widening the scan is safe. Pair it with the `--ready-stable-seconds` debounce so a stale `✓ done` lingering for one poll right after a new prompt can't false-complete.
+
+Note this is the practical local path, not a fully general signal: `⚡ working`, `🔐 permission`, and `⚙ N bg` deliberately do **not** match `ready_regex` — they're treated as "still busy" and fall back to idle/timeout detection (the pane goes static while awaiting a permission prompt or while background work runs, so idle detection eventually completes). Folding subagents/background tasks into a precise readiness signal is more involved.
 
 Built-ins: Codex and Claude both have `read-only`, `workspace-write`, and `full-access` (plus a safe `default` == `read-only`); Gemini has `default`. Always pass `--access` for Codex and Claude. `full-access` is dangerous and requires explicit user permission.
 

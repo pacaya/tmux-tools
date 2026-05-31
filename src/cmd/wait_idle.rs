@@ -7,7 +7,10 @@ use std::time::Duration;
 use crate::{
     agents,
     format::Format,
-    idle::{resolve_timeout, validate_seconds, wait_for_idle, IdleConfig, DEFAULT_READY_SCAN_LINES},
+    idle::{
+        resolve_timeout, validate_seconds, wait_for_idle, IdleConfig, DEFAULT_READY_SCAN_LINES,
+        DEFAULT_READY_STABLE_SECONDS,
+    },
     names, target, CommonArgs,
 };
 
@@ -22,6 +25,8 @@ pub(crate) struct ReadySignal {
 pub struct WaitIdleArgs {
     #[arg(long, default_value_t = 2.0, value_name = "F")]
     pub(crate) idle_seconds: f64,
+    #[arg(long, default_value_t = DEFAULT_READY_STABLE_SECONDS, value_name = "F")]
+    pub(crate) ready_stable_seconds: f64,
     #[arg(long, value_name = "SEC", help = "Timeout in seconds [default: 120, env: TMUX_TOOLS_TIMEOUT]")]
     pub(crate) timeout: Option<f64>,
     #[arg(long, value_name = "REGEX")]
@@ -49,6 +54,7 @@ pub fn run(args: &WaitIdleArgs) -> Result<()> {
         timeout: resolve_timeout(args.timeout, "timeout")?,
         ready_regex: ready.regex,
         ready_scan_lines: ready.scan_lines,
+        ready_stable_seconds: validate_seconds(args.ready_stable_seconds, "ready-stable-seconds")?,
         until_regex: args.until.as_deref().map(Regex::new).transpose()?,
     };
     let outcome = wait_for_idle(&pane, &cfg)?;
