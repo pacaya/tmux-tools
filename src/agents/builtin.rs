@@ -48,19 +48,25 @@ fn build_all() -> BTreeMap<String, AgentSpec> {
                 // while generating. Falls back to idle detection if absent.
                 ready_regex: Some("← for agents\\s*$".to_owned()),
                 ready_lines: Some(2),
+                // Mirrors the codex vocabulary (read-only / workspace-write /
+                // full-access) so one `--access` value works across agents, and
+                // maps each tier onto Claude's permission modes.
                 access_profiles: BTreeMap::from([
                     (
                         "default".to_owned(),
                         profile(&["--permission-mode", "plan"]),
                     ),
-                    ("plan".to_owned(), profile(&["--permission-mode", "plan"])),
                     (
-                        "accept-edits".to_owned(),
+                        "read-only".to_owned(),
+                        profile(&["--permission-mode", "plan"]),
+                    ),
+                    (
+                        "workspace-write".to_owned(),
                         profile(&["--permission-mode", "acceptEdits"]),
                     ),
                     (
-                        "bypass".to_owned(),
-                        profile(&["--permission-mode", "bypassPermissions"]),
+                        "full-access".to_owned(),
+                        profile(&["--dangerously-skip-permissions"]),
                     ),
                 ]),
             },
@@ -109,14 +115,16 @@ mod tests {
         );
 
         assert!(agents["claude"].access_profiles.contains_key("default"));
-        assert!(agents["claude"].access_profiles.contains_key("plan"));
+        assert!(agents["claude"].access_profiles.contains_key("read-only"));
         assert!(agents["claude"]
             .access_profiles
-            .contains_key("accept-edits"));
-        assert!(agents["claude"].access_profiles.contains_key("bypass"));
+            .contains_key("workspace-write"));
+        assert!(agents["claude"]
+            .access_profiles
+            .contains_key("full-access"));
         assert_eq!(
             agents["claude"].access_profiles["default"].args,
-            agents["claude"].access_profiles["plan"].args,
+            agents["claude"].access_profiles["read-only"].args,
         );
 
         assert!(agents["gemini"].access_profiles.contains_key("default"));

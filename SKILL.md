@@ -73,7 +73,7 @@ tmux-tools capture --target build --lines 50
 
 - `--idle-seconds` is the dominant completion signal: a quiet pane means done. If the pane prints heartbeat lines, increase `--idle-seconds`.
 - `--until <regex>` short-circuits the idle wait when an explicit terminator string appears anywhere in the stripped visible capture.
-- Built-in registry `ready_regex` values are `codex = "^▌"`, `claude = "^>"`, and `gemini = "^>"`. In this v1 build, `prompt` and `wait-idle` rely on idle/`--until`; pass `--until` when you need an explicit terminator.
+- Built-in registry `ready_regex` values are `codex = "^▌"`, `claude = "← for agents\\s*$"` (scanned against the bottom 2 non-blank lines via `ready_lines = 2`), and `gemini = "^>"`. In this v1 build, `prompt` and `wait-idle` rely on idle/`--until`; pass `--until` when you need an explicit terminator.
 - `--timeout` is a hard ceiling. `TMUX_TOOLS_TIMEOUT` overrides the default timeout for `execute`, `prompt`, and `wait-idle` only when `--timeout` is omitted; an explicit `--timeout` wins.
 - `capture --lines 0` intentionally returns 0 lines. `--lines` is `Option<u32>`, so zero is not treated as false or unset.
 - Idle polling samples the visible pane every 250 ms after stripping ANSI escape sequences.
@@ -81,7 +81,7 @@ tmux-tools capture --target build --lines 50
 ## Agent Permission Notes
 
 - Codex profiles: `read-only` maps to `--sandbox read-only` and is the safety profile to choose; `workspace-write` maps to `--sandbox workspace-write`; `full-access` maps to `--sandbox danger-full-access --ask-for-approval never` and must never be used without explicit user permission.
-- Claude profiles: `plan` maps to `--permission-mode plan`; `accept-edits` maps to `--permission-mode acceptEdits`; `bypass` maps to `--permission-mode bypassPermissions` and is dangerous because it bypasses permission prompts.
+- Claude profiles mirror the Codex vocabulary: `read-only` maps to `--permission-mode plan` and is the safety profile to choose (also the `default`); `workspace-write` maps to `--permission-mode acceptEdits`; `full-access` maps to `--dangerously-skip-permissions` (≡ `bypassPermissions`) and must never be used without explicit user permission because it bypasses all permission prompts.
 - Gemini has only the `default` profile, with no additional args.
 - Be explicit with `--access`. The registry chooses an agent's `default` profile when present, otherwise the first configured profile by name; the built-in Codex and Claude profiles do not define a `default`.
 - Agent profiles are deep-merged from `~/.config/tmux-tools/agents.toml`, so users can override built-ins or add their own agents.

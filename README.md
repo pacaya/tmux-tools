@@ -91,9 +91,10 @@ args = ["--sandbox", "enabled"]
 [cursor.access.full-access]
 args = ["--force", "--sandbox", "disabled"]
 
-# Claude Code. Overrides the built-in claude. The prompt glyph is `❯` and sits
-# above a status/footer block, so readiness keys off the permission-mode footer's
-# idle-only `← for agents` suffix (dropped while generating).
+# Claude Code. Shown for illustration — these values match the built-in claude.
+# The prompt glyph is `❯` and sits above a status/footer block, so readiness keys
+# off the permission-mode footer's idle-only `← for agents` suffix (dropped while
+# generating).
 [claude]
 binary = "claude"
 ready_regex = "← for agents\\s*$"
@@ -123,11 +124,11 @@ args = ["--dangerously-skip-permissions"]
 
 `ready_regex` is tested against the bottom non-blank line of the pane by default. Some agents (e.g. Cursor) render a status/footer row *below* their input prompt; set `ready_lines = N` to test the regex against the bottom `N` non-blank lines instead (the regex matches if any of them match). Defaults to `1`.
 
-Built-ins: Codex has `read-only`, `workspace-write`, and `full-access`; Claude has `plan`, `accept-edits`, and `bypass`; Gemini has `default`. Always pass `--access` for Codex and Claude. `full-access` and `bypass` are dangerous and require explicit user permission.
+Built-ins: Codex and Claude both have `read-only`, `workspace-write`, and `full-access` (plus a safe `default` == `read-only`); Gemini has `default`. Always pass `--access` for Codex and Claude. `full-access` is dangerous and requires explicit user permission.
 
-Access-profile names are arbitrary per agent (Codex and Claude use different vocabularies), but standardizing them lets one `--access` value work across agents. Cursor (configured via `agents.toml`, not a built-in) reuses the Codex triad and maps it onto Cursor's mode/sandbox flags: `read-only` → `--mode ask` (Q&A/analysis, no edits; the default; `plan` is the same tier in plan-building mode), `workspace-write` → `--sandbox enabled` (read+write+shell contained to the workspace, network restricted), and `full-access` → `--force --sandbox disabled` ("run everything", unrestricted, no approvals). `full-access` is dangerous and requires explicit user permission.
+All agents share one access-profile vocabulary (`read-only` / `workspace-write` / `full-access`) so a single `--access` value works across agents, even though each maps the tier onto its own flags. Claude maps `read-only` → `--permission-mode plan`, `workspace-write` → `--permission-mode acceptEdits`, and `full-access` → `--dangerously-skip-permissions` (≡ `bypassPermissions`). Codex maps them onto `--sandbox read-only` / `workspace-write` / `danger-full-access --ask-for-approval never`.
 
-The `agents.toml` example above also reuses the triad for Claude Code and Antigravity. Claude maps `read-only` → `--permission-mode plan`, `workspace-write` → `--permission-mode acceptEdits`, `full-access` → `--dangerously-skip-permissions` (≡ `bypassPermissions`); it keeps its built-in `plan`/`accept-edits`/`bypass` aliases too. Antigravity (`agy`) only exposes `workspace-write` (default, approval-gated) and `full-access` (`--dangerously-skip-permissions`) — version 1.0.3 has **no interactive read-only mode** (no `--plan`/`--ask`/`--permission-mode`), so for a guaranteed no-write run use `agy -p "<prompt>"` headless instead.
+Cursor and Antigravity (configured via `agents.toml`, not built-ins) reuse the same triad. Cursor maps `read-only` → `--mode ask` (Q&A/analysis, no edits; the default; `plan` is the same tier in plan-building mode), `workspace-write` → `--sandbox enabled` (read+write+shell contained to the workspace, network restricted), and `full-access` → `--force --sandbox disabled` ("run everything", unrestricted, no approvals). Antigravity (`agy`) only exposes `workspace-write` (default, approval-gated) and `full-access` (`--dangerously-skip-permissions`) — version 1.0.3 has **no interactive read-only mode** (no `--plan`/`--ask`/`--permission-mode`), so for a guaranteed no-write run use `agy -p "<prompt>"` headless instead. `full-access` is dangerous and requires explicit user permission.
 
 `TMUX_TOOLS_TIMEOUT` overrides the default 120-second timeout for `execute`, `prompt`, and `wait-idle` when `--timeout` is omitted.
 
