@@ -51,7 +51,7 @@ Most pane verbs accept `--target <name|id>`, `--format concise|json|raw`, `--ses
 
 ## Configuration
 
-Agent profiles are loaded from built-ins and deep-merged with `~/.config/tmux-tools/agents.toml`. Existing built-ins can override `binary`, `ready_regex`, or individual access profiles; new agents need a `binary`.
+Agent profiles are loaded from built-ins and deep-merged with `$XDG_CONFIG_HOME/tmux-tools/agents.toml` (falling back to `~/.config/tmux-tools/agents.toml`). Existing built-ins can override `binary`, `ready_regex`, `ready_lines`, or individual access profiles; new agents need a `binary`.
 
 ```toml
 # ~/.config/tmux-tools/agents.toml
@@ -74,9 +74,60 @@ ready_regex = "^ready"
 
 [demo.access.default]
 args = ["--safe"]
+
+# Cursor CLI. Its input prompt sits above a status/cwd footer, so ready_lines
+# widens the ready_regex scan to the bottom 3 non-blank lines.
+[cursor]
+binary = "cursor-agent"
+ready_regex = "→ (Add a follow-up|Plan, search, build anything)\\s*$"
+ready_lines = 3
+
+[cursor.access.read-only]
+args = ["--mode", "ask"]
+
+[cursor.access.workspace-write]
+args = ["--sandbox", "enabled"]
+
+[cursor.access.full-access]
+args = ["--force", "--sandbox", "disabled"]
+
+# Claude Code. Overrides the built-in claude. The prompt glyph is `❯` and sits
+# above a status/footer block, so readiness keys off the permission-mode footer's
+# idle-only `← for agents` suffix (dropped while generating).
+[claude]
+binary = "claude"
+ready_regex = "← for agents\\s*$"
+ready_lines = 2
+
+[claude.access.read-only]
+args = ["--permission-mode", "plan"]
+
+[claude.access.workspace-write]
+args = ["--permission-mode", "acceptEdits"]
+
+[claude.access.full-access]
+args = ["--dangerously-skip-permissions"]
+
+# Antigravity CLI. Its bottom-most line is a footer: `? for shortcuts` when idle,
+# `esc to cancel` while generating. agy 1.0.3 has no interactive read-only mode.
+[agy]
+binary = "agy"
+ready_regex = "\\? for shortcuts"
+
+[agy.access.workspace-write]
+args = []
+
+[agy.access.full-access]
+args = ["--dangerously-skip-permissions"]
 ```
 
+`ready_regex` is tested against the bottom non-blank line of the pane by default. Some agents (e.g. Cursor) render a status/footer row *below* their input prompt; set `ready_lines = N` to test the regex against the bottom `N` non-blank lines instead (the regex matches if any of them match). Defaults to `1`.
+
 Built-ins: Codex has `read-only`, `workspace-write`, and `full-access`; Claude has `plan`, `accept-edits`, and `bypass`; Gemini has `default`. Always pass `--access` for Codex and Claude. `full-access` and `bypass` are dangerous and require explicit user permission.
+
+Access-profile names are arbitrary per agent (Codex and Claude use different vocabularies), but standardizing them lets one `--access` value work across agents. Cursor (configured via `agents.toml`, not a built-in) reuses the Codex triad and maps it onto Cursor's mode/sandbox flags: `read-only` → `--mode ask` (Q&A/analysis, no edits; the default; `plan` is the same tier in plan-building mode), `workspace-write` → `--sandbox enabled` (read+write+shell contained to the workspace, network restricted), and `full-access` → `--force --sandbox disabled` ("run everything", unrestricted, no approvals). `full-access` is dangerous and requires explicit user permission.
+
+The `agents.toml` example above also reuses the triad for Claude Code and Antigravity. Claude maps `read-only` → `--permission-mode plan`, `workspace-write` → `--permission-mode acceptEdits`, `full-access` → `--dangerously-skip-permissions` (≡ `bypassPermissions`); it keeps its built-in `plan`/`accept-edits`/`bypass` aliases too. Antigravity (`agy`) only exposes `workspace-write` (default, approval-gated) and `full-access` (`--dangerously-skip-permissions`) — version 1.0.3 has **no interactive read-only mode** (no `--plan`/`--ask`/`--permission-mode`), so for a guaranteed no-write run use `agy -p "<prompt>"` headless instead.
 
 `TMUX_TOOLS_TIMEOUT` overrides the default 120-second timeout for `execute`, `prompt`, and `wait-idle` when `--timeout` is omitted.
 

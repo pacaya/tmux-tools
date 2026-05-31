@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use crate::{
     cmd::send::dispatch_enter,
-    cmd::wait_idle::ready_regex_for,
+    cmd::wait_idle::ready_signal_for,
     format::{render_capture, strip_ansi, Format},
     idle::{resolve_timeout, validate_seconds, wait_for_idle, IdleConfig},
     names, target, tmux, CommonArgs,
@@ -43,11 +43,13 @@ pub fn run(args: &PromptArgs) -> Result<()> {
     let before = capture_visible_stripped(&pane)?;
     send_prompt(&pane, &args.text)?;
 
+    let ready = ready_signal_for(&pane)?;
     let cfg = IdleConfig {
         idle_seconds: validate_seconds(args.idle_seconds, "idle-seconds")?,
         poll_interval: Duration::from_millis(250),
         timeout: resolve_timeout(args.timeout, "timeout")?,
-        ready_regex: ready_regex_for(&pane)?,
+        ready_regex: ready.regex,
+        ready_scan_lines: ready.scan_lines,
         until_regex: args.until.as_deref().map(Regex::new).transpose()?,
     };
     let outcome = wait_for_idle(&pane, &cfg)?;

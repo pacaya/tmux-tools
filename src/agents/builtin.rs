@@ -16,6 +16,7 @@ fn build_all() -> BTreeMap<String, AgentSpec> {
                 name: "codex".to_owned(),
                 binary: "codex".to_owned(),
                 ready_regex: Some("^▌".to_owned()),
+                ready_lines: None,
                 access_profiles: BTreeMap::from([
                     ("default".to_owned(), profile(&["--sandbox", "read-only"])),
                     ("read-only".to_owned(), profile(&["--sandbox", "read-only"])),
@@ -40,7 +41,13 @@ fn build_all() -> BTreeMap<String, AgentSpec> {
             AgentSpec {
                 name: "claude".to_owned(),
                 binary: "claude".to_owned(),
-                ready_regex: Some("^>".to_owned()),
+                // Claude Code's prompt glyph is `❯`, sits above a status/footer
+                // block, and is present (empty) while generating, so it can't
+                // signal readiness. The permission-mode footer (bottom line)
+                // ends with `← for agents` only when idle; that suffix is dropped
+                // while generating. Falls back to idle detection if absent.
+                ready_regex: Some("← for agents\\s*$".to_owned()),
+                ready_lines: Some(2),
                 access_profiles: BTreeMap::from([
                     (
                         "default".to_owned(),
@@ -64,6 +71,7 @@ fn build_all() -> BTreeMap<String, AgentSpec> {
                 name: "gemini".to_owned(),
                 binary: "gemini".to_owned(),
                 ready_regex: Some("^>".to_owned()),
+                ready_lines: None,
                 access_profiles: BTreeMap::from([("default".to_owned(), profile(&[]))]),
             },
         ),

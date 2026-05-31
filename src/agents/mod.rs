@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context};
 use serde::Deserialize;
@@ -12,6 +12,10 @@ pub struct AgentSpec {
     pub name: String,
     pub binary: String,
     pub ready_regex: Option<String>,
+    /// How many of the bottom non-blank lines `ready_regex` is tested against.
+    /// `None` means the built-in default (1 = bottom line only). Raise it for TUIs that
+    /// render a status/footer row below the input prompt (e.g. cursor).
+    pub ready_lines: Option<usize>,
     pub access_profiles: BTreeMap<String, AccessProfile>,
 }
 
@@ -27,9 +31,7 @@ pub struct Registry {
 
 impl Registry {
     pub fn load() -> anyhow::Result<Registry> {
-        let user_path = dirs::config_dir().map(|dir| dir.join("tmux-tools").join("agents.toml"));
-
-        Self::load_with_user_path(user_path.as_deref())
+        Self::load_with_user_path(user_config_path().as_deref())
     }
 
     pub fn load_with_user_path(path: Option<&Path>) -> anyhow::Result<Registry> {
@@ -105,6 +107,8 @@ struct AgentConfig {
     #[serde(default)]
     ready_regex: Option<String>,
     #[serde(default)]
+    ready_lines: Option<usize>,
+    #[serde(default)]
     access: BTreeMap<String, AccessProfileConfig>,
 }
 
@@ -112,6 +116,20 @@ struct AgentConfig {
 struct AccessProfileConfig {
     #[serde(default)]
     args: Vec<String>,
+}
+
+/// The documented user config path: `$XDG_CONFIG_HOME/tmux-tools/agents.toml`, falling
+/// back to `~/.config/tmux-tools/agents.toml`. We resolve XDG explicitly rather than via
+/// `dirs::config_dir()` because on macOS the latter points at
+/// `~/Library/Application Support`, which doesn't match the README or where users (and our
+/// own examples) actually place the file.
+fn user_config_path() -> Option<PathBuf> {
+    let config_home = std::env::var_os("XDG_CONFIG_HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| dirs::home_dir().map(|home| home.join(".config")))?;
+
+    Some(config_home.join("tmux-tools").join("agents.toml"))
 }
 
 fn parse_agent_configs(contents: &str) -> anyhow::Result<BTreeMap<String, AgentConfig>> {
@@ -143,6 +161,10 @@ fn merge_existing_agent(agent: &mut AgentSpec, user_agent: AgentConfig) {
         agent.ready_regex = Some(ready_regex);
     }
 
+    if let Some(ready_lines) = user_agent.ready_lines {
+        agent.ready_lines = Some(ready_lines);
+    }
+
     for (profile, access_profile) in user_agent.access {
         agent.access_profiles.insert(profile, access_profile.into());
     }
@@ -158,6 +180,7 @@ fn agent_from_config(name: String, agent: AgentConfig) -> anyhow::Result<AgentSp
         name,
         binary,
         ready_regex: agent.ready_regex,
+        ready_lines: agent.ready_lines,
         access_profiles: agent
             .access
             .into_iter()
@@ -217,6 +240,46 @@ args = []
             vec!["--safe".to_owned()]
         );
         assert_eq!(demo.access_profiles["extra"].args, Vec::<String>::new());
+        assert_eq!(demo.ready_lines, None);
+    }
+
+    #[test]
+    fn parses_ready_lines_scan_depth() {
+        let agents = parse_registry_toml(
+            r#"
+[cursor]
+binary = "cursor-agent"
+ready_regex = "^\\s*→"
+ready_lines = 3
+
+[cursor.access.default]
+args = []
+"#,
+        )
+        .unwrap();
+
+        let cursor = agents.get("cursor").unwrap();
+        assert_eq!(cursor.binary, "cursor-agent");
+        assert_eq!(cursor.ready_lines, Some(3));
+    }
+
+    #[test]
+    fn user_ready_lines_merges_onto_builtin() {
+        let path = write_temp_agents_file(
+            r#"
+[codex]
+ready_lines = 4
+"#,
+        );
+
+        let registry = Registry::load_with_user_path(Some(&path)).unwrap();
+        fs::remove_file(&path).unwrap();
+
+        let codex = registry.get("codex").unwrap();
+        assert_eq!(codex.ready_lines, Some(4));
+        // Scalar merge leaves the builtin ready_regex and profiles intact.
+        assert_eq!(codex.ready_regex.as_deref(), Some("^▌"));
+        assert!(codex.access_profiles.contains_key("read-only"));
     }
 
     #[test]
@@ -261,6 +324,7 @@ args = []
                 name: "custom".to_owned(),
                 binary: "custom".to_owned(),
                 ready_regex: None,
+                ready_lines: None,
                 access_profiles: BTreeMap::from([
                     (
                         "alpha".to_owned(),
@@ -295,6 +359,7 @@ args = []
                 name: "empty".to_owned(),
                 binary: "empty".to_owned(),
                 ready_regex: None,
+                ready_lines: None,
                 access_profiles: BTreeMap::new(),
             },
         );

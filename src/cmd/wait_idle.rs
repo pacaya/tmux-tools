@@ -7,9 +7,16 @@ use std::time::Duration;
 use crate::{
     agents,
     format::Format,
-    idle::{resolve_timeout, validate_seconds, wait_for_idle, IdleConfig},
+    idle::{resolve_timeout, validate_seconds, wait_for_idle, IdleConfig, DEFAULT_READY_SCAN_LINES},
     names, target, CommonArgs,
 };
+
+/// The readiness signal resolved from the pane's registered agent profile: the compiled
+/// `ready_regex` (if any) and how many bottom non-blank lines it should be tested against.
+pub(crate) struct ReadySignal {
+    pub(crate) regex: Option<Regex>,
+    pub(crate) scan_lines: usize,
+}
 
 #[derive(Args, Debug)]
 pub struct WaitIdleArgs {
@@ -35,11 +42,13 @@ struct WaitIdleJson<'a> {
 pub fn run(args: &WaitIdleArgs) -> Result<()> {
     let pane = target::resolve_from_common(&args.common)?;
 
+    let ready = ready_signal_for(&pane)?;
     let cfg = IdleConfig {
         idle_seconds: validate_seconds(args.idle_seconds, "idle-seconds")?,
         poll_interval: Duration::from_millis(250),
         timeout: resolve_timeout(args.timeout, "timeout")?,
-        ready_regex: ready_regex_for(&pane)?,
+        ready_regex: ready.regex,
+        ready_scan_lines: ready.scan_lines,
         until_regex: args.until.as_deref().map(Regex::new).transpose()?,
     };
     let outcome = wait_for_idle(&pane, &cfg)?;
@@ -67,22 +76,35 @@ pub fn run(args: &WaitIdleArgs) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn ready_regex_for(pane: &str) -> Result<Option<Regex>> {
+pub(crate) fn ready_signal_for(pane: &str) -> Result<ReadySignal> {
+    let none = ReadySignal {
+        regex: None,
+        scan_lines: DEFAULT_READY_SCAN_LINES,
+    };
+
     let registered = names::read(pane)?;
     let Some(agent_name) = registered.agent else {
-        return Ok(None);
+        return Ok(none);
     };
 
     let registry = agents::Registry::load()?;
     let Some(agent) = registry.get(&agent_name) else {
-        return Ok(None);
+        return Ok(none);
     };
 
+    let scan_lines = agent.ready_lines.unwrap_or(DEFAULT_READY_SCAN_LINES).max(1);
+
     let Some(pattern) = agent.ready_regex.as_deref() else {
-        return Ok(None);
+        return Ok(ReadySignal {
+            regex: None,
+            scan_lines,
+        });
     };
 
     let regex = Regex::new(pattern)
         .with_context(|| format!("invalid ready_regex for agent {agent_name}: {pattern}"))?;
-    Ok(Some(regex))
+    Ok(ReadySignal {
+        regex: Some(regex),
+        scan_lines,
+    })
 }

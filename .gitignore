@@ -25,3 +25,7 @@
 
 # Logs
 *.log
+
+# AI
+/.claude
+

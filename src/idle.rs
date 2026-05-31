@@ -14,8 +14,14 @@ pub struct IdleConfig {
     pub poll_interval: Duration,
     pub timeout: Duration,
     pub ready_regex: Option<Regex>,
+    /// How many of the bottom non-blank lines the `ready_regex` is tested against.
+    /// 1 matches only the bottom non-blank line (the default); higher values let the
+    /// regex match a prompt that sits above a TUI status/footer row.
+    pub ready_scan_lines: usize,
     pub until_regex: Option<Regex>,
 }
+
+pub const DEFAULT_READY_SCAN_LINES: usize = 1;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct IdleOutcome {
@@ -73,6 +79,7 @@ impl Default for IdleConfig {
             poll_interval: Duration::from_millis(250),
             timeout: Duration::from_secs(120),
             ready_regex: None,
+            ready_scan_lines: DEFAULT_READY_SCAN_LINES,
             until_regex: None,
         }
     }
@@ -104,7 +111,9 @@ pub fn wait_for_idle(pane_id: &str, cfg: &IdleConfig) -> Result<IdleOutcome> {
         }
         capture_count += 1;
 
-        if let Some(reason) = classify(&stripped, &cfg.ready_regex, &cfg.until_regex) {
+        if let Some(reason) =
+            classify(&stripped, &cfg.ready_regex, cfg.ready_scan_lines, &cfg.until_regex)
+        {
             return Ok(IdleOutcome {
                 reason,
                 duration: start.elapsed(),
@@ -145,11 +154,17 @@ fn parse_timeout(s: &str) -> Option<Duration> {
         .map(Duration::from_secs_f64)
 }
 
-fn classify(stripped: &str, ready: &Option<Regex>, until: &Option<Regex>) -> Option<IdleReason> {
-    if ready
-        .as_ref()
-        .is_some_and(|regex| regex.is_match(bottom_non_blank_line(stripped)))
-    {
+fn classify(
+    stripped: &str,
+    ready: &Option<Regex>,
+    ready_scan_lines: usize,
+    until: &Option<Regex>,
+) -> Option<IdleReason> {
+    if ready.as_ref().is_some_and(|regex| {
+        bottom_non_blank_lines(stripped, ready_scan_lines)
+            .iter()
+            .any(|line| regex.is_match(line))
+    }) {
         return Some(IdleReason::ReadyMatched);
     }
 
@@ -160,12 +175,19 @@ fn classify(stripped: &str, ready: &Option<Regex>, until: &Option<Regex>) -> Opt
     None
 }
 
-fn bottom_non_blank_line(stripped: &str) -> &str {
-    stripped
+/// The bottom `count` non-blank lines, ordered top-to-bottom. Blank lines are skipped
+/// so a trailing TUI status row's padding doesn't consume the budget. `count` is clamped
+/// to at least 1.
+fn bottom_non_blank_lines(stripped: &str, count: usize) -> Vec<&str> {
+    let count = count.max(1);
+    let mut lines: Vec<&str> = stripped
         .split('\n')
         .rev()
-        .find(|line| !line.trim().is_empty())
-        .unwrap_or("")
+        .filter(|line| !line.trim().is_empty())
+        .take(count)
+        .collect();
+    lines.reverse();
+    lines
 }
 
 #[cfg(test)]
@@ -186,7 +208,25 @@ mod tests {
         let until = Some(Regex::new(r"earlier").expect("test regex compiles"));
 
         assert_eq!(
-            classify("earlier\nready>\n\n", &ready, &until),
+            classify("earlier\nready>\n\n", &ready, 1, &until),
+            Some(IdleReason::ReadyMatched)
+        );
+    }
+
+    #[test]
+    fn classify_matches_ready_within_scan_window_above_status_row() {
+        let ready = Some(Regex::new(r"^\s*→").expect("test regex compiles"));
+        let until = None;
+
+        // The `→` prompt sits two lines above the bottom status/footer rows.
+        let pane = "  → Plan, search, build anything\n\n  Auto  /tmp\n";
+
+        // Default depth of 1 only sees the status row and misses the prompt.
+        assert_eq!(classify(pane, &ready, 1, &until), None);
+
+        // A wider window reaches the prompt line.
+        assert_eq!(
+            classify(pane, &ready, 3, &until),
             Some(IdleReason::ReadyMatched)
         );
     }
@@ -197,7 +237,7 @@ mod tests {
         let until = Some(Regex::new(r"match earlier").expect("test regex compiles"));
 
         assert_eq!(
-            classify("match earlier\nnot ready\n", &ready, &until),
+            classify("match earlier\nnot ready\n", &ready, 1, &until),
             Some(IdleReason::UntilMatched)
         );
     }
@@ -207,7 +247,7 @@ mod tests {
         let ready = Some(Regex::new(r"^ready>$").expect("test regex compiles"));
         let until = Some(Regex::new(r"done").expect("test regex compiles"));
 
-        assert_eq!(classify("working\nstill working\n", &ready, &until), None);
+        assert_eq!(classify("working\nstill working\n", &ready, 1, &until), None);
     }
 
     #[test]
@@ -215,7 +255,7 @@ mod tests {
         let ready = Some(Regex::new(r"^ready>$").expect("test regex compiles"));
         let until = None;
 
-        assert_eq!(classify("\n  \n\t\n", &ready, &until), None);
+        assert_eq!(classify("\n  \n\t\n", &ready, 1, &until), None);
     }
 
     #[test]
