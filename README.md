@@ -39,7 +39,7 @@ Most pane verbs accept `--target <name|id>`, `--format concise|json|raw`, `--ses
 | `send` | `<TEXT> [--enter] [--literal] [--verify]` | Sends keys; `--enter` appends Enter (sent once). Add `--verify` to capture-and-retry Enter up to 3 times if the bottom line is unchanged (opt-in: can double-submit to non-echoing programs like password prompts). |
 | `capture` | `[--lines N \| --all]` | Captures visible pane by default; `--all` captures full history. |
 | `execute` | `<CMD> [--timeout SEC] [--no-wait]` | Wraps a command with markers and reports output, duration, timeout, and exit code. |
-| `wait-idle` | `[--idle-seconds F] [--ready-stable-seconds F] [--timeout SEC] [--until REGEX]` | Waits for quiet output, explicit regex, or timeout. `--ready-stable-seconds` (default 2.0) is how long a `ready_regex` match must hold before completing. |
+| `wait-idle` | `[--idle-seconds F] [--ready-stable-seconds F] [--timeout SEC] [--until REGEX]` | Waits for quiet output, explicit regex, or timeout. `--ready-stable-seconds` (default 2.0) is how long a `ready_regex` *or* `--until` match must hold before completing (`0` fires on first match). |
 | `prompt` | `<TEXT> [--idle-seconds F] [--ready-stable-seconds F] [--timeout SEC] [--until REGEX]` | Sends text plus Enter, waits, then returns output since the prompt. |
 | `spawn-agent` | `<AGENT> [--access PROFILE] [--name NAME] [--cwd PATH] [--split h\|v\|window] [--size N] [--bare] [-- EXTRA_ARGS...]` | Launches a configured agent profile and registers `@tt-agent`/`@tt-access`. Same default-split (30:70 horizontal) and `--split window` opt-out as `launch`. Same keep-open wrap as `launch`; pass `--bare` to opt out. The `agent=` column from `list` reflects the *original* launch — if the agent crashes the pane survives as a plain shell, but `@tt-agent` is not cleared. |
 | `kill` | `[--target name\|id]` | Kills the target pane. |
@@ -55,9 +55,15 @@ Agent profiles are loaded from built-ins and deep-merged with `$XDG_CONFIG_HOME/
 
 ```toml
 # ~/.config/tmux-tools/agents.toml
+# Codex's input glyph `›` is on screen idle *and* generating, so readiness keys off
+# the status line: `· Ready · Context` when idle/done vs `· Working ·` while busy.
+# (The built-in codex profile ships no ready_regex — it falls back to idle — so opt
+# into the faster status-line signal here.) Pairs with the --ready-stable-seconds
+# debounce, which covers the <0.4s residual `· Ready ·` right after a prompt is sent.
 [codex]
 binary = "codex"
-ready_regex = "^▌"
+ready_regex = "· Ready · Context"
+ready_lines = 2
 
 [codex.access.read-only]
 args = ["--sandbox", "read-only"]
@@ -75,12 +81,12 @@ ready_regex = "^ready"
 [demo.access.default]
 args = ["--safe"]
 
-# Cursor CLI. Its input prompt sits above a status/cwd footer, so ready_lines
-# widens the ready_regex scan to the bottom 3 non-blank lines.
+# Cursor CLI. Its input prompt sits above a mode/status/cwd footer (3 rows), so
+# ready_lines widens the ready_regex scan to the bottom 4 non-blank lines.
 [cursor]
 binary = "cursor-agent"
 ready_regex = "→ (Add a follow-up|Plan, search, build anything)\\s*$"
-ready_lines = 3
+ready_lines = 4
 
 [cursor.access.read-only]
 args = ["--mode", "ask"]
@@ -124,7 +130,9 @@ args = ["--dangerously-skip-permissions"]
 
 `ready_regex` is tested against the bottom non-blank line of the pane by default. Some agents (e.g. Cursor) render a status/footer row *below* their input prompt; set `ready_lines = N` to test the regex against the bottom `N` non-blank lines instead (the regex matches if any of them match). Defaults to `1`.
 
-A `ready_regex` match must hold continuously for `--ready-stable-seconds` (default 2.0) before `wait-idle`/`prompt` complete with `ready_matched`. This debounce guards against a stale indicator that is visible for only a single poll — e.g. a previous turn's status line still showing right after a new prompt is submitted — triggering a premature, wrong completion. Set `--ready-stable-seconds 0` to fire on the first match (legacy behavior).
+A `ready_regex` match — or an explicit `--until` match — must hold continuously for `--ready-stable-seconds` (default 2.0) before `wait-idle`/`prompt` complete (with `ready_matched` / `until_matched`). This debounce guards against a stale indicator that is visible for only a single poll — e.g. a previous turn's status line still showing right after a new prompt is submitted — triggering a premature, wrong completion. Set `--ready-stable-seconds 0` to fire on the first match (legacy behavior; use it for a one-shot `--until` marker that may scroll off-screen before the window elapses).
+
+> **`ready_regex` is version-sensitive chrome.** Agent TUIs change their input glyphs, status lines, and footer rows between releases, which silently breaks a `ready_regex` (it stops matching and falls back to idle/timeout) or, worse, makes it false-match. Re-validate these patterns after upgrading an agent CLI; the shipped configs note the version they were validated against.
 
 ### Detecting readiness from a custom Claude status line
 

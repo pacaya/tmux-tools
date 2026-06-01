@@ -15,7 +15,15 @@ fn build_all() -> BTreeMap<String, AgentSpec> {
             AgentSpec {
                 name: "codex".to_owned(),
                 binary: "codex".to_owned(),
-                ready_regex: Some("^▌".to_owned()),
+                // No shipped ready_regex: Codex's input glyph changed from `▌` to `›`
+                // (always on screen, idle *and* generating, so it can't discriminate), and
+                // its only reliable idle/busy signal is the `· Ready ·` vs `· Working ·`
+                // status line — which is version-sensitive chrome we'd rather not bake into
+                // the binary. With `None`, readiness falls back to idle/timeout out of the
+                // box; users who want the faster status-line signal set a `ready_regex`
+                // (e.g. `· Ready · Context`, debounced by `--ready-stable-seconds`) in their
+                // ~/.config/tmux-tools/agents.toml. See README "Detecting readiness".
+                ready_regex: None,
                 ready_lines: None,
                 access_profiles: BTreeMap::from([
                     ("default".to_owned(), profile(&["--sandbox", "read-only"])),

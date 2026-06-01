@@ -18,11 +18,12 @@ pub struct IdleConfig {
     /// 1 matches only the bottom non-blank line (the default); higher values let the
     /// regex match a prompt that sits above a TUI status/footer row.
     pub ready_scan_lines: usize,
-    /// How long a `ready_regex` match must hold continuously before completing with
-    /// `ReadyMatched`. Guards against a stale indicator that lingers for a single poll
-    /// (e.g. a previous turn's `✓ done` status line still visible right after a new
-    /// prompt is submitted) triggering a premature, wrong completion. `0.0` fires on
-    /// first match (legacy behavior).
+    /// How long a `ready_regex` *or* `until_regex` match must hold continuously before
+    /// completing (`ReadyMatched` / `UntilMatched`). Guards against a stale indicator that
+    /// lingers for a single poll (e.g. a previous turn's `✓ done` / `· Ready ·` status line
+    /// still visible right after a new prompt is submitted) triggering a premature, wrong
+    /// completion. `0.0` fires on first match (legacy behavior; use for a one-shot marker
+    /// that may scroll off-screen before the window elapses).
     pub ready_stable_seconds: f64,
     pub until_regex: Option<Regex>,
 }
@@ -98,7 +99,8 @@ pub fn wait_for_idle(pane_id: &str, cfg: &IdleConfig) -> Result<IdleOutcome> {
     let mut last_change = start;
     let mut previous_hash = None;
     let mut capture_count = 0_u64;
-    let mut ready_debounce = ReadyDebounce::default();
+    let mut ready_debounce = MatchDebounce::default();
+    let mut until_debounce = MatchDebounce::default();
 
     loop {
         let output = tmux::run(&["capture-pane", "-t", pane_id, "-p"])?;
@@ -120,12 +122,17 @@ pub fn wait_for_idle(pane_id: &str, cfg: &IdleConfig) -> Result<IdleOutcome> {
         }
         capture_count += 1;
 
-        // `--until` is an explicit user override and fires immediately.
-        if cfg
+        // `--until` is an explicit user-supplied terminator. Like `ready_regex` it must
+        // hold continuously for `ready_stable_seconds` before firing, so a pattern that is
+        // only transiently on screen — e.g. a status line still reading the previous turn's
+        // `· Ready ·` for one poll right after a prompt is submitted — can't trigger a
+        // premature completion. Set `--ready-stable-seconds 0` to fire on the first match
+        // (for a one-shot marker that may scroll off-screen before the window elapses).
+        let until_now = cfg
             .until_regex
             .as_ref()
-            .is_some_and(|regex| regex.is_match(&stripped))
-        {
+            .is_some_and(|regex| regex.is_match(&stripped));
+        if until_debounce.observe(until_now, now, cfg.ready_stable_seconds) {
             return Ok(IdleOutcome {
                 reason: IdleReason::UntilMatched,
                 duration: start.elapsed(),
@@ -145,11 +152,13 @@ pub fn wait_for_idle(pane_id: &str, cfg: &IdleConfig) -> Result<IdleOutcome> {
             });
         }
 
-        // Suppress `Idle` while a ready match is active: a static pane that is
-        // currently matching ready is exactly what would trip `Idle` early when
-        // `idle_seconds <= ready_stable_seconds`. Suppressing it ensures such a pane
-        // is reported as `ReadyMatched` after the debounce, never a premature `Idle`.
+        // Suppress `Idle` while a ready or until match is pending its debounce: a static
+        // pane that is currently matching is exactly what would trip `Idle` early when
+        // `idle_seconds <= ready_stable_seconds`. Suppressing it ensures such a pane is
+        // reported as `ReadyMatched`/`UntilMatched` after the debounce, never a premature
+        // `Idle`.
         if !ready_now
+            && !until_now
             && capture_count >= 2
             && (now - last_change).as_secs_f64() >= cfg.idle_seconds
         {
@@ -195,18 +204,19 @@ fn ready_matches(stripped: &str, ready: &Option<Regex>, ready_scan_lines: usize)
     })
 }
 
-/// Tracks how long a ready match has held continuously so completion can be debounced.
+/// Tracks how long a match (a `ready_regex` or `--until` pattern) has held continuously
+/// so completion can be debounced.
 #[derive(Default)]
-struct ReadyDebounce {
-    /// When the current uninterrupted run of ready matches began. `None` when the most
+struct MatchDebounce {
+    /// When the current uninterrupted run of matches began. `None` when the most
     /// recent observation was not a match.
     since: Option<Instant>,
 }
 
-impl ReadyDebounce {
-    /// Records one observation and returns whether a ready match has now held
-    /// continuously for at least `stable_seconds`. A `false` observation resets the
-    /// run. `stable_seconds == 0.0` fires on the first match (legacy behavior).
+impl MatchDebounce {
+    /// Records one observation and returns whether a match has now held continuously for
+    /// at least `stable_seconds`. A `false` observation resets the run.
+    /// `stable_seconds == 0.0` fires on the first match (legacy behavior).
     fn observe(&mut self, matched: bool, now: Instant, stable_seconds: f64) -> bool {
         if !matched {
             self.since = None;
@@ -354,7 +364,7 @@ mod tests {
 
     #[test]
     fn ready_debounce_fires_only_after_stable_window() {
-        let mut debounce = ReadyDebounce::default();
+        let mut debounce = MatchDebounce::default();
         let t0 = Instant::now();
 
         // First match starts the run but does not fire yet.
@@ -367,7 +377,7 @@ mod tests {
 
     #[test]
     fn ready_debounce_resets_on_non_match() {
-        let mut debounce = ReadyDebounce::default();
+        let mut debounce = MatchDebounce::default();
         let t0 = Instant::now();
 
         assert!(!debounce.observe(true, t0, 2.0));
@@ -381,7 +391,7 @@ mod tests {
 
     #[test]
     fn ready_debounce_zero_seconds_fires_immediately() {
-        let mut debounce = ReadyDebounce::default();
+        let mut debounce = MatchDebounce::default();
         let t0 = Instant::now();
 
         assert!(debounce.observe(true, t0, 0.0));

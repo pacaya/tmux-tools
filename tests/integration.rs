@@ -400,17 +400,19 @@ fn full_smoke() {
             "@tt-agent should be 'codex' for spawned codex pane"
         );
 
-        // Best-effort: wait for codex's ready regex up to 10s. We don't fail
+        // Best-effort: wait for codex's status line up to 10s. We don't fail
         // the test if codex itself fails to start cleanly (it might be
         // unauthenticated etc.), only if wait-idle's CLI surface itself
-        // crashes.
+        // crashes. `· Ready · Context` is codex's idle status line; with the
+        // default `--ready-stable-seconds` debounce it must hold ~2s before
+        // firing `until_matched`.
         let _wait = run_bin_with_timeout(
             &[
                 "wait-idle",
                 "--target",
                 &codex_name,
                 "--until",
-                "^▌",
+                "· Ready · Context",
                 "--timeout",
                 "10",
             ],

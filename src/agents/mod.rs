@@ -277,8 +277,10 @@ ready_lines = 4
 
         let codex = registry.get("codex").unwrap();
         assert_eq!(codex.ready_lines, Some(4));
-        // Scalar merge leaves the builtin ready_regex and profiles intact.
-        assert_eq!(codex.ready_regex.as_deref(), Some("^▌"));
+        // Scalar merge leaves the builtin profiles intact and does not synthesize a
+        // ready_regex: the codex builtin ships none (None), so a user-supplied ready_lines
+        // must leave it None.
+        assert_eq!(codex.ready_regex.as_deref(), None);
         assert!(codex.access_profiles.contains_key("read-only"));
     }
 
