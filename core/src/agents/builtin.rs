@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
 
-use super::{AccessProfile, AgentSpec};
+use super::{AccessProfile, AgentCapabilities, AgentSpec};
 
 pub fn all() -> &'static BTreeMap<String, AgentSpec> {
     static BUILTINS: OnceLock<BTreeMap<String, AgentSpec>> = OnceLock::new();
@@ -42,6 +42,10 @@ fn build_all() -> BTreeMap<String, AgentSpec> {
                         ]),
                     ),
                 ]),
+                capabilities: capabilities(
+                    false, false, false, true, true, true, true, true, false, false, false, false,
+                    true,
+                ),
             },
         ),
         (
@@ -77,6 +81,9 @@ fn build_all() -> BTreeMap<String, AgentSpec> {
                         profile(&["--dangerously-skip-permissions"]),
                     ),
                 ]),
+                capabilities: capabilities(
+                    true, true, true, true, true, true, true, false, true, true, true, true, true,
+                ),
             },
         ),
         (
@@ -87,9 +94,48 @@ fn build_all() -> BTreeMap<String, AgentSpec> {
                 ready_regex: Some("^>".to_owned()),
                 ready_lines: None,
                 access_profiles: BTreeMap::from([("default".to_owned(), profile(&[]))]),
+                capabilities: capabilities(
+                    true, true, true, true, true, false, true, true, false, false, false, false,
+                    true,
+                ),
             },
         ),
     ])
+}
+
+#[allow(clippy::too_many_arguments)]
+fn capabilities(
+    prompt_refinement: bool,
+    branch_choice: bool,
+    loop_verdict: bool,
+    structured_output: bool,
+    session_reuse: bool,
+    native_json_schema: bool,
+    model_selection: bool,
+    reasoning_config: bool,
+    system_prompt: bool,
+    budget_limit: bool,
+    turn_limit: bool,
+    cost_reporting: bool,
+    web_search: bool,
+) -> AgentCapabilities {
+    AgentCapabilities {
+        worker_execution: true,
+        prompt_refinement,
+        branch_choice,
+        loop_verdict,
+        structured_output,
+        session_reuse,
+        native_json_schema,
+        model_selection,
+        reasoning_config,
+        system_prompt,
+        budget_limit,
+        turn_limit,
+        cost_reporting,
+        tool_allowlist: system_prompt,
+        web_search,
+    }
 }
 
 fn profile(args: &[&str]) -> AccessProfile {

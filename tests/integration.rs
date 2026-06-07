@@ -89,10 +89,7 @@ fn run_bin_with_timeout(args: &[&str], timeout: Duration) -> CmdOutput {
                 if started.elapsed() > timeout {
                     let _ = child.kill();
                     let _ = child.wait();
-                    panic!(
-                        "tmux-tools {args:?} timed out after {:?}",
-                        timeout
-                    );
+                    panic!("tmux-tools {args:?} timed out after {:?}", timeout);
                 }
                 thread::sleep(Duration::from_millis(50));
             }
@@ -145,12 +142,7 @@ impl Drop for PaneGuard {
 /// Resolve a pane id by registered `@tt-name` using tmux directly. Returns
 /// `None` if no such pane exists.
 fn pane_id_by_name(name: &str) -> Option<String> {
-    let out = run_tmux(&[
-        "list-panes",
-        "-a",
-        "-F",
-        "#{pane_id}\t#{@tt-name}",
-    ]);
+    let out = run_tmux(&["list-panes", "-a", "-F", "#{pane_id}\t#{@tt-name}"]);
     if out.status != 0 {
         return None;
     }
@@ -227,7 +219,10 @@ fn full_smoke() {
         .and_then(|v| v.as_str())
         .expect("launch JSON must include pane_id")
         .to_owned();
-    assert!(pane_id.starts_with('%'), "pane_id must look like %N: {pane_id}");
+    assert!(
+        pane_id.starts_with('%'),
+        "pane_id must look like %N: {pane_id}"
+    );
 
     // Verify @tt-name was set on the pane.
     let tt_name = run_tmux(&["display-message", "-p", "-t", &pane_id, "#{@tt-name}"]);
@@ -242,13 +237,7 @@ fn full_smoke() {
     wait_for_pane_ready(&shell_name, Duration::from_secs(5));
 
     // ---- 2. send + capture -------------------------------------------------
-    let sent = run_bin(&[
-        "send",
-        "--target",
-        &shell_name,
-        "echo hi",
-        "--enter",
-    ]);
+    let sent = run_bin(&["send", "--target", &shell_name, "echo hi", "--enter"]);
     sent.assert_success("send echo hi");
 
     thread::sleep(Duration::from_millis(400));
@@ -386,13 +375,7 @@ fn full_smoke() {
             .and_then(|v| v.as_str())
             .expect("spawn-agent JSON must include pane_id")
             .to_owned();
-        let agent_tag = run_tmux(&[
-            "display-message",
-            "-p",
-            "-t",
-            &codex_pane,
-            "#{@tt-agent}",
-        ]);
+        let agent_tag = run_tmux(&["display-message", "-p", "-t", &codex_pane, "#{@tt-agent}"]);
         agent_tag.assert_success("display @tt-agent for codex pane");
         assert_eq!(
             agent_tag.stdout.trim(),
@@ -426,15 +409,10 @@ fn full_smoke() {
     }
 
     // ---- 7. list -----------------------------------------------------------
-    let list_out = run_bin(&[
-        "list",
-        "--format",
-        "json",
-        "--all",
-    ]);
+    let list_out = run_bin(&["list", "--format", "json", "--all"]);
     list_out.assert_success("list --format json --all");
-    let list_json: serde_json::Value = serde_json::from_str(list_out.stdout.trim())
-        .expect("list JSON should parse");
+    let list_json: serde_json::Value =
+        serde_json::from_str(list_out.stdout.trim()).expect("list JSON should parse");
     let arr = list_json
         .as_array()
         .expect("list output should be a JSON array");
@@ -454,15 +432,10 @@ fn full_smoke() {
     // Allow tmux a moment to remove the pane.
     thread::sleep(Duration::from_millis(200));
 
-    let list_after = run_bin(&[
-        "list",
-        "--format",
-        "json",
-        "--all",
-    ]);
+    let list_after = run_bin(&["list", "--format", "json", "--all"]);
     list_after.assert_success("list after kill");
-    let list_after_json: serde_json::Value = serde_json::from_str(list_after.stdout.trim())
-        .expect("post-kill list JSON should parse");
+    let list_after_json: serde_json::Value =
+        serde_json::from_str(list_after.stdout.trim()).expect("post-kill list JSON should parse");
     let arr_after = list_after_json
         .as_array()
         .expect("post-kill list should be JSON array");
@@ -520,13 +493,7 @@ fn launch_keeps_pane_alive_after_cmd_exit() {
     thread::sleep(Duration::from_millis(500));
 
     let cap = run_bin(&[
-        "capture",
-        "--target",
-        &name,
-        "--lines",
-        "20",
-        "--format",
-        "raw",
+        "capture", "--target", &name, "--lines", "20", "--format", "raw",
     ]);
     cap.assert_success("capture after wrapped cmd exit");
     assert!(
@@ -585,13 +552,7 @@ fn capture_lines_tails_visible_pane() {
     thread::sleep(Duration::from_millis(500));
 
     let cap = run_bin(&[
-        "capture",
-        "--target",
-        &name,
-        "--lines",
-        "5",
-        "--format",
-        "raw",
+        "capture", "--target", &name, "--lines", "5", "--format", "raw",
     ]);
     cap.assert_success("capture --lines 5 after 30-line burst");
 
@@ -665,7 +626,8 @@ fn launch_targets_calling_pane_not_most_recent_client() {
     let _ = run_tmux(&["kill-session", "-t", &decoy_session]);
 
     // 1. Create the harness session first, then capture its pane id.
-    run_tmux(&["new-session", "-d", "-s", &harness_session]).assert_success("create harness session");
+    run_tmux(&["new-session", "-d", "-s", &harness_session])
+        .assert_success("create harness session");
     let harness_pane = run_tmux(&[
         "display-message",
         "-p",
@@ -726,14 +688,7 @@ fn launch_targets_calling_pane_not_most_recent_client() {
     // pass `-t` so the split lands in the harness, not in the decoy.
     let mut child = Command::new(BIN)
         .args([
-            "launch",
-            "--cmd",
-            "sleep 30",
-            "--name",
-            &name,
-            "--bare",
-            "--format",
-            "json",
+            "launch", "--cmd", "sleep 30", "--name", &name, "--bare", "--format", "json",
         ])
         .env("TMUX", &tmux_env)
         .env_remove("TMUX_PANE")
@@ -782,13 +737,7 @@ fn launch_targets_calling_pane_not_most_recent_client() {
         .to_owned();
 
     // 4. The new pane must live in the harness session, not the decoy.
-    let session_q = run_tmux(&[
-        "display-message",
-        "-p",
-        "-t",
-        &new_pane,
-        "#{session_name}",
-    ]);
+    let session_q = run_tmux(&["display-message", "-p", "-t", &new_pane, "#{session_name}"]);
     session_q.assert_success("query session_name for new pane");
     let actual_session = session_q.stdout.trim();
     assert_eq!(

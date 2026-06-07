@@ -17,11 +17,80 @@ pub struct AgentSpec {
     /// render a status/footer row below the input prompt (e.g. cursor).
     pub ready_lines: Option<usize>,
     pub access_profiles: BTreeMap<String, AccessProfile>,
+    pub capabilities: AgentCapabilities,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AccessProfile {
     pub args: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AgentCapabilities {
+    pub worker_execution: bool,
+    pub prompt_refinement: bool,
+    pub branch_choice: bool,
+    pub loop_verdict: bool,
+    pub structured_output: bool,
+    pub session_reuse: bool,
+    pub native_json_schema: bool,
+    pub model_selection: bool,
+    pub reasoning_config: bool,
+    pub system_prompt: bool,
+    pub budget_limit: bool,
+    pub turn_limit: bool,
+    pub cost_reporting: bool,
+    pub tool_allowlist: bool,
+    pub web_search: bool,
+}
+
+impl Default for AgentCapabilities {
+    fn default() -> Self {
+        Self {
+            worker_execution: true,
+            prompt_refinement: false,
+            branch_choice: false,
+            loop_verdict: false,
+            structured_output: false,
+            session_reuse: false,
+            native_json_schema: false,
+            model_selection: false,
+            reasoning_config: false,
+            system_prompt: false,
+            budget_limit: false,
+            turn_limit: false,
+            cost_reporting: false,
+            tool_allowlist: false,
+            web_search: false,
+        }
+    }
+}
+
+impl AgentCapabilities {
+    fn merge_config(&mut self, config: AgentCapabilitiesConfig) {
+        macro_rules! merge_bool {
+            ($field:ident) => {
+                if let Some(value) = config.$field {
+                    self.$field = value;
+                }
+            };
+        }
+        merge_bool!(worker_execution);
+        merge_bool!(prompt_refinement);
+        merge_bool!(branch_choice);
+        merge_bool!(loop_verdict);
+        merge_bool!(structured_output);
+        merge_bool!(session_reuse);
+        merge_bool!(native_json_schema);
+        merge_bool!(model_selection);
+        merge_bool!(reasoning_config);
+        merge_bool!(system_prompt);
+        merge_bool!(budget_limit);
+        merge_bool!(turn_limit);
+        merge_bool!(cost_reporting);
+        merge_bool!(tool_allowlist);
+        merge_bool!(web_search);
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -56,6 +125,10 @@ impl Registry {
 
     pub fn get(&self, agent: &str) -> Option<&AgentSpec> {
         self.agents.get(agent)
+    }
+
+    pub fn agents(&self) -> &BTreeMap<String, AgentSpec> {
+        &self.agents
     }
 
     pub fn launch_argv(
@@ -110,12 +183,48 @@ struct AgentConfig {
     ready_lines: Option<usize>,
     #[serde(default)]
     access: BTreeMap<String, AccessProfileConfig>,
+    #[serde(default)]
+    capabilities: AgentCapabilitiesConfig,
 }
 
 #[derive(Debug, Deserialize)]
 struct AccessProfileConfig {
     #[serde(default)]
     args: Vec<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct AgentCapabilitiesConfig {
+    #[serde(default)]
+    worker_execution: Option<bool>,
+    #[serde(default)]
+    prompt_refinement: Option<bool>,
+    #[serde(default)]
+    branch_choice: Option<bool>,
+    #[serde(default)]
+    loop_verdict: Option<bool>,
+    #[serde(default)]
+    structured_output: Option<bool>,
+    #[serde(default)]
+    session_reuse: Option<bool>,
+    #[serde(default)]
+    native_json_schema: Option<bool>,
+    #[serde(default)]
+    model_selection: Option<bool>,
+    #[serde(default)]
+    reasoning_config: Option<bool>,
+    #[serde(default)]
+    system_prompt: Option<bool>,
+    #[serde(default)]
+    budget_limit: Option<bool>,
+    #[serde(default)]
+    turn_limit: Option<bool>,
+    #[serde(default)]
+    cost_reporting: Option<bool>,
+    #[serde(default)]
+    tool_allowlist: Option<bool>,
+    #[serde(default)]
+    web_search: Option<bool>,
 }
 
 /// The documented user config path: `$XDG_CONFIG_HOME/tmux-tools/agents.toml`, falling
@@ -168,6 +277,8 @@ fn merge_existing_agent(agent: &mut AgentSpec, user_agent: AgentConfig) {
     for (profile, access_profile) in user_agent.access {
         agent.access_profiles.insert(profile, access_profile.into());
     }
+
+    agent.capabilities.merge_config(user_agent.capabilities);
 }
 
 fn agent_from_config(name: String, agent: AgentConfig) -> anyhow::Result<AgentSpec> {
@@ -175,6 +286,9 @@ fn agent_from_config(name: String, agent: AgentConfig) -> anyhow::Result<AgentSp
         Some(binary) => binary,
         None => bail!("agent {name} is missing binary"),
     };
+
+    let mut capabilities = AgentCapabilities::default();
+    capabilities.merge_config(agent.capabilities);
 
     Ok(AgentSpec {
         name,
@@ -186,6 +300,7 @@ fn agent_from_config(name: String, agent: AgentConfig) -> anyhow::Result<AgentSp
             .into_iter()
             .map(|(name, profile)| (name, profile.into()))
             .collect(),
+        capabilities,
     })
 }
 
@@ -261,6 +376,34 @@ args = []
         let cursor = agents.get("cursor").unwrap();
         assert_eq!(cursor.binary, "cursor-agent");
         assert_eq!(cursor.ready_lines, Some(3));
+    }
+
+    #[test]
+    fn parses_agent_capabilities() {
+        let agents = parse_registry_toml(
+            r#"
+[demo]
+binary = "/bin/demo"
+
+[demo.capabilities]
+structured_output = true
+session_reuse = true
+model_selection = true
+web_search = true
+
+[demo.access.default]
+args = []
+"#,
+        )
+        .unwrap();
+
+        let demo = agents.get("demo").unwrap();
+        assert!(demo.capabilities.worker_execution);
+        assert!(demo.capabilities.structured_output);
+        assert!(demo.capabilities.session_reuse);
+        assert!(demo.capabilities.model_selection);
+        assert!(demo.capabilities.web_search);
+        assert!(!demo.capabilities.reasoning_config);
     }
 
     #[test]
@@ -341,6 +484,7 @@ ready_lines = 4
                         },
                     ),
                 ]),
+                capabilities: AgentCapabilities::default(),
             },
         );
         let registry = Registry { agents };
@@ -363,6 +507,7 @@ ready_lines = 4
                 ready_regex: None,
                 ready_lines: None,
                 access_profiles: BTreeMap::new(),
+                capabilities: AgentCapabilities::default(),
             },
         );
         let registry = Registry { agents };
