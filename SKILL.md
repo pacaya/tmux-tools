@@ -9,7 +9,7 @@ description: "Use this skill when launching shell commands or AI sub-agents in a
 
 ## When to Use
 
-- You need to drive an AI subagent such as Codex, Claude, Gemini, or a configured custom agent.
+- You need to drive an AI subagent such as Codex, Claude, Cursor, Antigravity (`agy`), or a configured custom agent.
 - You need to run a long shell command in tmux and capture its output later.
 - You need a one-shot command wrapper that returns command output and exit status.
 - You need to coordinate multiple panes by name instead of raw tmux pane ids.
@@ -73,7 +73,7 @@ tmux-tools capture --target build --lines 50
 
 - `--idle-seconds` is the dominant completion signal: a quiet pane means done. If the pane prints heartbeat lines, increase `--idle-seconds`.
 - `--until <regex>` ends the wait when an explicit terminator string appears anywhere in the stripped visible capture. Like `ready_regex`, it is debounced by `--ready-stable-seconds` (default 2.0), so the match must hold continuously before firing — a status line that briefly reads the previous turn's state right after a prompt is submitted won't false-complete. Pass `--ready-stable-seconds 0` for a one-shot marker that may scroll off-screen.
-- Built-in registry `ready_regex` values are `claude = "← for agents\\s*$"` (scanned against the bottom 2 non-blank lines via `ready_lines = 2`) and `gemini = "^>"`. The `codex` built-in ships **no** `ready_regex` (its `›` input glyph is on screen idle and busy, so it can't discriminate) and falls back to idle/`--until`; key codex readiness off its status line (`· Ready · Context` vs `· Working ·`) via a user `agents.toml` or an explicit `--until '· Ready · Context'`.
+- Built-in registry `ready_regex` values are `claude = "← for agents\\s*$"` (scanned against the bottom 2 non-blank lines via `ready_lines = 2`), `cursor = "→ (Add a follow-up|Plan, search, build anything)\\s*$"` (scanned against the bottom 4 non-blank lines via `ready_lines = 4`), and `agy = "\\? for shortcuts"`. The `codex` built-in ships **no** `ready_regex` (its `›` input glyph is on screen idle and busy, so it can't discriminate) and falls back to idle/`--until`; key codex readiness off its status line (`· Ready · Context` vs `· Working ·`) via a user `agents.toml` or an explicit `--until '· Ready · Context'`.
 - `--ready-stable-seconds` (default 2.0) debounces `ready_regex` and `--until`: a match must hold continuously for that long before completing, so a stale indicator visible for one poll can't false-complete. `0` fires on first match. A custom Claude status line can key `ready_regex` off state indicators (`✓ done` / `⏸ waiting`) — see README "Detecting readiness from a custom Claude status line".
 - `--timeout` is a hard ceiling. `TMUX_TOOLS_TIMEOUT` overrides the default timeout for `execute`, `prompt`, and `wait-idle` only when `--timeout` is omitted; an explicit `--timeout` wins.
 - `capture --lines 0` intentionally returns 0 lines. `--lines` is `Option<u32>`, so zero is not treated as false or unset.
@@ -83,7 +83,8 @@ tmux-tools capture --target build --lines 50
 
 - Codex profiles: `read-only` maps to `--sandbox read-only` and is the safety profile to choose; `workspace-write` maps to `--sandbox workspace-write`; `full-access` maps to `--sandbox danger-full-access --ask-for-approval never` and must never be used without explicit user permission.
 - Claude profiles mirror the Codex vocabulary: `read-only` maps to `--permission-mode plan` and is the safety profile to choose (also the `default`); `workspace-write` maps to `--permission-mode acceptEdits`; `full-access` maps to `--dangerously-skip-permissions` (≡ `bypassPermissions`) and must never be used without explicit user permission because it bypasses all permission prompts.
-- Gemini has only the `default` profile, with no additional args.
+- Cursor mirrors the Codex/Claude triad (`read-only` → `--mode ask`, `workspace-write` → `--sandbox enabled`, `full-access` → `--force --sandbox disabled`) plus a `plan` tier (`--mode plan`); its `default` is `--mode ask`.
+- Antigravity (`agy`) has only `workspace-write` (default, approval-gated, no extra args) and `full-access` (`--dangerously-skip-permissions`) — it has no interactive read-only mode.
 - Be explicit with `--access`. The registry chooses an agent's `default` profile when present, otherwise the first configured profile by name; the built-in Codex and Claude profiles do not define a `default`.
 - Agent profiles are deep-merged from `~/.config/tmux-tools/agents.toml`, so users can override built-ins or add their own agents.
 

@@ -87,16 +87,62 @@ fn build_all() -> BTreeMap<String, AgentSpec> {
             },
         ),
         (
-            "gemini".to_owned(),
+            "cursor".to_owned(),
             AgentSpec {
-                name: "gemini".to_owned(),
-                binary: "gemini".to_owned(),
-                ready_regex: Some("^>".to_owned()),
-                ready_lines: None,
-                access_profiles: BTreeMap::from([("default".to_owned(), profile(&[]))]),
+                name: "cursor".to_owned(),
+                binary: "cursor-agent".to_owned(),
+                // cursor's TUI input box renders 4 non-blank lines from the bottom
+                // (mode row + Composer status row + cwd row sit below it), so
+                // ready_lines = 4. The placeholder, anchored with `\s*$`, is present
+                // only in the idle state. See ~/.config/tmux-tools/agents.toml for the
+                // full rationale and the validated cursor-agent version.
+                ready_regex: Some("→ (Add a follow-up|Plan, search, build anything)\\s*$".to_owned()),
+                ready_lines: Some(4),
+                // Access-profile names mirror the codex vocabulary (read-only /
+                // workspace-write / full-access) so one `--access` value works across
+                // agents, plus a cursor-specific `plan` tier.
+                access_profiles: BTreeMap::from([
+                    ("default".to_owned(), profile(&["--mode", "ask"])),
+                    ("read-only".to_owned(), profile(&["--mode", "ask"])),
+                    ("plan".to_owned(), profile(&["--mode", "plan"])),
+                    (
+                        "workspace-write".to_owned(),
+                        profile(&["--sandbox", "enabled"]),
+                    ),
+                    (
+                        "full-access".to_owned(),
+                        profile(&["--force", "--sandbox", "disabled"]),
+                    ),
+                ]),
                 capabilities: capabilities(
-                    true, true, true, true, true, false, true, true, false, false, false, false,
-                    true,
+                    false, false, false, false, false, false, false, false, false, false, false,
+                    false, false,
+                ),
+            },
+        ),
+        (
+            "agy".to_owned(),
+            AgentSpec {
+                name: "agy".to_owned(),
+                binary: "agy".to_owned(),
+                // Antigravity CLI (`agy`). Its bottom-most non-blank line reads
+                // `? for shortcuts` when idle and `esc to cancel` while generating —
+                // a clean idle/busy discriminator on the bottom line, so ready_lines
+                // stays at the default. agy has NO interactive read-only mode, so there
+                // is no `read-only` profile — only the two autonomy levels it supports.
+                ready_regex: Some("\\? for shortcuts".to_owned()),
+                ready_lines: None,
+                access_profiles: BTreeMap::from([
+                    ("default".to_owned(), profile(&[])),
+                    ("workspace-write".to_owned(), profile(&[])),
+                    (
+                        "full-access".to_owned(),
+                        profile(&["--dangerously-skip-permissions"]),
+                    ),
+                ]),
+                capabilities: capabilities(
+                    false, false, false, false, false, false, false, false, false, false, false,
+                    false, false,
                 ),
             },
         ),
@@ -152,10 +198,13 @@ mod tests {
     fn includes_expected_builtin_agents_and_profiles() {
         let agents = all();
 
-        assert_eq!(agents.len(), 3);
+        assert_eq!(agents.len(), 4);
         assert!(agents.contains_key("codex"));
         assert!(agents.contains_key("claude"));
-        assert!(agents.contains_key("gemini"));
+        assert!(agents.contains_key("cursor"));
+        assert!(agents.contains_key("agy"));
+        // Gemini was removed (replaced by the Antigravity CLI).
+        assert!(!agents.contains_key("gemini"));
 
         assert!(agents["codex"].access_profiles.contains_key("default"));
         assert!(agents["codex"].access_profiles.contains_key("read-only"));
@@ -179,6 +228,22 @@ mod tests {
             agents["claude"].access_profiles["read-only"].args,
         );
 
-        assert!(agents["gemini"].access_profiles.contains_key("default"));
+        // Cursor mirrors the codex vocabulary plus a `plan` tier.
+        assert!(agents["cursor"].access_profiles.contains_key("default"));
+        assert!(agents["cursor"].access_profiles.contains_key("read-only"));
+        assert!(agents["cursor"].access_profiles.contains_key("plan"));
+        assert!(agents["cursor"]
+            .access_profiles
+            .contains_key("workspace-write"));
+        assert!(agents["cursor"].access_profiles.contains_key("full-access"));
+        assert_eq!(agents["cursor"].binary, "cursor-agent");
+
+        // agy has no read-only tier (no interactive read-only mode).
+        assert!(agents["agy"].access_profiles.contains_key("default"));
+        assert!(agents["agy"]
+            .access_profiles
+            .contains_key("workspace-write"));
+        assert!(agents["agy"].access_profiles.contains_key("full-access"));
+        assert!(!agents["agy"].access_profiles.contains_key("read-only"));
     }
 }
