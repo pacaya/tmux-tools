@@ -3,8 +3,9 @@ use clap::{ArgAction, Args};
 use serde::Serialize;
 use std::thread;
 use std::time::Duration;
+use tmux_tools_core::{format::Format, target, tmux};
 
-use crate::{format::Format, target, tmux, CommonArgs};
+use crate::CommonArgs;
 
 #[derive(Args, Debug)]
 pub struct SendArgs {
@@ -193,7 +194,10 @@ mod tests {
             "--enter --verify with unchanged line should retry to 3 sends"
         );
         assert_eq!(attempts, 3);
-        assert!(!verified, "verification must report failure when line never changes");
+        assert!(
+            !verified,
+            "verification must report failure when line never changes"
+        );
     }
 
     #[test]
@@ -201,10 +205,7 @@ mod tests {
         // When the captured line changes after the first Enter, the loop
         // must short-circuit: 1 send, verified=true.
         let send_count = RefCell::new(0_usize);
-        let captures = RefCell::new(vec![
-            "before".to_owned(),
-            "after".to_owned(),
-        ]);
+        let captures = RefCell::new(vec!["before".to_owned(), "after".to_owned()]);
         let mut next_capture_index = 0_usize;
         let (attempts, verified) = dispatch_enter(
             true,

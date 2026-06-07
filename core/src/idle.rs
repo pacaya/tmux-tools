@@ -319,7 +319,11 @@ mod tests {
     fn claude_status_regex_does_not_match_busy_states() {
         let ready = Some(Regex::new(CLAUDE_STATUS_READY).expect("test regex compiles"));
 
-        assert!(!ready_matches("⚡ working | 🤖 opus-4.8 | ctx 42%\n", &ready, 15));
+        assert!(!ready_matches(
+            "⚡ working | 🤖 opus-4.8 | ctx 42%\n",
+            &ready,
+            15
+        ));
         assert!(!ready_matches(
             "🔐 permission | 🤖 opus-4.8 | ctx 42%\n",
             &ready,

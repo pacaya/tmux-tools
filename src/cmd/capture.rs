@@ -1,8 +1,9 @@
 use anyhow::Result;
 use clap::Args;
 use serde_json::json;
+use tmux_tools_core::{format, format::Format, names, target, tmux};
 
-use crate::{format::Format, names, target, tmux, CommonArgs};
+use crate::CommonArgs;
 
 #[derive(Args, Debug)]
 pub struct CaptureArgs {
@@ -20,7 +21,7 @@ pub fn run(args: &CaptureArgs) -> Result<()> {
     // tmux interprets `-S -0 -E -` as the visible-pane shorthand rather than a
     // zero-length range, so honour the explicit zero intent here.
     if args.lines == Some(0) && !args.all {
-        let rendered = crate::format::render_capture("", args.common.format);
+        let rendered = format::render_capture("", args.common.format);
         return render_output(args.common.format, &pane, &rendered);
     }
 
@@ -30,7 +31,7 @@ pub fn run(args: &CaptureArgs) -> Result<()> {
         (Some(n), false) if n > 0 => tail_lines(&raw, n),
         _ => raw,
     };
-    let rendered = crate::format::render_capture(&to_render, args.common.format);
+    let rendered = format::render_capture(&to_render, args.common.format);
 
     render_output(args.common.format, &pane, &rendered)
 }

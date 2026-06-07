@@ -16,7 +16,9 @@ pub fn non_empty(value: &str) -> Option<String> {
 }
 
 pub fn display_value(value: Option<&str>) -> &str {
-    value.filter(|value| !value.is_empty()).unwrap_or(MISSING_GLYPH)
+    value
+        .filter(|value| !value.is_empty())
+        .unwrap_or(MISSING_GLYPH)
 }
 
 impl fmt::Display for Format {

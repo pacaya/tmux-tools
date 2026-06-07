@@ -2,8 +2,9 @@ use anyhow::{anyhow, Result};
 use clap::{Args, ValueEnum};
 use serde::Serialize;
 use std::env;
+use tmux_tools_core::{format::Format, names, target, tmux};
 
-use crate::{format::Format, names, target, tmux, util::rfc3339_utc_now, CommonArgs};
+use crate::{util::rfc3339_utc_now, CommonArgs};
 
 /// Resolved tmux target for `launch_pane`.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -198,9 +199,8 @@ pub fn launch_pane(
                 // pane on the server, which races when other sessions are
                 // opened concurrently — the new pane lands in the wrong
                 // session.
-                let calling = target::calling_pane_id().ok_or_else(|| {
-                    anyhow!("$TMUX is set but no calling pane id is available")
-                })?;
+                let calling = target::calling_pane_id()
+                    .ok_or_else(|| anyhow!("$TMUX is set but no calling pane id is available"))?;
                 if let Some(split) = split {
                     split_window_args(cmd, split, size, Some(&calling))
                 } else {

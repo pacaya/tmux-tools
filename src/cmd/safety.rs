@@ -15,8 +15,7 @@
 //! the calling pane; `--any` lets you act on cross-cwd or non-owned panes.
 
 use anyhow::{anyhow, Result};
-
-use crate::{names, names::Registered, target};
+use tmux_tools_core::{names, names::Registered, target};
 
 /// Verdict produced by [`evaluate`]: either `Allow` (proceed) or `Deny`
 /// with a human-readable reason. Pure function — easy to unit-test without
@@ -65,7 +64,9 @@ pub fn evaluate(input: &SafetyInput<'_>) -> Verdict {
 
     // Cwd-scope check (only when @tt-cwd was recorded).
     if owned {
-        if let (Some(pane_cwd), Some(current)) = (input.registered.cwd.as_deref(), input.current_cwd) {
+        if let (Some(pane_cwd), Some(current)) =
+            (input.registered.cwd.as_deref(), input.current_cwd)
+        {
             if pane_cwd != current && !input.any {
                 return Verdict::Deny(format!(
                     "refusing to {} pane {} owned by another cwd ({}); pass --any to override",
@@ -86,7 +87,12 @@ pub fn enforce(input: &SafetyInput<'_>) -> Result<()> {
     }
 }
 
-pub fn enforce_for_pane(verb: &'static str, pane: &str, force: bool, any: bool) -> Result<Registered> {
+pub fn enforce_for_pane(
+    verb: &'static str,
+    pane: &str,
+    force: bool,
+    any: bool,
+) -> Result<Registered> {
     let registered = names::read(pane)?;
     let calling = target::calling_pane_id();
     let current_cwd = std::env::current_dir()

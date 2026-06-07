@@ -3,23 +3,11 @@ use clap::Args;
 use serde::Serialize;
 use std::collections::BTreeSet;
 use std::env;
-
-use crate::{
-    format::{non_empty, Format, MISSING_GLYPH},
+use tmux_tools_core::{
+    format::{self, non_empty, Format, MISSING_GLYPH},
     names, target, tmux,
 };
 
-const LIST_FORMAT: &str = concat!(
-    "#{session_name}\x1f#{window_index}\x1f#{window_name}\x1f#{pane_index}\x1f#{pane_id}\x1f#{",
-    names::key_name!(),
-    "}\x1f#{",
-    names::key_agent!(),
-    "}\x1f#{",
-    names::key_access!(),
-    "}\x1f#{",
-    names::key_launched_at!(),
-    "}\x1f#{pane_dead}\x1f#{pane_dead_status}\x1f#{window_activity}",
-);
 const FIELD_SEP: char = '\x1f';
 
 #[derive(Args, Debug)]
@@ -114,7 +102,8 @@ fn current_session() -> Result<String> {
 }
 
 fn list_panes() -> Result<Vec<PaneRow>> {
-    let output = tmux::run(&["list-panes", "-a", "-F", LIST_FORMAT])
+    let list_format = list_format();
+    let output = tmux::run(&["list-panes", "-a", "-F", &list_format])
         .context("failed to run tmux command: tmux list-panes -a")?;
 
     if output.exit_code != 0 {
@@ -124,13 +113,23 @@ fn list_panes() -> Result<Vec<PaneRow>> {
 
         return Err(anyhow!(
             "tmux command failed (args: {:?}, exit code {}): {}",
-            ["list-panes", "-a", "-F", LIST_FORMAT],
+            ["list-panes", "-a", "-F", list_format.as_str()],
             output.exit_code,
             output.stderr.trim()
         ));
     }
 
     output.stdout.lines().map(parse_pane_row).collect()
+}
+
+fn list_format() -> String {
+    format!(
+        "#{{session_name}}\x1f#{{window_index}}\x1f#{{window_name}}\x1f#{{pane_index}}\x1f#{{pane_id}}\x1f#{{{}}}\x1f#{{{}}}\x1f#{{{}}}\x1f#{{{}}}\x1f#{{pane_dead}}\x1f#{{pane_dead_status}}\x1f#{{window_activity}}",
+        names::KEY_NAME,
+        names::KEY_AGENT,
+        names::KEY_ACCESS,
+        names::KEY_LAUNCHED_AT,
+    )
 }
 
 fn stderr_indicates_no_server(stderr: &str) -> bool {
@@ -327,7 +326,7 @@ fn column_widths(headers: &[&str; 8], rows: &[[String; 8]]) -> [usize; 8] {
 }
 
 fn display_value(value: Option<&str>) -> String {
-    crate::format::display_value(value).to_owned()
+    format::display_value(value).to_owned()
 }
 
 impl PaneRow {
@@ -422,9 +421,7 @@ mod tests {
 
     #[test]
     fn last_activity_zero_is_none() {
-        let line = build_line(&[
-            "s", "0", "w", "0", "%1", "", "", "", "", "0", "", "0",
-        ]);
+        let line = build_line(&["s", "0", "w", "0", "%1", "", "", "", "", "0", "", "0"]);
         let row = parse_pane_row(&line).expect("row parses");
         assert_eq!(row.last_activity, None);
     }

@@ -15,6 +15,12 @@ pub enum TargetSpec {
     SmartDefault,
 }
 
+pub trait TargetArgs {
+    fn target(&self) -> Option<&str>;
+    fn session(&self) -> Option<&str>;
+    fn window(&self) -> Option<&str>;
+}
+
 pub fn parse(s: &str) -> TargetSpec {
     if is_tmux_id(s, '%') {
         TargetSpec::PaneId(s.to_owned())
@@ -35,12 +41,12 @@ pub fn resolve(spec: &TargetSpec, session: Option<&str>, window: Option<&str>) -
     }
 }
 
-pub(crate) fn resolve_from_common(common: &crate::CommonArgs) -> Result<String> {
-    let spec = match &common.target {
-        Some(target) => parse(target.as_str()),
+pub fn resolve_from_common(common: &impl TargetArgs) -> Result<String> {
+    let spec = match common.target() {
+        Some(target) => parse(target),
         None => TargetSpec::SmartDefault,
     };
-    resolve(&spec, common.session.as_deref(), common.window.as_deref())
+    resolve(&spec, common.session(), common.window())
 }
 
 fn resolve_smart_default(session: Option<&str>, window: Option<&str>) -> Result<String> {
@@ -57,7 +63,7 @@ fn resolve_smart_default(session: Option<&str>, window: Option<&str>) -> Result<
     most_recent_pane_in_session(MANAGED_SESSION)
 }
 
-pub(crate) fn scoped_target(session: Option<&str>, window: Option<&str>) -> String {
+pub fn scoped_target(session: Option<&str>, window: Option<&str>) -> String {
     match (session, window) {
         (Some(session), Some(window)) => format!("{session}:{window}"),
         (Some(session), None) => session.to_owned(),
@@ -82,9 +88,7 @@ fn current_pane() -> Result<String> {
     // active pane. Without this, a bare `tmux display -p` would return the
     // most-recently-active pane across all sessions.
     if let Some(session_target) = caller_session_from_tmux_env() {
-        if let Ok(pane) = display_pane_id(&[
-            "display", "-p", "-t", &session_target, "#{pane_id}",
-        ]) {
+        if let Ok(pane) = display_pane_id(&["display", "-p", "-t", &session_target, "#{pane_id}"]) {
             return Ok(pane);
         }
     }
@@ -190,4 +194,3 @@ fn is_tmux_id(value: &str, prefix: char) -> bool {
         .strip_prefix(prefix)
         .is_some_and(|rest| !rest.is_empty() && rest.chars().all(|char| char.is_ascii_digit()))
 }
-

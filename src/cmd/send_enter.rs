@@ -1,8 +1,9 @@
 use anyhow::Result;
 use clap::Args;
 use serde::Serialize;
+use tmux_tools_core::{format::Format, target, tmux};
 
-use crate::{cmd::safety, format::Format, target, tmux, CommonArgs};
+use crate::{cmd::safety, CommonArgs};
 
 const VERB: &str = "send-enter";
 

@@ -127,9 +127,7 @@ mod tests {
         assert!(agents["claude"]
             .access_profiles
             .contains_key("workspace-write"));
-        assert!(agents["claude"]
-            .access_profiles
-            .contains_key("full-access"));
+        assert!(agents["claude"].access_profiles.contains_key("full-access"));
         assert_eq!(
             agents["claude"].access_profiles["default"].args,
             agents["claude"].access_profiles["read-only"].args,

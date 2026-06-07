@@ -34,8 +34,8 @@ pub fn run_checked_owned(args: &[String]) -> Result<String> {
 }
 
 fn check(result: Result<TmuxOutput>, args: &[&str]) -> Result<String> {
-    let output = result
-        .with_context(|| format!("failed to run tmux command: tmux {}", args.join(" ")))?;
+    let output =
+        result.with_context(|| format!("failed to run tmux command: tmux {}", args.join(" ")))?;
 
     if output.exit_code != 0 {
         return Err(anyhow!(

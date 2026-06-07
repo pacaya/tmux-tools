@@ -1,12 +1,12 @@
 use anyhow::Result;
 use clap::Args;
 use serde::Serialize;
-
-use crate::{
-    cmd::safety,
+use tmux_tools_core::{
     format::{Format, MISSING_GLYPH},
-    target, tmux, CommonArgs,
+    target, tmux,
 };
+
+use crate::{cmd::safety, CommonArgs};
 
 const VERB: &str = "kill";
 

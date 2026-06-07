@@ -1,13 +1,8 @@
 use anyhow::Result;
 use clap::{Args, Parser, Subcommand};
+use tmux_tools_core::Format;
 
-mod agents;
 mod cmd;
-pub mod format;
-mod idle;
-mod names;
-mod target;
-mod tmux;
 mod util;
 
 use crate::cmd::{
@@ -16,7 +11,6 @@ use crate::cmd::{
     send_enter::SendEnterArgs, spawn_agent::SpawnAgentArgs, status::StatusArgs,
     wait_idle::WaitIdleArgs,
 };
-pub use crate::format::Format;
 
 #[derive(Debug, Parser)]
 #[command(name = "tmux-tools")]
@@ -77,6 +71,20 @@ pub(crate) struct CommonArgs {
     pub(crate) session: Option<String>,
     #[arg(long, value_name = "NAME")]
     pub(crate) window: Option<String>,
+}
+
+impl tmux_tools_core::target::TargetArgs for CommonArgs {
+    fn target(&self) -> Option<&str> {
+        self.target.as_ref().map(Target::as_str)
+    }
+
+    fn session(&self) -> Option<&str> {
+        self.session.as_deref()
+    }
+
+    fn window(&self) -> Option<&str> {
+        self.window.as_deref()
+    }
 }
 
 fn main() -> Result<()> {

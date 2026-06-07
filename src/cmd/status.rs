@@ -2,25 +2,13 @@ use anyhow::{anyhow, Context, Result};
 use clap::Args;
 use serde::Serialize;
 use std::env;
-
-use crate::{
+use tmux_tools_core::{
     format::{non_empty, Format},
-    target, tmux, CommonArgs,
+    names, target, tmux,
 };
 
-const STATUS_FORMAT: &str = concat!(
-    "#{session_name}\x1f#{window_index}.#{window_name}\x1f#{pane_index}.#{pane_id}\x1f#{",
-    crate::names::key_name!(),
-    "}\x1f#{",
-    crate::names::key_agent!(),
-    "}\x1f#{",
-    crate::names::key_access!(),
-    "}\x1f#{",
-    crate::names::key_launched_at!(),
-    "}\x1f#{",
-    crate::names::key_cwd!(),
-    "}",
-);
+use crate::CommonArgs;
+
 const FIELD_SEP: char = '\x1f';
 const STATUS_FIELD_COUNT: usize = 8;
 
@@ -98,12 +86,24 @@ fn render_not_in_tmux(format: Format) -> Result<()> {
 }
 
 fn display_status(pane_id: Option<&str>) -> Result<String> {
+    let status_format = status_format();
     let args = match pane_id {
-        Some(pane_id) => vec!["display-message", "-p", "-t", pane_id, STATUS_FORMAT],
-        None => vec!["display-message", "-p", STATUS_FORMAT],
+        Some(pane_id) => vec!["display-message", "-p", "-t", pane_id, &status_format],
+        None => vec!["display-message", "-p", &status_format],
     };
 
     tmux::run_checked(&args)
+}
+
+fn status_format() -> String {
+    format!(
+        "#{{session_name}}\x1f#{{window_index}}.#{{window_name}}\x1f#{{pane_index}}.#{{pane_id}}\x1f#{{{}}}\x1f#{{{}}}\x1f#{{{}}}\x1f#{{{}}}\x1f#{{{}}}",
+        names::KEY_NAME,
+        names::KEY_AGENT,
+        names::KEY_ACCESS,
+        names::KEY_LAUNCHED_AT,
+        names::KEY_CWD,
+    )
 }
 
 fn parse_status(line: &str) -> Result<StatusRow> {

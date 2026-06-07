@@ -4,16 +4,15 @@ use regex::Regex;
 use serde::Serialize;
 use std::thread;
 use std::time::Duration;
-
-use crate::{
-    cmd::send::dispatch_enter,
-    cmd::wait_idle::ready_signal_for,
+use tmux_tools_core::{
     format::{render_capture, strip_ansi, Format},
     idle::{
         resolve_timeout, validate_seconds, wait_for_idle, IdleConfig, DEFAULT_READY_STABLE_SECONDS,
     },
-    names, target, tmux, CommonArgs,
+    names, target, tmux,
 };
+
+use crate::{cmd::send::dispatch_enter, cmd::wait_idle::ready_signal_for, CommonArgs};
 
 #[derive(Args, Debug)]
 pub struct PromptArgs {
@@ -23,7 +22,11 @@ pub struct PromptArgs {
     pub(crate) idle_seconds: f64,
     #[arg(long, default_value_t = DEFAULT_READY_STABLE_SECONDS, value_name = "F")]
     pub(crate) ready_stable_seconds: f64,
-    #[arg(long, value_name = "SEC", help = "Timeout in seconds [default: 120, env: TMUX_TOOLS_TIMEOUT]")]
+    #[arg(
+        long,
+        value_name = "SEC",
+        help = "Timeout in seconds [default: 120, env: TMUX_TOOLS_TIMEOUT]"
+    )]
     pub(crate) timeout: Option<f64>,
     #[arg(long, value_name = "REGEX")]
     pub(crate) until: Option<String>,

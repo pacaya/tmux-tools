@@ -7,13 +7,31 @@ use crate::tmux;
 // Keys are exposed both as `pub const &str` (for normal use) and via
 // macro_rules! aliases (for use inside `concat!`, which only accepts literals).
 // Keep both arms in sync.
-macro_rules! key_name { () => { "@tt-name" }; }
-macro_rules! key_agent { () => { "@tt-agent" }; }
-macro_rules! key_access { () => { "@tt-access" }; }
-macro_rules! key_launched_at { () => { "@tt-launched-at" }; }
-macro_rules! key_cwd { () => { "@tt-cwd" }; }
-pub(crate) use {key_access, key_agent, key_cwd, key_launched_at, key_name};
-
+macro_rules! key_name {
+    () => {
+        "@tt-name"
+    };
+}
+macro_rules! key_agent {
+    () => {
+        "@tt-agent"
+    };
+}
+macro_rules! key_access {
+    () => {
+        "@tt-access"
+    };
+}
+macro_rules! key_launched_at {
+    () => {
+        "@tt-launched-at"
+    };
+}
+macro_rules! key_cwd {
+    () => {
+        "@tt-cwd"
+    };
+}
 pub const KEY_NAME: &str = key_name!();
 pub const KEY_AGENT: &str = key_agent!();
 pub const KEY_ACCESS: &str = key_access!();
@@ -99,11 +117,21 @@ fn parse_panes_with_name(output: &str, name: &str) -> Vec<String> {
 pub fn read(pane_id: &str) -> Result<Registered> {
     const FIELD_SEP: char = '\x1f';
     const FORMAT: &str = concat!(
-        "#{", key_name!(), "}\x1f",
-        "#{", key_agent!(), "}\x1f",
-        "#{", key_access!(), "}\x1f",
-        "#{", key_launched_at!(), "}\x1f",
-        "#{", key_cwd!(), "}",
+        "#{",
+        key_name!(),
+        "}\x1f",
+        "#{",
+        key_agent!(),
+        "}\x1f",
+        "#{",
+        key_access!(),
+        "}\x1f",
+        "#{",
+        key_launched_at!(),
+        "}\x1f",
+        "#{",
+        key_cwd!(),
+        "}",
     );
     let raw = tmux::run_checked(&["display-message", "-p", "-t", pane_id, FORMAT])?;
     let line = raw.trim_end_matches('\n');
@@ -113,7 +141,13 @@ pub fn read(pane_id: &str) -> Result<Registered> {
     let access = parts.next().and_then(non_empty_owned);
     let launched_at = parts.next().and_then(non_empty_owned);
     let cwd = parts.next().and_then(non_empty_owned);
-    Ok(Registered { name, agent, access, launched_at, cwd })
+    Ok(Registered {
+        name,
+        agent,
+        access,
+        launched_at,
+        cwd,
+    })
 }
 
 fn non_empty_owned(s: &str) -> Option<String> {

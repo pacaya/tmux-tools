@@ -5,13 +5,13 @@ use serde::Serialize;
 use std::process;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-
-use crate::{
-    cmd::spawn_agent::shell_quote,
+use tmux_tools_core::{
     format::{strip_ansi, Format},
     idle::resolve_timeout,
-    names, target, tmux, CommonArgs,
+    names, target, tmux,
 };
+
+use crate::{cmd::spawn_agent::shell_quote, CommonArgs};
 
 const POLL_INTERVAL: Duration = Duration::from_millis(250);
 const LOOKBACKS: [Option<u32>; 4] = [Some(100), Some(500), Some(2000), None];
@@ -20,7 +20,11 @@ const LOOKBACKS: [Option<u32>; 4] = [Some(100), Some(500), Some(2000), None];
 pub struct ExecuteArgs {
     #[arg(value_name = "CMD")]
     pub(crate) cmd: String,
-    #[arg(long, value_name = "SEC", help = "Timeout in seconds [default: 120, env: TMUX_TOOLS_TIMEOUT]")]
+    #[arg(
+        long,
+        value_name = "SEC",
+        help = "Timeout in seconds [default: 120, env: TMUX_TOOLS_TIMEOUT]"
+    )]
     pub(crate) timeout: Option<f64>,
     #[arg(long, action = ArgAction::SetTrue)]
     pub(crate) no_wait: bool,

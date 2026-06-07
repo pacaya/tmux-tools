@@ -3,16 +3,17 @@ use clap::Args;
 use regex::Regex;
 use serde::Serialize;
 use std::time::Duration;
-
-use crate::{
+use tmux_tools_core::{
     agents,
     format::Format,
     idle::{
         resolve_timeout, validate_seconds, wait_for_idle, IdleConfig, DEFAULT_READY_SCAN_LINES,
         DEFAULT_READY_STABLE_SECONDS,
     },
-    names, target, CommonArgs,
+    names, target,
 };
+
+use crate::CommonArgs;
 
 /// The readiness signal resolved from the pane's registered agent profile: the compiled
 /// `ready_regex` (if any) and how many bottom non-blank lines it should be tested against.
@@ -27,7 +28,11 @@ pub struct WaitIdleArgs {
     pub(crate) idle_seconds: f64,
     #[arg(long, default_value_t = DEFAULT_READY_STABLE_SECONDS, value_name = "F")]
     pub(crate) ready_stable_seconds: f64,
-    #[arg(long, value_name = "SEC", help = "Timeout in seconds [default: 120, env: TMUX_TOOLS_TIMEOUT]")]
+    #[arg(
+        long,
+        value_name = "SEC",
+        help = "Timeout in seconds [default: 120, env: TMUX_TOOLS_TIMEOUT]"
+    )]
     pub(crate) timeout: Option<f64>,
     #[arg(long, value_name = "REGEX")]
     pub(crate) until: Option<String>,
