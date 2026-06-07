@@ -165,6 +165,63 @@ Cursor and Antigravity (now built-ins) reuse the same triad. Cursor maps `read-o
 
 `TMUX_TOOLS_TIMEOUT` overrides the default 120-second timeout for `execute`, `prompt`, and `wait-idle` when `--timeout` is omitted.
 
+## Library: configurable invocation
+
+`tmux_tools_core` exposes a programmatic API for shaping how every tmux subprocess is spawned. Re-exported from the crate root: `TmuxInvocation`, `set_global_invocation`, `with_invocation`.
+
+### `TmuxInvocation`
+
+```rust
+pub struct TmuxInvocation {
+    pub prefix: Vec<String>,   // command prefix (empty by default)
+    pub socket: Option<String>,  // tmux socket name → `-L <name>` (None by default)
+    pub tmux_bin: String,       // tmux binary name (defaults to "tmux")
+}
+```
+
+`TmuxInvocation::default()` → `tmux_bin = "tmux"`, empty `prefix`, `socket = None`.
+
+### `set_global_invocation(invocation: Option<TmuxInvocation>)`
+
+Sets or clears the process-wide default invocation. Pass `None` to restore plain `tmux`.
+
+### `with_invocation(inv: TmuxInvocation, f: impl FnOnce() -> T) -> T`
+
+RAII thread-local override. Correct for per-thread / concurrent use (e.g. `spawn_blocking` threads each running commands under a different user). Takes precedence over the global invocation.
+
+### Resolution order
+
+thread-local → process-global → plain `tmux` (`TmuxInvocation::default()`).
+
+### Command construction
+
+Every `tmux::run*` call resolves the active invocation and builds:
+
+- **Prefix non-empty:** `Command::new(prefix[0])` with args `prefix[1..] ++ [tmux_bin] ++ ["-L", socket]? ++ user_args`
+- **Prefix empty:** `Command::new(tmux_bin)` with args `["-L", socket]? ++ user_args`
+
+This is how a consumer (e.g. SilverBond) runs all tmux control commands (`send-keys`, `capture-pane`, `new-session`, etc.) as another user via `sudo -u <user> … -L <socket>`.
+
+### Example
+
+```rust
+use tmux_tools_core::{with_invocation, TmuxInvocation};
+
+with_invocation(
+    TmuxInvocation {
+        prefix: vec!["sudo".into(), "-u".into(), "agent".into(), "-H".into(), "--".into()],
+        socket: Some("silverbond".into()),
+        tmux_bin: "tmux".into(),
+    },
+    || {
+        // Every tmux call in this closure runs as:
+        // sudo -u agent -H -- tmux -L silverbond <args>
+        tmux_tools_core::tmux::run_checked(&["new-session", "-d", "-s", "work"])?;
+        Ok::<_, anyhow::Error>(())
+    },
+)?;
+```
+
 ## Status
 
 v1, API may change. CLI-only - MCP wrapper deferred.
