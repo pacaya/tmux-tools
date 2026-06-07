@@ -96,7 +96,9 @@ fn build_all() -> BTreeMap<String, AgentSpec> {
                 // ready_lines = 4. The placeholder, anchored with `\s*$`, is present
                 // only in the idle state. See ~/.config/tmux-tools/agents.toml for the
                 // full rationale and the validated cursor-agent version.
-                ready_regex: Some("→ (Add a follow-up|Plan, search, build anything)\\s*$".to_owned()),
+                ready_regex: Some(
+                    "→ (Add a follow-up|Plan, search, build anything)\\s*$".to_owned(),
+                ),
                 ready_lines: Some(4),
                 // Access-profile names mirror the codex vocabulary (read-only /
                 // workspace-write / full-access) so one `--access` value works across

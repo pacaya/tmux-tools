@@ -24,6 +24,11 @@ pub fn capture_ansi(pane_id: &str, opts: CaptureAnsiOpts) -> Result<String> {
 // When implementing, replace the pipe-pane fifo approach with a control-mode
 // client that parses structured %output events for zero-overhead multiplexing.
 pub async fn stream_pane(pane_id: &str) -> Result<impl AsyncRead + Send + 'static> {
+    // NOTE: stream_pane uses a FIFO that the observed pane writes into via `pipe-pane`.
+    // Cross-user FIFO permissions are fragile when TmuxInvocation switches users.
+    // SilverBond's execution path uses snapshot capture (capture_ansi / capture-pane),
+    // which is unaffected by user-switching. Live-stream-to-UI is deprioritized in
+    // favor of terminal-attach observability.
     let fifo_path = unique_fifo_path()?;
     make_fifo(&fifo_path)?;
 
