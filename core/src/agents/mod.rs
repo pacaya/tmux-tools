@@ -7,15 +7,20 @@ use serde::Deserialize;
 
 mod builtin;
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[non_exhaustive]
 pub struct AgentSpec {
     pub name: String,
     pub binary: String,
     pub ready_regex: Option<String>,
     /// How many of the bottom non-blank lines `ready_regex` is tested against.
     /// `None` means the built-in default (1 = bottom line only). Raise it for TUIs that
-    /// render a status/footer row below the input prompt (e.g. cursor).
+    /// render a status/footer row below the input prompt (e.g. cursor). `Some(0)` means
+    /// "no limit" — scan every non-blank line, so a uniquely-anchored pattern matches a
+    /// status line no matter how many task/footer rows render below it (e.g. Claude with a
+    /// custom status line above a variable-height subagent footer).
     pub ready_lines: Option<usize>,
+    pub interaction_patterns: Vec<InteractionPatternSpec>,
     pub access_profiles: BTreeMap<String, AccessProfile>,
     pub capabilities: AgentCapabilities,
 }
@@ -25,7 +30,60 @@ pub struct AccessProfile {
     pub args: Vec<String>,
 }
 
+#[derive(Default, Deserialize, Clone, Debug, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum InteractionKind {
+    Permission,
+    AutoRespond,
+    SubagentActive,
+    DestructiveWarning,
+    #[default]
+    #[serde(other)]
+    Unknown,
+}
+
+impl InteractionKind {
+    pub fn event_type(&self) -> Option<&'static str> {
+        match self {
+            Self::Permission => Some("permission"),
+            Self::AutoRespond => Some("auto_respond"),
+            Self::SubagentActive => Some("subagent_active"),
+            Self::DestructiveWarning => Some("destructive_warning"),
+            Self::Unknown => None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[non_exhaustive]
+pub struct InteractionPatternSpec {
+    pub pattern: String,
+    pub kind: InteractionKind,
+    pub description: String,
+    pub response: Option<String>,
+    pub send_enter: bool,
+}
+
+impl InteractionPatternSpec {
+    pub fn new(
+        pattern: String,
+        kind: InteractionKind,
+        description: String,
+        response: Option<String>,
+        send_enter: bool,
+    ) -> Self {
+        Self {
+            pattern,
+            kind,
+            description,
+            response,
+            send_enter,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub struct AgentCapabilities {
     pub worker_execution: bool,
     pub prompt_refinement: bool,
@@ -98,12 +156,22 @@ pub struct Registry {
     agents: BTreeMap<String, AgentSpec>,
 }
 
+#[derive(Deserialize, Clone, Debug, Eq, PartialEq)]
+pub struct LoadWarning {
+    pub agent: String,
+    pub detail: String,
+}
+
 impl Registry {
-    pub fn load() -> anyhow::Result<Registry> {
+    /// Invalid entries are skipped with a warning rather than aborting the load.
+    pub fn load() -> anyhow::Result<(Registry, Vec<LoadWarning>)> {
         Self::load_with_user_path(user_config_path().as_deref())
     }
 
-    pub fn load_with_user_path(path: Option<&Path>) -> anyhow::Result<Registry> {
+    /// Invalid entries are skipped with a warning rather than aborting the load.
+    pub fn load_with_user_path(
+        path: Option<&Path>,
+    ) -> anyhow::Result<(Registry, Vec<LoadWarning>)> {
         let builtins = builtin::all();
 
         if let Some(path) = path.filter(|path| path.exists()) {
@@ -114,12 +182,15 @@ impl Registry {
 
             // User config is a deep merge: scalar fields replace builtins when present,
             // while access profiles merge by name so builtin profiles survive unless overridden.
-            let agents = merge_agent_configs(builtins.clone(), user_agents)?;
-            Ok(Registry { agents })
+            let (agents, warnings) = merge_agent_configs(builtins.clone(), user_agents);
+            Ok((Registry { agents }, warnings))
         } else {
-            Ok(Registry {
-                agents: builtins.clone(),
-            })
+            Ok((
+                Registry {
+                    agents: builtins.clone(),
+                },
+                Vec::new(),
+            ))
         }
     }
 
@@ -182,6 +253,8 @@ struct AgentConfig {
     #[serde(default)]
     ready_lines: Option<usize>,
     #[serde(default)]
+    interaction_patterns: Option<Vec<InteractionPatternConfig>>,
+    #[serde(default)]
     access: BTreeMap<String, AccessProfileConfig>,
     #[serde(default)]
     capabilities: AgentCapabilitiesConfig,
@@ -191,6 +264,17 @@ struct AgentConfig {
 struct AccessProfileConfig {
     #[serde(default)]
     args: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct InteractionPatternConfig {
+    pattern: String,
+    kind: InteractionKind,
+    description: String,
+    #[serde(default)]
+    response: Option<String>,
+    #[serde(default = "default_send_enter")]
+    send_enter: bool,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -227,6 +311,10 @@ struct AgentCapabilitiesConfig {
     web_search: Option<bool>,
 }
 
+fn default_send_enter() -> bool {
+    true
+}
+
 /// The documented user config path: `$XDG_CONFIG_HOME/tmux-tools/agents.toml`, falling
 /// back to `~/.config/tmux-tools/agents.toml`. We resolve XDG explicitly rather than via
 /// `dirs::config_dir()` because on macOS the latter points at
@@ -248,20 +336,26 @@ fn parse_agent_configs(contents: &str) -> anyhow::Result<BTreeMap<String, AgentC
 fn merge_agent_configs(
     mut agents: BTreeMap<String, AgentSpec>,
     user_agents: BTreeMap<String, AgentConfig>,
-) -> anyhow::Result<BTreeMap<String, AgentSpec>> {
+) -> (BTreeMap<String, AgentSpec>, Vec<LoadWarning>) {
+    let mut warnings = Vec::new();
+
     for (name, user_agent) in user_agents {
         if let Some(agent) = agents.get_mut(&name) {
-            merge_existing_agent(agent, user_agent);
-        } else {
-            let agent = agent_from_config(name.clone(), user_agent)?;
+            merge_existing_agent(&name, agent, user_agent, &mut warnings);
+        } else if let Some(agent) = agent_from_config(name.clone(), user_agent, &mut warnings) {
             agents.insert(name, agent);
         }
     }
 
-    Ok(agents)
+    (agents, warnings)
 }
 
-fn merge_existing_agent(agent: &mut AgentSpec, user_agent: AgentConfig) {
+fn merge_existing_agent(
+    name: &str,
+    agent: &mut AgentSpec,
+    user_agent: AgentConfig,
+    warnings: &mut Vec<LoadWarning>,
+) {
     if let Some(binary) = user_agent.binary {
         agent.binary = binary;
     }
@@ -274,6 +368,11 @@ fn merge_existing_agent(agent: &mut AgentSpec, user_agent: AgentConfig) {
         agent.ready_lines = Some(ready_lines);
     }
 
+    if let Some(interaction_patterns) = user_agent.interaction_patterns {
+        agent.interaction_patterns =
+            interaction_patterns_from_config(name, interaction_patterns, warnings);
+    }
+
     for (profile, access_profile) in user_agent.access {
         agent.access_profiles.insert(profile, access_profile.into());
     }
@@ -281,20 +380,36 @@ fn merge_existing_agent(agent: &mut AgentSpec, user_agent: AgentConfig) {
     agent.capabilities.merge_config(user_agent.capabilities);
 }
 
-fn agent_from_config(name: String, agent: AgentConfig) -> anyhow::Result<AgentSpec> {
+fn agent_from_config(
+    name: String,
+    agent: AgentConfig,
+    warnings: &mut Vec<LoadWarning>,
+) -> Option<AgentSpec> {
     let binary = match agent.binary {
         Some(binary) => binary,
-        None => bail!("agent {name} is missing binary"),
+        None => {
+            warnings.push(LoadWarning {
+                agent: name,
+                detail: "missing binary".to_owned(),
+            });
+            return None;
+        }
     };
 
     let mut capabilities = AgentCapabilities::default();
     capabilities.merge_config(agent.capabilities);
+    let interaction_patterns = interaction_patterns_from_config(
+        &name,
+        agent.interaction_patterns.unwrap_or_default(),
+        warnings,
+    );
 
-    Ok(AgentSpec {
+    Some(AgentSpec {
         name,
         binary,
         ready_regex: agent.ready_regex,
         ready_lines: agent.ready_lines,
+        interaction_patterns,
         access_profiles: agent
             .access
             .into_iter()
@@ -302,6 +417,48 @@ fn agent_from_config(name: String, agent: AgentConfig) -> anyhow::Result<AgentSp
             .collect(),
         capabilities,
     })
+}
+
+fn interaction_patterns_from_config(
+    agent: &str,
+    patterns: Vec<InteractionPatternConfig>,
+    warnings: &mut Vec<LoadWarning>,
+) -> Vec<InteractionPatternSpec> {
+    let mut specs = Vec::new();
+
+    for pattern in patterns {
+        if pattern.kind == InteractionKind::Unknown {
+            warnings.push(LoadWarning {
+                agent: agent.to_owned(),
+                detail: format!(
+                    "skipping interaction pattern {:?}: unknown interaction pattern kind",
+                    pattern.description
+                ),
+            });
+            continue;
+        }
+
+        if let Err(error) = regex::Regex::new(&pattern.pattern) {
+            warnings.push(LoadWarning {
+                agent: agent.to_owned(),
+                detail: format!(
+                    "skipping interaction pattern {:?}: invalid regex {:?}: {error}",
+                    pattern.description, pattern.pattern
+                ),
+            });
+            continue;
+        }
+
+        specs.push(InteractionPatternSpec {
+            pattern: pattern.pattern,
+            kind: pattern.kind,
+            description: pattern.description,
+            response: pattern.response,
+            send_enter: pattern.send_enter,
+        });
+    }
+
+    specs
 }
 
 impl From<AccessProfileConfig> for AccessProfile {
@@ -312,13 +469,17 @@ impl From<AccessProfileConfig> for AccessProfile {
 
 #[cfg(test)]
 fn parse_registry_toml(contents: &str) -> anyhow::Result<BTreeMap<String, AgentSpec>> {
-    parse_agent_configs(contents)?
-        .into_iter()
-        .map(|(name, agent)| {
-            let agent = agent_from_config(name.clone(), agent)?;
-            Ok((name, agent))
-        })
-        .collect()
+    Ok(parse_registry_toml_with_warnings(contents)?.0)
+}
+
+#[cfg(test)]
+fn parse_registry_toml_with_warnings(
+    contents: &str,
+) -> anyhow::Result<(BTreeMap<String, AgentSpec>, Vec<LoadWarning>)> {
+    Ok(merge_agent_configs(
+        BTreeMap::new(),
+        parse_agent_configs(contents)?,
+    ))
 }
 
 #[cfg(test)]
@@ -356,6 +517,7 @@ args = []
         );
         assert_eq!(demo.access_profiles["extra"].args, Vec::<String>::new());
         assert_eq!(demo.ready_lines, None);
+        assert!(demo.interaction_patterns.is_empty());
     }
 
     #[test]
@@ -376,6 +538,106 @@ args = []
         let cursor = agents.get("cursor").unwrap();
         assert_eq!(cursor.binary, "cursor-agent");
         assert_eq!(cursor.ready_lines, Some(3));
+    }
+
+    #[test]
+    fn parses_interaction_patterns() {
+        let agents = parse_registry_toml(
+            r#"
+[demo]
+binary = "/bin/demo"
+
+[demo.access.default]
+args = ["--safe"]
+
+[[demo.interaction_patterns]]
+pattern = "Allow this action\\?"
+kind = "permission"
+description = "Permission request"
+
+[[demo.interaction_patterns]]
+kind = "auto_respond"
+pattern = "Press Enter to continue"
+description = "Continue prompt"
+response = "y"
+send_enter = false
+"#,
+        )
+        .unwrap();
+
+        let patterns = &agents.get("demo").unwrap().interaction_patterns;
+        assert_eq!(patterns.len(), 2);
+        assert_eq!(patterns[0].kind, InteractionKind::Permission);
+        assert_eq!(patterns[0].pattern, "Allow this action\\?");
+        assert_eq!(patterns[0].description, "Permission request");
+        assert_eq!(patterns[0].response, None);
+        assert!(patterns[0].send_enter);
+        assert_eq!(patterns[1].kind, InteractionKind::AutoRespond);
+        assert_eq!(patterns[1].response.as_deref(), Some("y"));
+        assert!(!patterns[1].send_enter);
+    }
+
+    #[test]
+    fn skips_invalid_interaction_patterns_with_warnings() {
+        let (agents, warnings) = parse_registry_toml_with_warnings(
+            r#"
+[demo]
+binary = "/bin/demo"
+
+[demo.access.default]
+args = []
+
+[[demo.interaction_patterns]]
+pattern = "valid"
+kind = "permission"
+description = "Valid"
+
+[[demo.interaction_patterns]]
+pattern = "typo"
+kind = "permision"
+description = "Typo"
+
+[[demo.interaction_patterns]]
+pattern = "["
+kind = "auto_respond"
+description = "Bad regex"
+"#,
+        )
+        .unwrap();
+
+        let patterns = &agents.get("demo").unwrap().interaction_patterns;
+        assert_eq!(patterns.len(), 1);
+        assert_eq!(patterns[0].kind, InteractionKind::Permission);
+        assert_eq!(warnings.len(), 2);
+        assert!(warnings.iter().all(|warning| warning.agent == "demo"));
+        assert!(warnings
+            .iter()
+            .any(|warning| warning.detail.contains("unknown interaction pattern kind")));
+        assert!(warnings
+            .iter()
+            .any(|warning| warning.detail.contains("invalid regex")));
+    }
+
+    #[test]
+    fn skips_new_agents_missing_binary_with_warning() {
+        let (agents, warnings) = parse_registry_toml_with_warnings(
+            r#"
+[demo]
+
+[demo.access.default]
+args = []
+"#,
+        )
+        .unwrap();
+
+        assert!(!agents.contains_key("demo"));
+        assert_eq!(
+            warnings,
+            vec![LoadWarning {
+                agent: "demo".to_owned(),
+                detail: "missing binary".to_owned(),
+            }]
+        );
     }
 
     #[test]
@@ -415,9 +677,10 @@ ready_lines = 4
 "#,
         );
 
-        let registry = Registry::load_with_user_path(Some(&path)).unwrap();
+        let (registry, warnings) = Registry::load_with_user_path(Some(&path)).unwrap();
         fs::remove_file(&path).unwrap();
 
+        assert!(warnings.is_empty());
         let codex = registry.get("codex").unwrap();
         assert_eq!(codex.ready_lines, Some(4));
         // Scalar merge leaves the builtin profiles intact and does not synthesize a
@@ -470,6 +733,7 @@ ready_lines = 4
                 binary: "custom".to_owned(),
                 ready_regex: None,
                 ready_lines: None,
+                interaction_patterns: Vec::new(),
                 access_profiles: BTreeMap::from([
                     (
                         "alpha".to_owned(),
@@ -506,6 +770,7 @@ ready_lines = 4
                 binary: "empty".to_owned(),
                 ready_regex: None,
                 ready_lines: None,
+                interaction_patterns: Vec::new(),
                 access_profiles: BTreeMap::new(),
                 capabilities: AgentCapabilities::default(),
             },
@@ -528,9 +793,10 @@ args = ["--unsafe"]
 "#,
         );
 
-        let registry = Registry::load_with_user_path(Some(&path)).unwrap();
+        let (registry, warnings) = Registry::load_with_user_path(Some(&path)).unwrap();
         fs::remove_file(&path).unwrap();
 
+        assert!(warnings.is_empty());
         let codex = registry.get("codex").unwrap();
         assert_eq!(codex.binary, "/usr/local/bin/codex");
         assert!(codex.access_profiles.contains_key("read-only"));

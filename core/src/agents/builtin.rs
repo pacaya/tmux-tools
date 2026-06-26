@@ -25,6 +25,7 @@ fn build_all() -> BTreeMap<String, AgentSpec> {
                 // ~/.config/tmux-tools/agents.toml. See README "Detecting readiness".
                 ready_regex: None,
                 ready_lines: None,
+                interaction_patterns: Vec::new(),
                 access_profiles: BTreeMap::from([
                     ("default".to_owned(), profile(&["--sandbox", "read-only"])),
                     ("read-only".to_owned(), profile(&["--sandbox", "read-only"])),
@@ -53,13 +54,22 @@ fn build_all() -> BTreeMap<String, AgentSpec> {
             AgentSpec {
                 name: "claude".to_owned(),
                 binary: "claude".to_owned(),
-                // Claude Code's prompt glyph is `❯`, sits above a status/footer
-                // block, and is present (empty) while generating, so it can't
-                // signal readiness. The permission-mode footer (bottom line)
-                // ends with `← for agents` only when idle; that suffix is dropped
-                // while generating. Falls back to idle detection if absent.
-                ready_regex: Some("← for agents\\s*$".to_owned()),
-                ready_lines: Some(2),
+                // No shipped ready_regex (same call as the codex builtin). Claude
+                // Code's prompt glyph `❯` is empty in both states, and the
+                // permission-mode footer's `← for agents` suffix is present while
+                // generating too (verified on claude 2.1.193) — so native chrome
+                // can't discriminate idle from busy, and a regex on it reports a
+                // premature "done". Readiness falls back to idle/timeout out of the
+                // box, which is reliable here: the pane animates while Claude works
+                // (spinner + per-second task-row timers) and goes static only when the
+                // turn — including any background subagents — is truly complete. Users
+                // who want a faster, precise signal install the optional custom status
+                // line and set `ready_regex = "(✓ done|⏸ waiting) \\| 🤖"` with
+                // `ready_lines = 0` (whole-pane scan, uncapped by subagent rows) in
+                // ~/.config/tmux-tools/agents.toml. See README "Detecting readiness".
+                ready_regex: None,
+                ready_lines: None,
+                interaction_patterns: Vec::new(),
                 // Mirrors the codex vocabulary (read-only / workspace-write /
                 // full-access) so one `--access` value works across agents, and
                 // maps each tier onto Claude's permission modes.
@@ -100,6 +110,7 @@ fn build_all() -> BTreeMap<String, AgentSpec> {
                     "→ (Add a follow-up|Plan, search, build anything)\\s*$".to_owned(),
                 ),
                 ready_lines: Some(4),
+                interaction_patterns: Vec::new(),
                 // Access-profile names mirror the codex vocabulary (read-only /
                 // workspace-write / full-access) so one `--access` value works across
                 // agents, plus a cursor-specific `plan` tier.
@@ -134,6 +145,7 @@ fn build_all() -> BTreeMap<String, AgentSpec> {
                 // is no `read-only` profile — only the two autonomy levels it supports.
                 ready_regex: Some("\\? for shortcuts".to_owned()),
                 ready_lines: None,
+                interaction_patterns: Vec::new(),
                 access_profiles: BTreeMap::from([
                     ("default".to_owned(), profile(&[])),
                     ("workspace-write".to_owned(), profile(&[])),
@@ -229,6 +241,14 @@ mod tests {
             agents["claude"].access_profiles["default"].args,
             agents["claude"].access_profiles["read-only"].args,
         );
+
+        // claude ships no ready_regex (like codex): native footer chrome can't
+        // discriminate idle from busy (the `← for agents` suffix shows while generating
+        // too), so a built-in regex would report a premature "done". Readiness falls back
+        // to idle detection; the custom-status-line signal is an opt-in user config.
+        assert_eq!(agents["claude"].ready_regex, None);
+        assert_eq!(agents["claude"].ready_lines, None);
+        assert_eq!(agents["codex"].ready_regex, None);
 
         // Cursor mirrors the codex vocabulary plus a `plan` tier.
         assert!(agents["cursor"].access_profiles.contains_key("default"));

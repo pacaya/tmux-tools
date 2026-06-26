@@ -1,0 +1,19 @@
+# Add this to ~/.config/tmux-tools/agents.toml to opt into the fast Claude
+# readiness signal powered by the custom status line in this directory.
+#
+# Without this override the built-in claude profile ships no ready_regex and
+# tmux-tools falls back to idle detection (reliable, but ~--idle-seconds slower
+# per turn). With it, wait-idle / prompt complete the moment the status line
+# reads "✓ done" / "⏸ waiting", no matter how many subagent rows trail below.
+#
+#   ready_regex : matches ONLY the two READY states; "⚡ working", "🔐 permission",
+#                 and "⚙ N bg" stay busy (and the pane animates while they run, so
+#                 idle stays suppressed until everything truly finishes).
+#   ready_lines : 0 = scan every non-blank line. Completed subagent/task rows
+#                 persist BELOW the status line and push it up (by N+3 lines for N
+#                 subagents), so any fixed window is eventually exceeded; the unique
+#                 " | 🤖" anchor keeps an unbounded scan safe from false matches.
+[claude]
+binary = "claude"
+ready_regex = "(✓ done|⏸ waiting) \\| 🤖"
+ready_lines = 0

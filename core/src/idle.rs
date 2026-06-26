@@ -16,7 +16,9 @@ pub struct IdleConfig {
     pub ready_regex: Option<Regex>,
     /// How many of the bottom non-blank lines the `ready_regex` is tested against.
     /// 1 matches only the bottom non-blank line (the default); higher values let the
-    /// regex match a prompt that sits above a TUI status/footer row.
+    /// regex match a prompt that sits above a TUI status/footer row. `0` means "no limit":
+    /// every non-blank line is scanned, so a uniquely-anchored pattern matches a status
+    /// line regardless of how many task/footer rows render below it.
     pub ready_scan_lines: usize,
     /// How long a `ready_regex` *or* `until_regex` match must hold continuously before
     /// completing (`ReadyMatched` / `UntilMatched`). Guards against a stale indicator that
@@ -228,15 +230,20 @@ impl MatchDebounce {
 }
 
 /// The bottom `count` non-blank lines, ordered top-to-bottom. Blank lines are skipped
-/// so a trailing TUI status row's padding doesn't consume the budget. `count` is clamped
-/// to at least 1.
+/// so a trailing TUI status row's padding doesn't consume the budget.
+///
+/// `count == 0` means "no limit": every non-blank line of the capture is returned. With a
+/// uniquely-anchored `ready_regex` this lets readiness match a status line no matter how
+/// many task/footer rows render below it (the opt-in Claude status-line profile sets
+/// `ready_lines = 0`). Prefer a small fixed window for patterns that aren't unique, since
+/// an unbounded scan also reaches conversation text above the input box.
 fn bottom_non_blank_lines(stripped: &str, count: usize) -> Vec<&str> {
-    let count = count.max(1);
+    let limit = if count == 0 { usize::MAX } else { count };
     let mut lines: Vec<&str> = stripped
         .split('\n')
         .rev()
         .filter(|line| !line.trim().is_empty())
-        .take(count)
+        .take(limit)
         .collect();
     lines.reverse();
     lines
@@ -364,6 +371,35 @@ mod tests {
 
         // The documented `ready_lines = 15` window reaches the status line.
         assert!(ready_matches(pane, &ready, 15));
+    }
+
+    #[test]
+    fn claude_status_regex_scan_lines_zero_matches_above_any_number_of_task_rows() {
+        let ready = Some(Regex::new(CLAUDE_STATUS_READY).expect("test regex compiles"));
+
+        // A status line followed by more trailing subagent rows than any fixed window
+        // would cover — the case a variable-height footer produces in practice.
+        let mut pane = String::from("✓ done | 🤖 opus-4.8 | ctx 42%\n");
+        for i in 0..30 {
+            pane.push_str(&format!("⎿ task {i} running\n"));
+        }
+
+        // Even a generous fixed window misses the status line once rows exceed it.
+        assert!(!ready_matches(&pane, &ready, 15));
+        // `ready_lines = 0` scans every non-blank line, so it still matches.
+        assert!(ready_matches(&pane, &ready, 0));
+    }
+
+    #[test]
+    fn claude_status_regex_scan_lines_zero_still_requires_status_anchor() {
+        let ready = Some(Regex::new(CLAUDE_STATUS_READY).expect("test regex compiles"));
+
+        // Whole-pane scan (0) over a busy pane whose conversation merely mentions
+        // "✓ done" without the ` | 🤖` status segment must not false-match.
+        let pane = "The build is ✓ done now, all green.\n\
+                    ⚡ working | 🤖 opus-4.8 | ctx 42%\n\
+                    ⎿ task running\n";
+        assert!(!ready_matches(pane, &ready, 0));
     }
 
     #[test]

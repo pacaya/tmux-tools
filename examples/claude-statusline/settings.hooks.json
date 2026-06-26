@@ -1,0 +1,34 @@
+{
+  "_comment": "Merge these keys into ~/.claude/settings.json. They wire the status line and the eight hooks that drive statusline-state.sh. Install both scripts at the paths below (or edit the commands to match where you put them). Requires jq + git on PATH.",
+
+  "statusLine": {
+    "type": "command",
+    "command": "bash $HOME/.claude/statusline-command.sh",
+    "refreshInterval": 1
+  },
+
+  "hooks": {
+    "UserPromptSubmit": [
+      { "hooks": [ { "type": "command", "command": "bash $HOME/.claude/statusline-state.sh working" } ] }
+    ],
+    "PreToolUse": [
+      { "matcher": "*", "hooks": [ { "type": "command", "command": "bash $HOME/.claude/statusline-state.sh pretool" } ] }
+    ],
+    "Stop": [
+      { "hooks": [ { "type": "command", "command": "bash $HOME/.claude/statusline-state.sh done" } ] }
+    ],
+    "SubagentStop": [
+      { "hooks": [ { "type": "command", "command": "bash $HOME/.claude/statusline-state.sh bg" } ] }
+    ],
+    "Notification": [
+      { "matcher": "permission_prompt", "hooks": [ { "type": "command", "command": "bash $HOME/.claude/statusline-state.sh permission" } ] },
+      { "matcher": "idle_prompt", "hooks": [ { "type": "command", "command": "bash $HOME/.claude/statusline-state.sh waiting" } ] }
+    ],
+    "SessionStart": [
+      { "hooks": [ { "type": "command", "command": "bash $HOME/.claude/statusline-state.sh done" } ] }
+    ],
+    "SessionEnd": [
+      { "hooks": [ { "type": "command", "command": "bash $HOME/.claude/statusline-state.sh cleanup" } ] }
+    ]
+  }
+}

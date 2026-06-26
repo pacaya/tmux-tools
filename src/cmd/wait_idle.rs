@@ -98,12 +98,14 @@ pub(crate) fn ready_signal_for(pane: &str) -> Result<ReadySignal> {
         return Ok(none);
     };
 
-    let registry = agents::Registry::load()?;
+    let (registry, _warnings) = agents::Registry::load()?;
     let Some(agent) = registry.get(&agent_name) else {
         return Ok(none);
     };
 
-    let scan_lines = agent.ready_lines.unwrap_or(DEFAULT_READY_SCAN_LINES).max(1);
+    // `ready_lines = 0` is the "scan every non-blank line" (whole-pane) sentinel, so it
+    // must survive — don't clamp to 1. `None` falls back to the default (bottom line only).
+    let scan_lines = agent.ready_lines.unwrap_or(DEFAULT_READY_SCAN_LINES);
 
     let Some(pattern) = agent.ready_regex.as_deref() else {
         return Ok(ReadySignal {

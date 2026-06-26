@@ -53,7 +53,7 @@ struct SpawnAgentJson<'a> {
 }
 
 pub fn run(args: &SpawnAgentArgs) -> Result<()> {
-    let registry = Registry::load()?;
+    let (registry, _warnings) = Registry::load()?;
     let (binary, profile_args) = registry.launch_argv(&args.agent, args.access.as_deref())?;
     let argv = launch_argv(binary.clone(), profile_args, &args.extra_args);
     let cmd = launch_command(&argv, args.cwd.as_ref(), args.bare)?;

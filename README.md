@@ -97,14 +97,15 @@ args = ["--sandbox", "enabled"]
 [cursor.access.full-access]
 args = ["--force", "--sandbox", "disabled"]
 
-# Claude Code. Shown for illustration — these values match the built-in claude.
-# The prompt glyph is `❯` and sits above a status/footer block, so readiness keys
-# off the permission-mode footer's idle-only `← for agents` suffix (dropped while
-# generating).
+# Claude Code. The built-in claude profile ships NO ready_regex (like codex): the
+# prompt glyph `❯` is empty in both states and the footer's `← for agents` suffix
+# shows while generating too, so native chrome can't discriminate idle from busy —
+# readiness falls back to idle detection, which is reliable for Claude. For a faster
+# signal, customize Claude's status line and opt in with `ready_lines = 0` (see
+# "Detecting readiness from a custom Claude status line" below). The access profiles
+# here match the built-in and need no override.
 [claude]
 binary = "claude"
-ready_regex = "← for agents\\s*$"
-ready_lines = 2
 
 [claude.access.read-only]
 args = ["--permission-mode", "plan"]
@@ -128,7 +129,7 @@ args = []
 args = ["--dangerously-skip-permissions"]
 ```
 
-`ready_regex` is tested against the bottom non-blank line of the pane by default. Some agents (e.g. Cursor) render a status/footer row *below* their input prompt; set `ready_lines = N` to test the regex against the bottom `N` non-blank lines instead (the regex matches if any of them match). Defaults to `1`.
+`ready_regex` is tested against the bottom non-blank line of the pane by default. Some agents (e.g. Cursor) render a status/footer row *below* their input prompt; set `ready_lines = N` to test the regex against the bottom `N` non-blank lines instead (the regex matches if any of them match). Defaults to `1`. Set `ready_lines = 0` to scan **every** non-blank line (no limit) — use this only with a uniquely-anchored pattern, since it also reaches conversation text above the input box. It's the right choice for a footer whose height varies, e.g. Claude's variable subagent rows (below).
 
 A `ready_regex` match — or an explicit `--until` match — must hold continuously for `--ready-stable-seconds` (default 2.0) before `wait-idle`/`prompt` complete (with `ready_matched` / `until_matched`). This debounce guards against a stale indicator that is visible for only a single poll — e.g. a previous turn's status line still showing right after a new prompt is submitted — triggering a premature, wrong completion. Set `--ready-stable-seconds 0` to fire on the first match (legacy behavior; use it for a one-shot `--until` marker that may scroll off-screen before the window elapses).
 
@@ -136,7 +137,7 @@ A `ready_regex` match — or an explicit `--until` match — must hold continuou
 
 ### Detecting readiness from a custom Claude status line
 
-The built-in `claude` profile keys readiness off the permission-mode footer's idle-only `← for agents` suffix, which works on any install. If you customize Claude Code's status line (`~/.claude/statusline-command.sh`) to emit a Codex-style **state indicator** as the leading segment, you can point `claude`'s `ready_regex` at that instead for a cleaner signal. A typical indicator vocabulary, always rendered as `<indicator> | 🤖 <model> | …` on one line:
+The built-in `claude` profile ships no `ready_regex` — Claude's native footer can't discriminate idle from busy (the `← for agents` suffix is present while generating too, so a regex on it reports a premature "done"), so readiness falls back to idle detection. That's reliable but costs up to `--idle-seconds` per turn. For a faster, precise signal, customize Claude Code's status line (`~/.claude/statusline-command.sh`) to emit a Codex-style **state indicator** as the leading segment and point `claude`'s `ready_regex` at it. A typical indicator vocabulary, always rendered as `<indicator> | 🤖 <model> | …` on one line:
 
 - `⚡ working` — generating (keep waiting)
 - `🔐 permission` — awaiting an approval prompt (still busy)
@@ -150,12 +151,14 @@ Point `claude`'s readiness at the two ready states in your `agents.toml`:
 [claude]
 binary = "claude"
 ready_regex = "(✓ done|⏸ waiting) \\| 🤖"
-ready_lines = 15
+ready_lines = 0   # scan the whole footer: persisting subagent rows push the status line up
 ```
 
-The ` | 🤖` suffix anchors the match to the real status-line segment, so conversation text that merely contains "✓ done" can't false-match. `ready_lines = 15` is needed because background-task/subagent rows render *below* the status line — everything below the input box is status + task rows (no conversation text), and the ` | 🤖` anchor is unique, so widening the scan is safe. Pair it with the `--ready-stable-seconds` debounce so a stale `✓ done` lingering for one poll right after a new prompt can't false-complete.
+The ` | 🤖` suffix anchors the match to the real status-line segment, so conversation text that merely contains "✓ done" can't false-match. `ready_lines = 0` (scan every non-blank line) is what makes this robust: completed subagent/background-task rows persist *below* the status line and push it up — by `N + 3` non-blank lines for `N` subagents — so any fixed window is eventually exceeded by a tall enough footer. The unique ` | 🤖` anchor keeps the unbounded scan safe. Pair it with the `--ready-stable-seconds` debounce so a stale `✓ done` lingering for one poll right after a new prompt can't false-complete.
 
-Note this is the practical local path, not a fully general signal: `⚡ working`, `🔐 permission`, and `⚙ N bg` deliberately do **not** match `ready_regex` — they're treated as "still busy" and fall back to idle/timeout detection (the pane goes static while awaiting a permission prompt or while background work runs, so idle detection eventually completes). Folding subagents/background tasks into a precise readiness signal is more involved.
+The leading state indicator is **not** something Claude passes to the status line — it's populated by companion hooks (e.g. `Stop` / `SubagentStop` / `PreToolUse`) that record the main-agent state and a background-work count to per-session temp files the status-line script reads. Without those hooks the segment is absent and readiness simply falls back to idle. `⚡ working`, `🔐 permission`, and `⚙ N bg` deliberately do **not** match `ready_regex` — they're "still busy": while subagents/background agents run, the footer animates (per-second task-row timers) so idle stays suppressed and completion fires only once everything is truly done. The one busy state idle can't distinguish is a *static* `🔐 permission` prompt (it goes quiet, so idle reports done) — which for full-access driving never arises.
+
+A ready-to-install version of this setup — the status-line script, the state-writer hook, and the `settings.json` / `agents.toml` snippets to wire them — lives in [`examples/claude-statusline/`](examples/claude-statusline/).
 
 Built-ins: Codex and Claude both have `read-only`, `workspace-write`, and `full-access` (plus a safe `default` == `read-only`); Cursor adds a `plan` tier; Antigravity (`agy`) has only `workspace-write` and `full-access`. Always pass `--access` for Codex and Claude. `full-access` is dangerous and requires explicit user permission.
 
