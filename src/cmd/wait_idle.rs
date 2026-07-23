@@ -7,8 +7,8 @@ use tmux_tools_core::{
     agents,
     format::Format,
     idle::{
-        resolve_timeout, validate_seconds, wait_for_idle, IdleConfig, DEFAULT_READY_SCAN_LINES,
-        DEFAULT_READY_STABLE_SECONDS,
+        bottom_non_blank_lines, resolve_timeout, validate_seconds, wait_for_idle, IdleConfig,
+        IdleReason, DEFAULT_READY_SCAN_LINES, DEFAULT_READY_STABLE_SECONDS,
     },
     names, target,
 };
@@ -36,6 +36,13 @@ pub struct WaitIdleArgs {
     pub(crate) timeout: Option<f64>,
     #[arg(long, value_name = "REGEX")]
     pub(crate) until: Option<String>,
+    #[arg(
+        long,
+        default_value_t = 10,
+        value_name = "N",
+        help = "Bottom non-blank pane lines included in a concise timeout hint (0 disables)"
+    )]
+    pub(crate) hint_lines: usize,
     #[command(flatten)]
     pub(crate) common: CommonArgs,
 }
@@ -46,6 +53,7 @@ struct WaitIdleJson<'a> {
     name: Option<&'a str>,
     reason: &'static str,
     duration_ms: u128,
+    idle_for: f64,
     final_capture: &'a str,
 }
 
@@ -65,6 +73,23 @@ pub fn run(args: &WaitIdleArgs) -> Result<()> {
     let outcome = wait_for_idle(&pane, &cfg)?;
 
     match args.common.format {
+        Format::Concise if outcome.reason == IdleReason::TimedOut => {
+            println!(
+                "reason={} duration={:.3} idle_for={:.3}",
+                outcome.reason.as_str(),
+                outcome.duration.as_secs_f64(),
+                outcome.idle_for.as_secs_f64()
+            );
+            if args.hint_lines > 0 {
+                println!(
+                    "--- timeout hint: bottom {} non-blank lines ---",
+                    args.hint_lines
+                );
+                for line in bottom_non_blank_lines(&outcome.final_capture, args.hint_lines) {
+                    println!("{line}");
+                }
+            }
+        }
         Format::Concise => println!(
             "reason={} duration={:.3}",
             outcome.reason.as_str(),
@@ -77,6 +102,7 @@ pub fn run(args: &WaitIdleArgs) -> Result<()> {
                 name: name.as_deref(),
                 reason: outcome.reason.as_str(),
                 duration_ms: outcome.duration.as_millis(),
+                idle_for: outcome.idle_for.as_secs_f64(),
                 final_capture: &outcome.final_capture,
             };
             println!("{}", serde_json::to_string(&output)?);

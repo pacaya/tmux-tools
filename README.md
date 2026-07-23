@@ -39,7 +39,7 @@ Most pane verbs accept `--target <name|id>`, `--format concise|json|raw`, `--ses
 | `send` | `<TEXT> [--enter] [--literal] [--verify]` | Sends keys; `--enter` appends Enter (sent once). Add `--verify` to capture-and-retry Enter up to 3 times if the bottom line is unchanged (opt-in: can double-submit to non-echoing programs like password prompts). |
 | `capture` | `[--lines N \| --all]` | Captures visible pane by default; `--all` captures full history. |
 | `execute` | `<CMD> [--timeout SEC] [--no-wait]` | Wraps a command with markers and reports output, duration, timeout, and exit code. |
-| `wait-idle` | `[--idle-seconds F] [--ready-stable-seconds F] [--timeout SEC] [--until REGEX]` | Waits for quiet output, explicit regex, or timeout. `--ready-stable-seconds` (default 2.0) is how long a `ready_regex` *or* `--until` match must hold before completing (`0` fires on first match). |
+| `wait-idle` | `[--idle-seconds F] [--ready-stable-seconds F] [--timeout SEC] [--until REGEX] [--hint-lines N]` | Waits for quiet output, explicit regex, or timeout. `--ready-stable-seconds` (default 2.0) is how long a `ready_regex` *or* `--until` match must hold before completing (`0` fires on first match). On a concise timeout, `--hint-lines` controls the bottom non-blank pane tail (default `10`; `0` disables it). |
 | `prompt` | `<TEXT> [--idle-seconds F] [--ready-stable-seconds F] [--timeout SEC] [--until REGEX]` | Sends text plus Enter, waits, then returns output since the prompt. |
 | `spawn-agent` | `<AGENT> [--access PROFILE] [--name NAME] [--cwd PATH] [--split h\|v\|window] [--size N] [--bare] [-- EXTRA_ARGS...]` | Launches a configured agent profile and registers `@tt-agent`/`@tt-access`. Same default-split (30:70 horizontal) and `--split window` opt-out as `launch`. Same keep-open wrap as `launch`; pass `--bare` to opt out. The `agent=` column from `list` reflects the *original* launch — if the agent crashes the pane survives as a plain shell, but `@tt-agent` is not cleared. |
 | `kill` | `[--target name\|id]` | Kills the target pane. |
@@ -167,6 +167,8 @@ All agents share one access-profile vocabulary (`read-only` / `workspace-write` 
 Cursor and Antigravity (now built-ins) reuse the same triad. Cursor maps `read-only` → `--mode ask` (Q&A/analysis, no edits; the default; `plan` is the same tier in plan-building mode), `workspace-write` → `--sandbox enabled` (read+write+shell contained to the workspace, network restricted), and `full-access` → `--force --sandbox disabled` ("run everything", unrestricted, no approvals). Antigravity (`agy`) only exposes `workspace-write` (default, approval-gated) and `full-access` (`--dangerously-skip-permissions`) — version 1.0.3 has **no interactive read-only mode** (no `--plan`/`--ask`/`--permission-mode`), so for a guaranteed no-write run use `agy -p "<prompt>"` headless instead. `full-access` is dangerous and requires explicit user permission.
 
 `TMUX_TOOLS_TIMEOUT` overrides the default 120-second timeout for `execute`, `prompt`, and `wait-idle` when `--timeout` is omitted.
+
+On `wait-idle` timeout, concise output starts with `reason=timed_out duration=<seconds> idle_for=<seconds>`, then a greppable marker and the bottom `--hint-lines` non-blank lines from the loop's final capture. The hint reuses that capture; it does not make another `capture-pane` call. JSON includes numeric `idle_for` seconds and keeps `final_capture` unchanged. Non-timeout concise output keeps its existing one-line shape.
 
 ## Library: configurable invocation
 

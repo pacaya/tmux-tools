@@ -37,6 +37,7 @@ pub const DEFAULT_READY_STABLE_SECONDS: f64 = 2.0;
 pub struct IdleOutcome {
     pub reason: IdleReason,
     pub duration: Duration,
+    pub idle_for: Duration,
     pub final_capture: String,
 }
 
@@ -138,6 +139,7 @@ pub fn wait_for_idle(pane_id: &str, cfg: &IdleConfig) -> Result<IdleOutcome> {
             return Ok(IdleOutcome {
                 reason: IdleReason::UntilMatched,
                 duration: start.elapsed(),
+                idle_for: now - last_change,
                 final_capture: stripped,
             });
         }
@@ -150,6 +152,7 @@ pub fn wait_for_idle(pane_id: &str, cfg: &IdleConfig) -> Result<IdleOutcome> {
             return Ok(IdleOutcome {
                 reason: IdleReason::ReadyMatched,
                 duration: start.elapsed(),
+                idle_for: now - last_change,
                 final_capture: stripped,
             });
         }
@@ -167,6 +170,7 @@ pub fn wait_for_idle(pane_id: &str, cfg: &IdleConfig) -> Result<IdleOutcome> {
             return Ok(IdleOutcome {
                 reason: IdleReason::Idle,
                 duration: start.elapsed(),
+                idle_for: now - last_change,
                 final_capture: stripped,
             });
         }
@@ -175,6 +179,7 @@ pub fn wait_for_idle(pane_id: &str, cfg: &IdleConfig) -> Result<IdleOutcome> {
             return Ok(IdleOutcome {
                 reason: IdleReason::TimedOut,
                 duration: start.elapsed(),
+                idle_for: now - last_change,
                 final_capture: stripped,
             });
         }
@@ -237,7 +242,7 @@ impl MatchDebounce {
 /// many task/footer rows render below it (the opt-in Claude status-line profile sets
 /// `ready_lines = 0`). Prefer a small fixed window for patterns that aren't unique, since
 /// an unbounded scan also reaches conversation text above the input box.
-fn bottom_non_blank_lines(stripped: &str, count: usize) -> Vec<&str> {
+pub fn bottom_non_blank_lines(stripped: &str, count: usize) -> Vec<&str> {
     let limit = if count == 0 { usize::MAX } else { count };
     let mut lines: Vec<&str> = stripped
         .split('\n')

@@ -458,6 +458,291 @@ fn full_smoke() {
     }
 }
 
+#[test]
+fn wait_idle_timeout_concise_first_line_includes_idle_for() {
+    let _serial = serial_guard();
+
+    if Command::new("tmux").arg("-V").output().is_err() {
+        eprintln!("SKIP: tmux not on PATH");
+        return;
+    }
+
+    let name = format!("wait-hint-line-{}", std::process::id());
+    let mut guard = PaneGuard::new();
+    guard.track(&name);
+
+    let launched = run_bin(&[
+        "launch",
+        "--cmd",
+        "bash --norc --noprofile",
+        "--name",
+        &name,
+        "--bare",
+    ]);
+    launched.assert_success("launch wait-idle hint pane");
+    wait_for_pane_ready(&name, Duration::from_secs(5));
+
+    let changing_name = name.clone();
+    let change = thread::spawn(move || {
+        thread::sleep(Duration::from_millis(750));
+        let sent = run_bin(&[
+            "send",
+            "--target",
+            &changing_name,
+            "printf 'controlled-change-marker\\n'",
+            "--enter",
+        ]);
+        sent.assert_success("emit controlled output during wait-idle");
+    });
+
+    let waited = run_bin(&[
+        "wait-idle",
+        "--target",
+        &name,
+        "--idle-seconds",
+        "60",
+        "--timeout",
+        "2",
+    ]);
+    change
+        .join()
+        .expect("controlled pane update should complete");
+    waited.assert_success("wait-idle timeout");
+
+    let first_line = waited.stdout.lines().next().unwrap_or_default();
+    let expected_shape =
+        regex::Regex::new(r"^reason=timed_out duration=(\d+\.\d{3}) idle_for=(\d+\.\d{3})$")
+            .expect("test regex compiles");
+    let captures = expected_shape.captures(first_line).unwrap_or_else(|| {
+        panic!("timeout first line should expose duration and idle age; got: {first_line:?}")
+    });
+    let duration = captures[1]
+        .parse::<f64>()
+        .expect("duration should be numeric");
+    let idle_for = captures[2]
+        .parse::<f64>()
+        .expect("idle_for should be numeric");
+    assert!(
+        idle_for >= 0.75,
+        "idle_for should measure a stable interval after the controlled pane update; got {idle_for:.3}s"
+    );
+    assert!(
+        duration - idle_for >= 0.5,
+        "idle_for should reset after output changes and be materially less than total duration; duration={duration:.3}s idle_for={idle_for:.3}s"
+    );
+}
+
+#[test]
+fn wait_idle_timeout_concise_includes_delimited_bottom_ten_non_blank_lines() {
+    let _serial = serial_guard();
+
+    if Command::new("tmux").arg("-V").output().is_err() {
+        eprintln!("SKIP: tmux not on PATH");
+        return;
+    }
+
+    let name = format!("wait-hint-tail-{}", std::process::id());
+    let mut guard = PaneGuard::new();
+    guard.track(&name);
+
+    let launched = run_bin(&[
+        "launch",
+        "--cmd",
+        "printf 'line-01\nline-02\n\nline-03\nline-04\nline-05\nline-06\nline-07\nline-08\nline-09\nline-10\nline-11\nline-12\n'; sleep 30",
+        "--name",
+        &name,
+        "--bare",
+    ]);
+    launched.assert_success("launch wait-idle tail pane");
+    wait_for_pane_ready(&name, Duration::from_secs(5));
+
+    let waited = run_bin(&[
+        "wait-idle",
+        "--target",
+        &name,
+        "--idle-seconds",
+        "60",
+        "--timeout",
+        "0.1",
+    ]);
+    waited.assert_success("wait-idle timeout with tail");
+
+    let lines: Vec<&str> = waited.stdout.lines().collect();
+    assert_eq!(
+        lines.get(1).copied(),
+        Some("--- timeout hint: bottom 10 non-blank lines ---"),
+        "timeout tail should be separated by a greppable provenance marker"
+    );
+    assert_eq!(
+        lines.get(2..),
+        Some(
+            [
+                "line-03", "line-04", "line-05", "line-06", "line-07", "line-08", "line-09",
+                "line-10", "line-11", "line-12",
+            ]
+            .as_slice()
+        ),
+        "timeout tail should contain exactly the bottom ten non-blank pane lines"
+    );
+}
+
+#[test]
+fn wait_idle_hint_lines_positive_value_controls_timeout_tail_length() {
+    let _serial = serial_guard();
+
+    if Command::new("tmux").arg("-V").output().is_err() {
+        eprintln!("SKIP: tmux not on PATH");
+        return;
+    }
+
+    let name = format!("wait-hint-three-{}", std::process::id());
+    let mut guard = PaneGuard::new();
+    guard.track(&name);
+
+    let launched = run_bin(&[
+        "launch",
+        "--cmd",
+        "printf 'line-01\nline-02\nline-03\nline-04\nline-05\n'; sleep 30",
+        "--name",
+        &name,
+        "--bare",
+    ]);
+    launched.assert_success("launch wait-idle custom tail pane");
+    wait_for_pane_ready(&name, Duration::from_secs(5));
+
+    let waited = run_bin(&[
+        "wait-idle",
+        "--target",
+        &name,
+        "--idle-seconds",
+        "60",
+        "--timeout",
+        "0.1",
+        "--hint-lines",
+        "3",
+    ]);
+    waited.assert_success("wait-idle timeout with custom tail length");
+
+    let lines: Vec<&str> = waited.stdout.lines().collect();
+    assert_eq!(
+        lines.get(1).copied(),
+        Some("--- timeout hint: bottom 3 non-blank lines ---"),
+        "timeout delimiter should report the configured positive tail length"
+    );
+    assert_eq!(
+        lines.get(2..),
+        Some(["line-03", "line-04", "line-05"].as_slice()),
+        "--hint-lines 3 should contain exactly the bottom three non-blank pane lines"
+    );
+}
+
+#[test]
+fn wait_idle_hint_lines_zero_suppresses_timeout_tail() {
+    let _serial = serial_guard();
+
+    if Command::new("tmux").arg("-V").output().is_err() {
+        eprintln!("SKIP: tmux not on PATH");
+        return;
+    }
+
+    let name = format!("wait-hint-off-{}", std::process::id());
+    let mut guard = PaneGuard::new();
+    guard.track(&name);
+
+    let launched = run_bin(&[
+        "launch",
+        "--cmd",
+        "printf 'pane output\n'; sleep 30",
+        "--name",
+        &name,
+        "--bare",
+    ]);
+    launched.assert_success("launch wait-idle no-tail pane");
+    wait_for_pane_ready(&name, Duration::from_secs(5));
+
+    let waited = run_bin(&[
+        "wait-idle",
+        "--target",
+        &name,
+        "--idle-seconds",
+        "60",
+        "--timeout",
+        "0.1",
+        "--hint-lines",
+        "0",
+    ]);
+    waited.assert_success("wait-idle timeout with hint disabled");
+
+    assert_eq!(
+        waited.stdout.lines().count(),
+        1,
+        "--hint-lines 0 should leave only the timeout reason line; got:\n{}",
+        waited.stdout
+    );
+}
+
+#[test]
+fn wait_idle_timeout_json_includes_numeric_idle_for() {
+    let _serial = serial_guard();
+
+    if Command::new("tmux").arg("-V").output().is_err() {
+        eprintln!("SKIP: tmux not on PATH");
+        return;
+    }
+
+    let name = format!("wait-hint-json-{}", std::process::id());
+    let mut guard = PaneGuard::new();
+    guard.track(&name);
+
+    let launched = run_bin(&[
+        "launch",
+        "--cmd",
+        "printf 'json pane output\n'; sleep 30",
+        "--name",
+        &name,
+        "--bare",
+    ]);
+    launched.assert_success("launch wait-idle JSON pane");
+    wait_for_pane_ready(&name, Duration::from_secs(5));
+
+    let waited = run_bin(&[
+        "wait-idle",
+        "--target",
+        &name,
+        "--idle-seconds",
+        "60",
+        "--timeout",
+        "0.1",
+        "--format",
+        "json",
+    ]);
+    waited.assert_success("wait-idle timeout JSON");
+
+    let payload: serde_json::Value =
+        serde_json::from_str(waited.stdout.trim()).expect("wait-idle JSON should parse");
+    assert_eq!(
+        payload.get("reason").and_then(|value| value.as_str()),
+        Some("timed_out"),
+        "controlled wait should exercise the timeout JSON path"
+    );
+    assert!(
+        payload
+            .get("idle_for")
+            .and_then(|value| value.as_f64())
+            .is_some(),
+        "timeout JSON should expose idle_for as numeric seconds; payload: {}",
+        waited.stdout
+    );
+    assert!(
+        payload
+            .get("final_capture")
+            .and_then(|value| value.as_str())
+            .is_some_and(|capture| capture.contains("json pane output")),
+        "timeout JSON final_capture should retain the known pane text; payload: {}",
+        waited.stdout
+    );
+}
+
 /// Default `launch` wraps the command so the pane survives its exit. A
 /// non-zero-exit command should leave its output visible in scrollback.
 #[test]
