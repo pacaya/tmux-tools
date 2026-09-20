@@ -1,19 +1,35 @@
 # Add this to ~/.config/tmux-tools/agents.toml to opt into the fast Claude
 # readiness signal powered by the custom status line in this directory.
 #
-# Without this override the built-in claude profile ships no ready_regex and
-# tmux-tools falls back to idle detection (reliable, but ~--idle-seconds slower
-# per turn). With it, wait-idle / prompt complete the moment the status line
-# reads "✓ done" / "⏸ waiting", no matter how many subagent rows trail below.
+# It is opt-in, not a built-in: `claude --ax-screen-reader` has no native
+# idle/busy chrome, so the shipped claude surfaces declare no readiness patterns
+# and claude keeps its rich pre-surface rendering as the default (see the
+# built-in comment in core/src/agents/builtin.rs).
 #
-#   ready_regex : matches ONLY the two READY states; "⚡ working", "🔐 permission",
-#                 and "⚙ N bg" stay busy (and the pane animates while they run, so
-#                 idle stays suppressed until everything truly finishes).
+# The patterns are declared per surface, where `busy_regex` is honored — the
+# agent-level pre-surface shape carries only `ready_regex`/`ready_lines`. Add the
+# same three fields under `[claude.surfaces.flat]` to use the status line on the
+# flat rendering too.
+#
+# With it, wait-idle / prompt complete the moment the status line reads
+# "✓ done" / "⏸ waiting", no matter how many subagent rows trail below. Without the
+# custom status line the patterns never match and tmux-tools falls back to idle
+# detection (reliable, but ~--idle-seconds slower per turn).
+#
+#   ready_regex : matches ONLY the two READY states.
+#   busy_regex  : matches EVERY busy state the status line emits — "⚡ working",
+#                 "🔐 permission" (a blocking approval prompt) and "⚙ N bg (…)"
+#                 (background subagents/teammates). Leaving any of them out would
+#                 classify that state Unknown and let idle detection report a
+#                 premature completion while the agent is blocked mid-turn.
 #   ready_lines : 0 = scan every non-blank line. Completed subagent/task rows
 #                 persist BELOW the status line and push it up (by N+3 lines for N
 #                 subagents), so any fixed window is eventually exceeded; the unique
 #                 " | 🤖" anchor keeps an unbounded scan safe from false matches.
 [claude]
 binary = "claude"
+
+[claude.surfaces.rich]
 ready_regex = "(✓ done|⏸ waiting) \\| 🤖"
+busy_regex = "(⚡ working|🔐 permission|⚙ [0-9]+ bg( \\([^)]*\\))?) \\| 🤖"
 ready_lines = 0

@@ -1,0 +1,47 @@
+{
+  "approval_id": "accepted-20260918T0852Z",
+  "approval_object": "approval.json",
+  "approval_sha256": "880b2001e72ab07140ffc149e4a213e6848faf99769f57d4415c8fc1cf76f65d",
+  "entries": [
+    {
+      "approved_revision": "bf48eaa5d7e5c8ad5984c4b473432345df9efa28",
+      "bytes": 5117,
+      "object": "objects/d1c8f27035f96fdfb0155ee7b195242955bcda9b17fe95cd37c3d0564771e595.md",
+      "origin": {
+        "path": "docs/issues/ISSUE-260918-0525-01-capture-reports-its-ceiling.md",
+        "repository": "tmux-tools",
+        "revision": "6227fb6b22bb20afa96059b069851cde1fe1d58c"
+      },
+      "role": "issue",
+      "sha256": "d1c8f27035f96fdfb0155ee7b195242955bcda9b17fe95cd37c3d0564771e595",
+      "target": "tmux-tools:ISSUE-260918-0525-01"
+    },
+    {
+      "approved_revision": "a9276d245932a54c75137dd4de4835dff95e9cdb",
+      "bytes": 799,
+      "object": "objects/40c395669c2ab6b627bacde2e0124382d55ab505d66bfe28a458a326f74c1648.md",
+      "origin": {
+        "path": "docs/prd/PRD-260918-0323-01-agent-surfaces-and-pane-io.md",
+        "repository": "tmux-tools",
+        "revision": "6227fb6b22bb20afa96059b069851cde1fe1d58c"
+      },
+      "role": "source",
+      "sha256": "40c395669c2ab6b627bacde2e0124382d55ab505d66bfe28a458a326f74c1648",
+      "target": "tmux-tools:PRD-260918-0323-01#p4-capture"
+    },
+    {
+      "approved_revision": "a9276d245932a54c75137dd4de4835dff95e9cdb",
+      "bytes": 2852,
+      "object": "objects/0b418ad408db663d247bfb4aa0af57a5c6c3ba9327087b9af98441853a78d490.md",
+      "origin": {
+        "path": "docs/prd/PRD-260918-0323-01-agent-surfaces-and-pane-io.md",
+        "repository": "tmux-tools",
+        "revision": "6227fb6b22bb20afa96059b069851cde1fe1d58c"
+      },
+      "role": "source",
+      "sha256": "0b418ad408db663d247bfb4aa0af57a5c6c3ba9327087b9af98441853a78d490",
+      "target": "tmux-tools:PRD-260918-0323-01#verification"
+    }
+  ],
+  "schema": "planning-contracts.bundle.v1"
+}

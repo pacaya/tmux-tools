@@ -1,0 +1,47 @@
+{
+  "approval_id": "review-20260919T105312Z",
+  "impact_disposition": {
+    "checked_revisions": [
+      {
+        "revision": "d0e7bb2df25555d69a488e5feea30c055ab07c88",
+        "sha256": "5a416456cdbf417d93cf1cf17af464fbffe97c0511e3dcac6f472eb9ac9d0435",
+        "target": "tmux-tools:PRD-260918-0323-01#p3-state"
+      },
+      {
+        "revision": "d0e7bb2df25555d69a488e5feea30c055ab07c88",
+        "sha256": "40c395669c2ab6b627bacde2e0124382d55ab505d66bfe28a458a326f74c1648",
+        "target": "tmux-tools:PRD-260918-0323-01#p4-capture"
+      },
+      {
+        "revision": "d0e7bb2df25555d69a488e5feea30c055ab07c88",
+        "sha256": "3dadcd27ca9820bdc0fec44db65600b508a0e4ae19c505799aa1c22058f4b67a",
+        "target": "tmux-tools:PRD-260918-0323-01#p7-prompt"
+      }
+    ],
+    "status": "accepted"
+  },
+  "issue": {
+    "revision": "dcd052ee05c2346257b401f4d55892f3536b4a54",
+    "sha256": "60d0fb96cf5cfadf83d02013fdaf4faaa47a8eb89fef6cf2164c6851311ec131",
+    "target": "tmux-tools:ISSUE-260918-0525-06"
+  },
+  "resolution_mode": "canonical",
+  "schema": "planning-contracts.revision.v2",
+  "sources": [
+    {
+      "revision": "d0e7bb2df25555d69a488e5feea30c055ab07c88",
+      "sha256": "5a416456cdbf417d93cf1cf17af464fbffe97c0511e3dcac6f472eb9ac9d0435",
+      "target": "tmux-tools:PRD-260918-0323-01#p3-state"
+    },
+    {
+      "revision": "d0e7bb2df25555d69a488e5feea30c055ab07c88",
+      "sha256": "40c395669c2ab6b627bacde2e0124382d55ab505d66bfe28a458a326f74c1648",
+      "target": "tmux-tools:PRD-260918-0323-01#p4-capture"
+    },
+    {
+      "revision": "d0e7bb2df25555d69a488e5feea30c055ab07c88",
+      "sha256": "3dadcd27ca9820bdc0fec44db65600b508a0e4ae19c505799aa1c22058f4b67a",
+      "target": "tmux-tools:PRD-260918-0323-01#p7-prompt"
+    }
+  ]
+}

@@ -6,6 +6,10 @@ gate: passed 2026-08-01
 contexts: [tmux-tools]
 terms: [Tile, Floor, Effective floor, Ceiling, Advisory floor, Overflow window, Layout intent, Ownership, Exited-agent pane, Pane registration, Agent profile, Readiness]
 issues: [ISSUE-260801-1310-01, ISSUE-260801-1310-02, ISSUE-260802-0628-01, ISSUE-260801-1310-03, ISSUE-260801-1310-04, ISSUE-260802-0128-01, ISSUE-260801-1310-05, ISSUE-260801-1310-06, ISSUE-260801-1310-07, ISSUE-260802-0205-01]
+contract:
+  schema: planning-contracts.record.v1
+  clauses: []
+  references: []
 ---
 
 # Auto-tile layout for concurrent agent panes

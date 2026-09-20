@@ -60,15 +60,30 @@ fn resolve_smart_default(session: Option<&str>, window: Option<&str>) -> Result<
     }
 
     ensure_managed_session()?;
-    most_recent_pane_in_session(MANAGED_SESSION)
+    most_recent_pane_in_session(&managed_session_target())
+}
+
+/// Exact-match session target for the managed session. tmux resolves a bare session name
+/// by prefix when no exact match exists, so a stray `tmux-tools-*` session would
+/// otherwise be mistaken for the managed one. The `=` prefix requires an exact name.
+pub fn managed_session_target() -> String {
+    format!("={MANAGED_SESSION}")
+}
+
+/// Exact-match pane target for the managed session's current window, for commands that
+/// take a pane/window target (`display-message` needs the trailing `:`).
+pub fn managed_session_pane_target() -> String {
+    format!("={MANAGED_SESSION}:")
 }
 
 pub fn scoped_target(session: Option<&str>, window: Option<&str>) -> String {
     match (session, window) {
         (Some(session), Some(window)) => format!("{session}:{window}"),
         (Some(session), None) => session.to_owned(),
-        (None, Some(window)) => format!("{MANAGED_SESSION}:{window}"),
-        (None, None) => MANAGED_SESSION.to_owned(),
+        // The managed session is always resolved by exact name, never by a bare name that
+        // tmux could prefix-match to a differently named session.
+        (None, Some(window)) => format!("={MANAGED_SESSION}:{window}"),
+        (None, None) => format!("={MANAGED_SESSION}:"),
     }
 }
 
@@ -146,7 +161,8 @@ fn display_pane_id(args: &[&str]) -> Result<String> {
 }
 
 fn ensure_managed_session() -> Result<()> {
-    let args = ["has-session", "-t", MANAGED_SESSION];
+    let target = managed_session_target();
+    let args = ["has-session", "-t", &target];
     let output = tmux::run_clean(&args)
         .with_context(|| format!("failed to run tmux command: tmux {}", args.join(" ")))?;
 

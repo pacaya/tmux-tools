@@ -207,10 +207,13 @@ pub fn launch_pane(
                     new_window_args(cmd, Some(&calling))
                 }
             } else {
-                // Outside tmux: ensure the managed session exists, then add a
-                // fresh window for our command.
-                ensure_managed_session_atomic()?;
-                new_window_args(cmd, Some(&format!("{}:", target::MANAGED_SESSION)))
+                // Outside tmux: ensure the managed session exists, then add a fresh
+                // window for our command. A session this call creates gets the deep
+                // history limit before the command's window exists, so the command's
+                // first line survives scrolling. The window is created by the session's
+                // stable id, not by name, so it cannot land in a replacement session.
+                let managed_session = ensure_managed_session_atomic()?;
+                new_window_args(cmd, Some(&managed_session))
             }
         }
     };
@@ -222,6 +225,11 @@ pub fn launch_pane(
 
     Ok(pane_id)
 }
+
+/// The history depth `launch`/`spawn-agent` give a session they create, so `prompt`
+/// can read a completed turn back out of scrollback even after it scrolls off screen.
+/// tmux's default is 2000. Cost is roughly 70 bytes per stored line (see README).
+pub(crate) const DEFAULT_HISTORY_LIMIT: u32 = 50_000;
 
 fn split_window_args(
     cmd: &str,
@@ -261,8 +269,8 @@ fn new_window_args(cmd: &str, target: Option<&str>) -> Vec<String> {
     tmux_args
 }
 
-/// Ensure the managed `tmux-tools` session exists, tolerating concurrent
-/// callers.
+/// Ensure the managed `tmux-tools` session exists, tolerating concurrent callers, and
+/// return its stable `#{session_id}`.
 ///
 /// We do *not* use `tmux new-session -d -A`: when the session already exists,
 /// `-A` falls through to `attach-session`, which requires a controlling
@@ -270,28 +278,153 @@ fn new_window_args(cmd: &str, target: Option<&str>) -> Vec<String> {
 /// caller without a TTY (e.g. cargo test spawning the binary with piped
 /// stdio).
 ///
-/// Instead, check first with `has-session` and only call `new-session -d`
-/// when missing. If two callers race and both try to create, the loser's
-/// `new-session` errors with "duplicate session"; we recover by re-checking
-/// and treating a present session as success.
-fn ensure_managed_session_atomic() -> Result<()> {
-    if tmux::run(&["has-session", "-t", target::MANAGED_SESSION])?.exit_code == 0 {
-        return Ok(());
+/// The managed session is always resolved by **exact** name (`=tmux-tools`), so a stray
+/// `tmux-tools-*` session can never be mistaken for it. A created session is built under
+/// a private, collision-proof name that does not begin with the managed name, and its
+/// stable id is used to raise `history-limit` and then to rename it to `tmux-tools`. Two
+/// things follow. The option is targeted by id, so it can never land on a same-named
+/// session another client created, and never on the caller's session (an untargeted
+/// `set-option` resolves against the caller's `TMUX` context). And the session is
+/// unreachable by its managed name until the limit is set, so no concurrent client can
+/// open a pane in it under the old limit. If another caller publishes first, this private
+/// session is a redundant orphan: it is killed and the present session is adopted.
+fn ensure_managed_session_atomic() -> Result<String> {
+    if let Some(id) = managed_session_id()? {
+        return Ok(id);
     }
 
-    let create = tmux::run(&["new-session", "-d", "-s", target::MANAGED_SESSION])?;
-    if create.exit_code == 0 {
-        return Ok(());
+    let private = private_session_name();
+    let created = tmux::run(&[
+        "new-session",
+        "-d",
+        "-s",
+        &private,
+        "-P",
+        "-F",
+        "#{session_id}",
+    ])?;
+    if created.exit_code != 0 {
+        // Another caller may have created and published the managed session first.
+        if let Some(id) = managed_session_id()? {
+            return Ok(id);
+        }
+        return Err(anyhow!(
+            "tmux new-session -d -s {private} failed (exit {}): {}",
+            created.exit_code,
+            created.stderr.trim()
+        ));
     }
-    if tmux::run(&["has-session", "-t", target::MANAGED_SESSION])?.exit_code == 0 {
-        return Ok(());
+
+    let session_id = created.stdout.trim().to_owned();
+    if session_id.is_empty() {
+        let _ = tmux::run(&["kill-session", "-t", &private]);
+        return Err(anyhow!(
+            "tmux new-session -d -s {private} returned no session id"
+        ));
+    }
+
+    // From here on, any exit that does not publish the session must remove it: this guard
+    // kills the private session on `?` (spawn failure or timeout) as well as on the
+    // explicit error paths below.
+    let pending = PendingSession::new(session_id);
+
+    // `history-limit` is a session option (it cannot be set per pane) and new windows
+    // inherit it, so it must be set before the command's window exists.
+    let limit = DEFAULT_HISTORY_LIMIT.to_string();
+    let set = tmux::run(&["set-option", "-t", pending.id(), "history-limit", &limit])?;
+    if set.exit_code != 0 {
+        return Err(anyhow!(
+            "tmux set-option -t {} history-limit failed (exit {}): {}",
+            pending.id(),
+            set.exit_code,
+            set.stderr.trim()
+        ));
+    }
+
+    let renamed = tmux::run(&[
+        "rename-session",
+        "-t",
+        pending.id(),
+        target::MANAGED_SESSION,
+    ])?;
+    if renamed.exit_code == 0 {
+        // Publish: the id now names the managed session, so the guard must not kill it.
+        let id = pending.id().to_owned();
+        pending.disarm();
+        return Ok(id);
+    }
+
+    // The rename lost a race with another publisher, or the managed name is otherwise
+    // unavailable: remove the private session and adopt the session now present.
+    let private_id = pending.id().to_owned();
+    let _ = tmux::run(&["kill-session", "-t", &private_id]);
+    pending.disarm();
+    if let Some(id) = managed_session_id()? {
+        return Ok(id);
     }
     Err(anyhow!(
-        "tmux new-session -d -s {} failed (exit {}): {}",
+        "tmux rename-session -t {private_id} {} failed (exit {}): {}",
         target::MANAGED_SESSION,
-        create.exit_code,
-        create.stderr.trim()
+        renamed.exit_code,
+        renamed.stderr.trim()
     ))
+}
+
+/// The managed session's stable `#{session_id}`, resolved by exact name, or `None` when no
+/// session carries that exact name. A bare name would prefix-match a `tmux-tools-*`
+/// session, so every lookup uses `=tmux-tools` (pane-targeting commands need the `:`).
+fn managed_session_id() -> Result<Option<String>> {
+    let session_target = target::managed_session_target();
+    if tmux::run(&["has-session", "-t", &session_target])?.exit_code != 0 {
+        return Ok(None);
+    }
+    let pane_target = target::managed_session_pane_target();
+    let id = tmux::run_checked(&["display-message", "-p", "-t", &pane_target, "#{session_id}"])?;
+    let id = id.trim().to_owned();
+    if id.is_empty() {
+        return Err(anyhow!(
+            "tmux returned an empty session id for the managed session"
+        ));
+    }
+    Ok(Some(id))
+}
+
+/// A created-but-unpublished managed session that removes itself on drop. It is disarmed
+/// only once the session has been published under the managed name or already removed.
+struct PendingSession {
+    id: Option<String>,
+}
+
+impl PendingSession {
+    fn new(id: String) -> Self {
+        Self { id: Some(id) }
+    }
+
+    fn id(&self) -> &str {
+        self.id.as_deref().unwrap_or_default()
+    }
+
+    fn disarm(mut self) {
+        self.id = None;
+    }
+}
+
+impl Drop for PendingSession {
+    fn drop(&mut self) {
+        if let Some(id) = self.id.take() {
+            let _ = tmux::run(&["kill-session", "-t", &id]);
+        }
+    }
+}
+
+/// A private session name no other client is expected to use. It deliberately does not
+/// begin with the managed name, so no prefix lookup can resolve it as the managed session.
+fn private_session_name() -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    format!("tt-pending-{}-{nanos}", std::process::id())
 }
 
 fn render_output(args: &LaunchArgs, pane_id: &str, launched_at: &str) -> Result<()> {

@@ -1,0 +1,34 @@
+{
+  "approval_id": "accepted-dispatch-20260919T0530Z",
+  "approval_object": "approval.json",
+  "approval_sha256": "0ed4f712dc79f5b592a976791808fe67eae41e47715ea272a9ff5e5cc0d40206",
+  "entries": [
+    {
+      "approved_revision": "50a4f8361319ff577999879dc1da89238ff87e78",
+      "bytes": 4642,
+      "object": "objects/c1c302b432945e0fe6807cbd63500ac338506d2adb58409403dfff8c52b41254.md",
+      "origin": {
+        "path": "docs/issues/ISSUE-260918-0525-03-bracketed-paste-transport.md",
+        "repository": "tmux-tools",
+        "revision": "4d1635f8a18948d40469044c57e5e235360ba2f5"
+      },
+      "role": "issue",
+      "sha256": "c1c302b432945e0fe6807cbd63500ac338506d2adb58409403dfff8c52b41254",
+      "target": "tmux-tools:ISSUE-260918-0525-03"
+    },
+    {
+      "approved_revision": "61a74879a6f1fe53be714833274b2d256c28c7a5",
+      "bytes": 2177,
+      "object": "objects/8842bfd61bf171639a253a44e316076a470c48844b93a7069d7cdc6e9c9c1d18.md",
+      "origin": {
+        "path": "docs/prd/PRD-260918-0323-01-agent-surfaces-and-pane-io.md",
+        "repository": "tmux-tools",
+        "revision": "4d1635f8a18948d40469044c57e5e235360ba2f5"
+      },
+      "role": "source",
+      "sha256": "8842bfd61bf171639a253a44e316076a470c48844b93a7069d7cdc6e9c9c1d18",
+      "target": "tmux-tools:PRD-260918-0323-01#p1-transport"
+    }
+  ],
+  "schema": "planning-contracts.bundle.v1"
+}

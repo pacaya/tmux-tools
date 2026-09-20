@@ -14,6 +14,7 @@ use crate::cmd::{
 
 #[derive(Debug, Parser)]
 #[command(name = "tmux-tools")]
+#[command(version)]
 #[command(about = "A Rust CLI for controlling tmux sessions and panes")]
 struct Cli {
     #[command(subcommand)]

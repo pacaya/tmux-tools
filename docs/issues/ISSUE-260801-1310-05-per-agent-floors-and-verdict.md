@@ -2,12 +2,20 @@
 id: ISSUE-260801-1310-05
 kind: issue
 category: enhancement
-status: ready-for-agent
+status: needs-triage
 context: tmux-tools
 summary: Per-agent geometry floors in the registry, effective-floor resolution, below_floor verdict, and status geometry
-prd: PRD-260801-0656-01
 terms: [Floor, Effective floor, Ceiling, Advisory floor, Agent profile, Readiness]
-blocked_by: [ISSUE-260801-1310-04]
+contract:
+  schema: planning-contracts.record.v1
+  clauses: []
+  references:
+    - relation: requires
+      repository: tmux-tools
+      record: PRD-260801-0656-01
+    - relation: blocked_by
+      repository: tmux-tools
+      record: ISSUE-260801-1310-04
 ---
 
 ## Agent Brief

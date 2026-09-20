@@ -2,12 +2,20 @@
 id: ISSUE-260801-1310-03
 kind: issue
 category: bug
-status: ready-for-agent
+status: needs-triage
 context: tmux-tools
 summary: --split window fails from inside tmux because a pane id is passed to new-window
-prd: PRD-260801-0656-01
 terms: [Target]
-blocked_by: [ISSUE-260801-1310-01]
+contract:
+  schema: planning-contracts.record.v1
+  clauses: []
+  references:
+    - relation: requires
+      repository: tmux-tools
+      record: PRD-260801-0656-01
+    - relation: blocked_by
+      repository: tmux-tools
+      record: ISSUE-260801-1310-01
 ---
 
 ## Agent Brief

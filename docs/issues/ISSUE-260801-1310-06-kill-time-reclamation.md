@@ -2,12 +2,20 @@
 id: ISSUE-260801-1310-06
 kind: issue
 category: enhancement
-status: ready-for-agent
+status: needs-triage
 context: tmux-tools
 summary: kill retiles a tool-tiled window so survivors reclaim the removed pane's space
-prd: PRD-260801-0656-01
 terms: [Layout intent, Ownership, Exited-agent pane]
-blocked_by: [ISSUE-260802-0128-01]
+contract:
+  schema: planning-contracts.record.v1
+  clauses: []
+  references:
+    - relation: requires
+      repository: tmux-tools
+      record: PRD-260801-0656-01
+    - relation: blocked_by
+      repository: tmux-tools
+      record: ISSUE-260802-0128-01
 ---
 
 ## Agent Brief

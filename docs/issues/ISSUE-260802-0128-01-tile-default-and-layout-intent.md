@@ -2,12 +2,29 @@
 id: ISSUE-260802-0128-01
 kind: issue
 category: enhancement
-status: ready-for-agent
+status: needs-triage
 context: tmux-tools
 summary: Make tile the default placement inside tmux — ownership-gated retile, the @tt-tiled layout-intent marker, sizing opt-outs, and the documentation change
-prd: PRD-260801-0656-01
 terms: [Tile, Layout intent, Ownership]
-blocked_by: [ISSUE-260801-1310-02, ISSUE-260802-0628-01, ISSUE-260801-1310-03, ISSUE-260801-1310-04]
+contract:
+  schema: planning-contracts.record.v1
+  clauses: []
+  references:
+    - relation: requires
+      repository: tmux-tools
+      record: PRD-260801-0656-01
+    - relation: blocked_by
+      repository: tmux-tools
+      record: ISSUE-260801-1310-02
+    - relation: blocked_by
+      repository: tmux-tools
+      record: ISSUE-260802-0628-01
+    - relation: blocked_by
+      repository: tmux-tools
+      record: ISSUE-260801-1310-03
+    - relation: blocked_by
+      repository: tmux-tools
+      record: ISSUE-260801-1310-04
 ---
 
 ## Agent Brief

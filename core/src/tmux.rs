@@ -4,7 +4,7 @@ use anyhow::{anyhow, Context, Result};
 use serde::Serialize;
 use std::cell::RefCell;
 use std::fmt;
-use std::io::{self, ErrorKind, Read};
+use std::io::{self, ErrorKind, Read, Write};
 use std::process::{Command, Output, Stdio};
 use std::sync::{Mutex, OnceLock};
 use std::thread;
@@ -128,12 +128,23 @@ pub fn run_clean(args: &[&str]) -> Result<TmuxOutput> {
     run_with(args, true)
 }
 
+/// Run a tmux command with `input` piped to its stdin. Used by transports that
+/// hand tmux their payload out of band (`load-buffer -`) rather than as an argv
+/// argument.
+pub fn run_with_stdin(args: &[&str], input: &[u8]) -> Result<TmuxOutput> {
+    run_with_stdin_clean(args, input, false)
+}
+
 pub fn run_checked(args: &[&str]) -> Result<String> {
     check(run(args), args)
 }
 
 pub fn run_checked_clean(args: &[&str]) -> Result<String> {
     check(run_clean(args), args)
+}
+
+pub fn run_checked_with_stdin(args: &[&str], input: &[u8]) -> Result<String> {
+    check(run_with_stdin(args, input), args)
 }
 
 pub fn run_checked_owned(args: &[String]) -> Result<String> {
@@ -163,7 +174,20 @@ fn run_with(user_args: &[&str], clean: bool) -> Result<TmuxOutput> {
         command.env_remove("TMUX");
     }
 
-    let output = match command_output_with_timeout(command, DEFAULT_TMUX_COMMAND_TIMEOUT) {
+    execute(command, DEFAULT_TMUX_COMMAND_TIMEOUT, None)
+}
+
+fn run_with_stdin_clean(user_args: &[&str], input: &[u8], clean: bool) -> Result<TmuxOutput> {
+    let mut command = command_for(user_args);
+    if clean {
+        command.env_remove("TMUX");
+    }
+
+    execute(command, DEFAULT_TMUX_COMMAND_TIMEOUT, Some(input))
+}
+
+fn execute(command: Command, timeout: Duration, input: Option<&[u8]>) -> Result<TmuxOutput> {
+    let output = match command_output_with_timeout_and_stdin(command, timeout, input) {
         Ok(output) => output,
         Err(CommandOutputError::Spawn(error)) if error.kind() == ErrorKind::NotFound => {
             return Err(anyhow!(
@@ -190,23 +214,47 @@ fn run_with(user_args: &[&str], clean: bool) -> Result<TmuxOutput> {
 }
 
 pub fn command_output_with_timeout(
-    mut command: Command,
+    command: Command,
     timeout: Duration,
 ) -> std::result::Result<Output, CommandOutputError> {
+    command_output_with_timeout_and_stdin(command, timeout, None)
+}
+
+fn command_output_with_timeout_and_stdin(
+    mut command: Command,
+    timeout: Duration,
+    input: Option<&[u8]>,
+) -> std::result::Result<Output, CommandOutputError> {
+    if input.is_some() {
+        command.stdin(Stdio::piped());
+    }
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = command.spawn().map_err(CommandOutputError::Spawn)?;
     let stdout = child.stdout.take().ok_or_else(|| {
-        CommandOutputError::Output(io::Error::new(
-            ErrorKind::Other,
-            "failed to capture command stdout",
-        ))
+        CommandOutputError::Output(io::Error::other("failed to capture command stdout"))
     })?;
     let stderr = child.stderr.take().ok_or_else(|| {
-        CommandOutputError::Output(io::Error::new(
-            ErrorKind::Other,
-            "failed to capture command stderr",
-        ))
+        CommandOutputError::Output(io::Error::other("failed to capture command stderr"))
     })?;
+    // Write stdin on its own thread so a payload larger than the pipe buffer
+    // cannot deadlock against the child's output.
+    let mut stdin_writer = match input {
+        Some(input) => {
+            let mut stdin = child.stdin.take().ok_or_else(|| {
+                CommandOutputError::Output(io::Error::other("failed to capture command stdin"))
+            })?;
+            let input = input.to_vec();
+            Some(thread::spawn(move || -> io::Result<()> {
+                match stdin.write_all(&input) {
+                    // The child may exit without draining stdin; its status is
+                    // authoritative, so a broken pipe is not an error here.
+                    Err(error) if error.kind() == ErrorKind::BrokenPipe => Ok(()),
+                    other => other,
+                }
+            }))
+        }
+        None => None,
+    };
     let stdout_reader = thread::spawn(move || read_pipe(stdout));
     let stderr_reader = thread::spawn(move || read_pipe(stderr));
     let deadline = Instant::now() + timeout;
@@ -214,6 +262,7 @@ pub fn command_output_with_timeout(
     loop {
         match child.try_wait().map_err(CommandOutputError::Wait)? {
             Some(status) => {
+                join_stdin_writer(&mut stdin_writer);
                 let stdout = join_reader(stdout_reader, "stdout")?;
                 let stderr = join_reader(stderr_reader, "stderr")?;
                 return Ok(Output {
@@ -225,6 +274,7 @@ pub fn command_output_with_timeout(
             None if Instant::now() >= deadline => {
                 let _ = child.kill();
                 let _ = child.wait();
+                join_stdin_writer(&mut stdin_writer);
                 let _ = join_reader(stdout_reader, "stdout");
                 let _ = join_reader(stderr_reader, "stderr");
                 return Err(CommandOutputError::Timeout { timeout });
@@ -236,6 +286,15 @@ pub fn command_output_with_timeout(
                 thread::sleep(sleep_for);
             }
         }
+    }
+}
+
+/// Reap the stdin writer, discarding its result. A write failure after the child
+/// exited is not itself a command failure; the child's exit status is reported
+/// by the caller.
+fn join_stdin_writer(handle: &mut Option<thread::JoinHandle<io::Result<()>>>) {
+    if let Some(handle) = handle.take() {
+        let _ = handle.join();
     }
 }
 
@@ -252,10 +311,9 @@ fn join_reader(
     match handle.join() {
         Ok(Ok(output)) => Ok(output),
         Ok(Err(error)) => Err(CommandOutputError::Output(error)),
-        Err(_) => Err(CommandOutputError::Output(io::Error::new(
-            ErrorKind::Other,
-            format!("{stream_name} reader panicked"),
-        ))),
+        Err(_) => Err(CommandOutputError::Output(io::Error::other(format!(
+            "{stream_name} reader panicked"
+        )))),
     }
 }
 

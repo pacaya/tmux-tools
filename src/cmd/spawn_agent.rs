@@ -22,6 +22,13 @@ pub struct SpawnAgentArgs {
     pub(crate) agent: String,
     #[arg(long, value_name = "PROFILE")]
     pub(crate) access: Option<String>,
+    /// Select the agent's rendering to launch. Defaults to the agent's default surface.
+    #[arg(long, value_name = "NAME")]
+    pub(crate) surface: Option<String>,
+    /// Resume a session by identifier. Validated against the resolved surface's
+    /// declared identifier shape before any pane is created.
+    #[arg(long, value_name = "ID")]
+    pub(crate) resume: Option<String>,
     #[arg(long, value_name = "NAME")]
     pub(crate) name: Option<String>,
     #[arg(long, value_name = "PATH")]
@@ -45,6 +52,7 @@ pub struct SpawnAgentArgs {
 struct SpawnAgentJson<'a> {
     agent: &'a str,
     access: Option<&'a str>,
+    surface: &'a str,
     name: Option<&'a str>,
     pane_id: &'a str,
     binary: &'a str,
@@ -53,9 +61,18 @@ struct SpawnAgentJson<'a> {
 }
 
 pub fn run(args: &SpawnAgentArgs) -> Result<()> {
-    let (registry, _warnings) = Registry::load()?;
-    let (binary, profile_args) = registry.launch_argv(&args.agent, args.access.as_deref())?;
-    let argv = launch_argv(binary.clone(), profile_args, &args.extra_args);
+    let (registry, warnings) = Registry::load()?;
+    for warning in &warnings {
+        eprintln!("warning: agent {}: {}", warning.agent, warning.detail);
+    }
+    let resolved = registry.resolve_launch(
+        &args.agent,
+        args.access.as_deref(),
+        args.surface.as_deref(),
+        args.resume.as_deref(),
+    )?;
+    let binary = resolved.binary;
+    let argv = launch_argv(binary.clone(), resolved.args, &args.extra_args);
     let cmd = launch_command(&argv, args.cwd.as_ref(), args.bare)?;
     let layout = resolve_layout(
         args.split,
@@ -81,6 +98,15 @@ pub fn run(args: &SpawnAgentArgs) -> Result<()> {
     let launched_at = rfc3339_utc_now()?;
 
     names::set(&pane_id, names::KEY_AGENT, &args.agent)?;
+    // Record the resolved surface unconditionally, whether or not one was named: an
+    // absent record can then only mean a pane created before surfaces existed.
+    names::set(&pane_id, names::KEY_SURFACE, &resolved.surface)?;
+    // Caller-supplied trailing arguments can change the rendering out from under the
+    // recorded surface. Arguments the surface supplies itself are validated by
+    // construction and do not set the mark.
+    if !args.extra_args.is_empty() {
+        names::set(&pane_id, names::KEY_SURFACE_UNVALIDATED, "1")?;
+    }
     if let Some(access) = &args.access {
         names::set(&pane_id, names::KEY_ACCESS, access)?;
     }
@@ -92,7 +118,14 @@ pub fn run(args: &SpawnAgentArgs) -> Result<()> {
         names::set(&pane_id, names::KEY_CWD, &cwd.to_string_lossy())?;
     }
 
-    render_output(args, &pane_id, &binary, &argv, &launched_at)
+    render_output(
+        args,
+        &pane_id,
+        &binary,
+        &argv,
+        &launched_at,
+        &resolved.surface,
+    )
 }
 
 fn launch_argv(binary: String, profile_args: Vec<String>, extra_args: &[String]) -> Vec<String> {
@@ -149,12 +182,14 @@ fn render_output(
     binary: &str,
     argv: &[String],
     launched_at: &str,
+    surface: &str,
 ) -> Result<()> {
     match args.common.format {
         Format::Concise => println!(
-            "agent={} access={} name={} pane={}",
+            "agent={} access={} surface={} name={} pane={}",
             args.agent,
             display_value(args.access.as_deref()),
+            surface,
             display_value(args.name.as_deref()),
             pane_id
         ),
@@ -162,6 +197,7 @@ fn render_output(
             let output = SpawnAgentJson {
                 agent: &args.agent,
                 access: args.access.as_deref(),
+                surface,
                 name: args.name.as_deref(),
                 pane_id,
                 binary,

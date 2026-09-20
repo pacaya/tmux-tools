@@ -121,6 +121,8 @@ mod tests {
             access: None,
             launched_at: None,
             cwd: None,
+            surface: None,
+            surface_unvalidated: false,
         }
     }
 
@@ -131,6 +133,8 @@ mod tests {
             access: None,
             launched_at: None,
             cwd: cwd.map(str::to_owned),
+            surface: None,
+            surface_unvalidated: false,
         }
     }
 
@@ -319,6 +323,8 @@ mod tests {
             access: None,
             launched_at: None,
             cwd: Some("/work".to_owned()),
+            surface: None,
+            surface_unvalidated: false,
         };
         let input = SafetyInput {
             verb: "kill",

@@ -13,14 +13,14 @@ pub struct IdleConfig {
     pub idle_seconds: f64,
     pub poll_interval: Duration,
     pub timeout: Duration,
-    pub ready_regex: Option<Regex>,
-    /// How many of the bottom non-blank lines the `ready_regex` is tested against.
-    /// 1 matches only the bottom non-blank line (the default); higher values let the
-    /// regex match a prompt that sits above a TUI status/footer row. `0` means "no limit":
-    /// every non-blank line is scanned, so a uniquely-anchored pattern matches a status
-    /// line regardless of how many task/footer rows render below it.
-    pub ready_scan_lines: usize,
-    /// How long a `ready_regex` *or* `until_regex` match must hold continuously before
+    /// The compiled readiness patterns of the pane's resolved surface. `None` when the
+    /// pane has no surface, or its surface supplies no `ready_regex`/`busy_regex`; the
+    /// loop then falls back to idle detection. When present, P3's classifier is the only
+    /// source of pane state, and idle detection is the completion fallback only while the
+    /// classifier returns `Unknown` — it is suppressed while the classifier returns
+    /// `Busy` and is never a parallel definition of idleness.
+    pub surface: Option<SurfacePatterns>,
+    /// How long a ready match *or* `until_regex` match must hold continuously before
     /// completing (`ReadyMatched` / `UntilMatched`). Guards against a stale indicator that
     /// lingers for a single poll (e.g. a previous turn's `✓ done` / `· Ready ·` status line
     /// still visible right after a new prompt is submitted) triggering a premature, wrong
@@ -28,10 +28,81 @@ pub struct IdleConfig {
     /// that may scroll off-screen before the window elapses).
     pub ready_stable_seconds: f64,
     pub until_regex: Option<Regex>,
+    /// Whether idle detection (a quiet capture) may settle the wait when P3's classifier
+    /// returns `Unknown`. `wait-idle` keeps the historical fallback (`true`); `prompt` sets
+    /// it `false` whenever the resolved surface supplies patterns, so a capture matching
+    /// neither or both patterns never settles as idle. When the surface supplies no patterns
+    /// (or the pane has no surface) `prompt` leaves it `true`, because idle detection is then
+    /// the only completion signal.
+    pub idle_on_unknown: bool,
 }
 
 pub const DEFAULT_READY_SCAN_LINES: usize = 1;
 pub const DEFAULT_READY_STABLE_SECONDS: f64 = 2.0;
+
+/// P3: the three-valued pane state. `Unknown` is a distinct outcome, never a synonym
+/// for `Busy`; consumers that need certainty must branch on it explicitly.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PaneState {
+    Idle,
+    Busy,
+    Unknown,
+}
+
+/// The compiled readiness patterns a resolved surface supplies. Compiling happens once
+/// when the surface is resolved, so the classifier stays pure and cheap to call per poll.
+#[derive(Clone, Debug, Default)]
+pub struct SurfacePatterns {
+    pub ready_regex: Option<Regex>,
+    /// How many of the bottom non-blank lines `ready_regex` is tested against. `1` is the
+    /// default (bottom line only); `0` means "no limit" — scan every non-blank line.
+    pub ready_scan_lines: usize,
+    pub busy_regex: Option<Regex>,
+}
+
+impl SurfacePatterns {
+    /// Whether this surface supplies no patterns at all, and so cannot classify a pane
+    /// beyond `Unknown`.
+    pub fn is_empty(&self) -> bool {
+        self.ready_regex.is_none() && self.busy_regex.is_none()
+    }
+}
+
+/// P3: the one place pane state is derived. Total over the readiness-pattern truth table:
+///
+/// | patterns       | capture matches | result  |
+/// |----------------|-----------------|---------|
+/// | both present   | ready only      | idle    |
+/// | both present   | busy only       | busy    |
+/// | both present   | neither         | unknown |
+/// | both present   | both            | unknown |
+/// | busy absent    | ready           | idle    |
+/// | busy absent    | not ready       | unknown |
+/// | ready absent   | busy            | busy    |
+/// | ready absent   | not busy        | unknown |
+/// | neither present| any             | unknown |
+pub fn classify(stripped: &str, patterns: &SurfacePatterns) -> PaneState {
+    let ready = patterns
+        .ready_regex
+        .as_ref()
+        .map(|_| ready_matches(stripped, &patterns.ready_regex, patterns.ready_scan_lines));
+    let busy = patterns
+        .busy_regex
+        .as_ref()
+        .map(|regex| regex.is_match(stripped));
+
+    match (ready, busy) {
+        (Some(true), Some(true)) => PaneState::Unknown,
+        (Some(true), Some(false)) => PaneState::Idle,
+        (Some(false), Some(true)) => PaneState::Busy,
+        (Some(false), Some(false)) => PaneState::Unknown,
+        (Some(true), None) => PaneState::Idle,
+        (Some(false), None) => PaneState::Unknown,
+        (None, Some(true)) => PaneState::Busy,
+        (None, Some(false)) => PaneState::Unknown,
+        (None, None) => PaneState::Unknown,
+    }
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct IdleOutcome {
@@ -39,6 +110,16 @@ pub struct IdleOutcome {
     pub duration: Duration,
     pub idle_for: Duration,
     pub final_capture: String,
+    /// P7 turn observation: whether the resolved surface's `busy_regex` was seen at any
+    /// poll between submission and settle. Independent of `reason`: a busy pane that only
+    /// ends at `--timeout` still reports the turn as observed. Always `false` when the
+    /// surface supplies no `busy_regex`.
+    pub busy_seen: bool,
+    /// P7 completeness support: whether the pane was on the alternate screen at any poll.
+    /// The alternate screen keeps no tmux scrollback, so a pane that was on it at any
+    /// observed point cannot supply everything after the mark. Sampled alongside each
+    /// capture, so it is seen even if the pane leaves the alternate screen before settle.
+    pub alternate_seen: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -89,10 +170,10 @@ impl Default for IdleConfig {
             idle_seconds: 2.0,
             poll_interval: Duration::from_millis(250),
             timeout: Duration::from_secs(120),
-            ready_regex: None,
-            ready_scan_lines: DEFAULT_READY_SCAN_LINES,
+            surface: None,
             ready_stable_seconds: DEFAULT_READY_STABLE_SECONDS,
             until_regex: None,
+            idle_on_unknown: true,
         }
     }
 }
@@ -102,11 +183,28 @@ pub fn wait_for_idle(pane_id: &str, cfg: &IdleConfig) -> Result<IdleOutcome> {
     let mut last_change = start;
     let mut previous_hash = None;
     let mut capture_count = 0_u64;
+    let mut busy_seen = false;
+    let mut alternate_seen = false;
     let mut ready_debounce = MatchDebounce::default();
     let mut until_debounce = MatchDebounce::default();
 
     loop {
-        let output = tmux::run(&["capture-pane", "-t", pane_id, "-p"])?;
+        // Sample the live `alternate_on` flag in the same tmux invocation as the capture,
+        // so the flag and the bytes describe one instant. A pane on the alternate screen
+        // has no scrollback, and it can leave the screen before settle; P7 completeness
+        // must still know it was there, so the flag is tracked on every poll.
+        let output = tmux::run(&[
+            "display-message",
+            "-p",
+            "-t",
+            pane_id,
+            "#{alternate_on}",
+            ";",
+            "capture-pane",
+            "-t",
+            pane_id,
+            "-p",
+        ])?;
         if output.exit_code != 0 {
             bail!(
                 "tmux capture-pane failed with exit code {}: {}",
@@ -115,7 +213,26 @@ pub fn wait_for_idle(pane_id: &str, cfg: &IdleConfig) -> Result<IdleOutcome> {
             );
         }
 
-        let stripped = strip_ansi(&output.stdout);
+        let (alternate_flag, capture) = output
+            .stdout
+            .split_once('\n')
+            .unwrap_or((output.stdout.as_str(), ""));
+        if alternate_flag.trim() == "1" {
+            alternate_seen = true;
+        }
+        let stripped = strip_ansi(capture);
+        // P7 turn observation: whether `busy_regex` was seen at any poll between
+        // submission and settle. It is read from the pattern directly, not from the
+        // classifier's outcome, so a busy match is still observed when both patterns
+        // match (classifier `Unknown`).
+        if cfg
+            .surface
+            .as_ref()
+            .and_then(|patterns| patterns.busy_regex.as_ref())
+            .is_some_and(|regex| regex.is_match(&stripped))
+        {
+            busy_seen = true;
+        }
         let new_hash = xxh3_64(stripped.as_bytes());
         let now = Instant::now();
 
@@ -141,28 +258,47 @@ pub fn wait_for_idle(pane_id: &str, cfg: &IdleConfig) -> Result<IdleOutcome> {
                 duration: start.elapsed(),
                 idle_for: now - last_change,
                 final_capture: stripped,
+                busy_seen,
+                alternate_seen,
             });
         }
+
+        // P3's classifier is the only place pane state is derived. When the resolved
+        // surface supplies no patterns (or there is no surface) the state is `Unknown`,
+        // which falls through to idle detection below.
+        let state = cfg
+            .surface
+            .as_ref()
+            .filter(|patterns| !patterns.is_empty())
+            .map(|patterns| classify(&stripped, patterns))
+            .unwrap_or(PaneState::Unknown);
+        let ready_now = state == PaneState::Idle;
 
         // A ready match must hold continuously for `ready_stable_seconds` before
         // completing, so a stale indicator visible for a single poll can't trigger a
         // premature completion.
-        let ready_now = ready_matches(&stripped, &cfg.ready_regex, cfg.ready_scan_lines);
         if ready_debounce.observe(ready_now, now, cfg.ready_stable_seconds) {
             return Ok(IdleOutcome {
                 reason: IdleReason::ReadyMatched,
                 duration: start.elapsed(),
                 idle_for: now - last_change,
                 final_capture: stripped,
+                busy_seen,
+                alternate_seen,
             });
         }
 
-        // Suppress `Idle` while a ready or until match is pending its debounce: a static
-        // pane that is currently matching is exactly what would trip `Idle` early when
-        // `idle_seconds <= ready_stable_seconds`. Suppressing it ensures such a pane is
-        // reported as `ReadyMatched`/`UntilMatched` after the debounce, never a premature
-        // `Idle`.
-        if !ready_now
+        // Idle detection is the fallback for when the classifier cannot decide. `Unknown`
+        // covers no patterns, no surface, and a capture that matches neither or both
+        // patterns. A `Busy` classification suppresses it, so a static busy footer can only
+        // end at `--timeout`; an `Idle` classification is completed by the ready debounce
+        // above. `idle_on_unknown` gates the fallback: `wait-idle` allows it, while `prompt`
+        // disallows it whenever the surface supplies patterns, so an unknown capture there
+        // waits for a definite state or the timeout. Suppress it while an `--until` match is
+        // pending its debounce: a static pane that is currently matching is exactly what
+        // would trip `Idle` early when `idle_seconds <= ready_stable_seconds`.
+        if state == PaneState::Unknown
+            && cfg.idle_on_unknown
             && !until_now
             && capture_count >= 2
             && (now - last_change).as_secs_f64() >= cfg.idle_seconds
@@ -172,6 +308,8 @@ pub fn wait_for_idle(pane_id: &str, cfg: &IdleConfig) -> Result<IdleOutcome> {
                 duration: start.elapsed(),
                 idle_for: now - last_change,
                 final_capture: stripped,
+                busy_seen,
+                alternate_seen,
             });
         }
 
@@ -181,6 +319,8 @@ pub fn wait_for_idle(pane_id: &str, cfg: &IdleConfig) -> Result<IdleOutcome> {
                 duration: start.elapsed(),
                 idle_for: now - last_change,
                 final_capture: stripped,
+                busy_seen,
+                alternate_seen,
             });
         }
 
@@ -450,7 +590,75 @@ mod tests {
         assert_eq!(cfg.poll_interval, Duration::from_millis(250));
         assert_eq!(cfg.timeout, Duration::from_secs(120));
         assert_eq!(cfg.ready_stable_seconds, 2.0);
-        assert!(cfg.ready_regex.is_none());
+        assert!(cfg.surface.is_none());
         assert!(cfg.until_regex.is_none());
+        assert!(cfg.idle_on_unknown);
+    }
+
+    fn patterns(
+        ready: Option<&str>,
+        ready_scan_lines: usize,
+        busy: Option<&str>,
+    ) -> SurfacePatterns {
+        SurfacePatterns {
+            ready_regex: ready.map(|pattern| Regex::new(pattern).expect("test regex compiles")),
+            ready_scan_lines,
+            busy_regex: busy.map(|pattern| Regex::new(pattern).expect("test regex compiles")),
+        }
+    }
+
+    #[test]
+    fn classify_both_patterns_ready_only_is_idle() {
+        let patterns = patterns(Some("^READY$"), 1, Some("^BUSY$"));
+        assert_eq!(classify("READY\n", &patterns), PaneState::Idle);
+    }
+
+    #[test]
+    fn classify_both_patterns_busy_only_is_busy() {
+        let patterns = patterns(Some("^READY$"), 1, Some("BUSY"));
+        assert_eq!(classify("BUSY\n", &patterns), PaneState::Busy);
+    }
+
+    #[test]
+    fn classify_both_patterns_neither_is_unknown() {
+        let patterns = patterns(Some("^READY$"), 1, Some("^BUSY$"));
+        assert_eq!(classify("something else\n", &patterns), PaneState::Unknown);
+    }
+
+    #[test]
+    fn classify_both_patterns_both_is_unknown() {
+        let patterns = patterns(Some("READY"), 1, Some("BUSY"));
+        assert_eq!(classify("READY and BUSY\n", &patterns), PaneState::Unknown);
+    }
+
+    #[test]
+    fn classify_busy_absent_ready_is_idle() {
+        let patterns = patterns(Some("^READY$"), 1, None);
+        assert_eq!(classify("READY\n", &patterns), PaneState::Idle);
+    }
+
+    #[test]
+    fn classify_busy_absent_not_ready_is_unknown() {
+        let patterns = patterns(Some("^READY$"), 1, None);
+        assert_eq!(classify("waiting\n", &patterns), PaneState::Unknown);
+    }
+
+    #[test]
+    fn classify_ready_absent_busy_is_busy() {
+        let patterns = patterns(None, 1, Some("BUSY"));
+        assert_eq!(classify("BUSY\n", &patterns), PaneState::Busy);
+    }
+
+    #[test]
+    fn classify_ready_absent_not_busy_is_unknown() {
+        let patterns = patterns(None, 1, Some("BUSY"));
+        assert_eq!(classify("waiting\n", &patterns), PaneState::Unknown);
+    }
+
+    #[test]
+    fn classify_neither_pattern_present_is_unknown() {
+        let patterns = patterns(None, 1, None);
+        assert!(patterns.is_empty());
+        assert_eq!(classify("READY\n", &patterns), PaneState::Unknown);
     }
 }

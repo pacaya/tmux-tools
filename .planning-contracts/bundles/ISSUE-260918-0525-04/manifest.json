@@ -1,0 +1,34 @@
+{
+  "approval_id": "fallout-20260919T0612Z",
+  "approval_object": "approval.json",
+  "approval_sha256": "f851f9a479085b5772eaad4ba15fa1f1c7b07b149aba24d6a2d116e6b6a727db",
+  "entries": [
+    {
+      "approved_revision": "e44e0453055879c1ad0beca55c1f2c5d1347b567",
+      "bytes": 4567,
+      "object": "objects/40eaaa28e3cc55717b96860d22e2fe638f2ded1a05830c721cb961a6277a0164.md",
+      "origin": {
+        "path": "docs/issues/ISSUE-260918-0525-04-state-aware-interrupt.md",
+        "repository": "tmux-tools",
+        "revision": "d5219de65345a8375e001643fd7ae155506ad7c2"
+      },
+      "role": "issue",
+      "sha256": "40eaaa28e3cc55717b96860d22e2fe638f2ded1a05830c721cb961a6277a0164",
+      "target": "tmux-tools:ISSUE-260918-0525-04"
+    },
+    {
+      "approved_revision": "61a74879a6f1fe53be714833274b2d256c28c7a5",
+      "bytes": 747,
+      "object": "objects/93a3ad0c6dbb6f2d5d789705ce3553cc2e325ea347ea6a1a55d50b4a9766297c.md",
+      "origin": {
+        "path": "docs/prd/PRD-260918-0323-01-agent-surfaces-and-pane-io.md",
+        "repository": "tmux-tools",
+        "revision": "d5219de65345a8375e001643fd7ae155506ad7c2"
+      },
+      "role": "source",
+      "sha256": "93a3ad0c6dbb6f2d5d789705ce3553cc2e325ea347ea6a1a55d50b4a9766297c",
+      "target": "tmux-tools:PRD-260918-0323-01#p5-interrupt"
+    }
+  ],
+  "schema": "planning-contracts.bundle.v1"
+}

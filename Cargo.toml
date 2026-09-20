@@ -3,12 +3,33 @@ members = [".", "core"]
 
 [package]
 name = "tmux-tools"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
+
+[features]
+# Builds the `tt-fake-tui` integration-test fixture. It is deliberately behind
+# a feature so a normal `cargo build` / `cargo install` never ships it. Run the
+# suite that exercises it with the documented test command
+# (`cargo test --workspace --features test-fixtures`).
+test-fixtures = []
+# Builds `tt-vendor-smoke`, the manually-run P8 smoke that drives the live
+# claude/codex/dsh binaries. It never runs under `cargo test`; run it with
+# `cargo run --features vendor-smoke --bin tt-vendor-smoke`.
+vendor-smoke = []
 
 [[bin]]
 name = "tmux-tools"
 path = "src/main.rs"
+
+[[bin]]
+name = "tt-fake-tui"
+path = "src/bin/tt-fake-tui.rs"
+required-features = ["test-fixtures"]
+
+[[bin]]
+name = "tt-vendor-smoke"
+path = "src/bin/tt-vendor-smoke.rs"
+required-features = ["vendor-smoke"]
 
 [dependencies]
 anyhow = "1"

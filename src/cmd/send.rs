@@ -37,7 +37,7 @@ pub fn run(args: &SendArgs) -> Result<()> {
 
     send_text(args, &pane)?;
 
-    let (attempts, verified) = dispatch_enter(
+    let delivery = dispatch_enter(
         args.enter,
         args.verify,
         || send_enter(&pane),
@@ -45,7 +45,16 @@ pub fn run(args: &SendArgs) -> Result<()> {
         |ms| thread::sleep(Duration::from_millis(ms)),
     )?;
 
-    render_output(args, &pane, attempts, verified)
+    render_output(args, &pane, delivery.attempts, delivery.verified)
+}
+
+/// What one verified-Enter delivery did. `captures` are every pane frame the delivery
+/// took — the pre-Enter frame plus each post-Enter frame — so a caller can observe state
+/// that was visible only during delivery (e.g. a brief busy footer).
+pub(crate) struct EnterDelivery {
+    pub attempts: usize,
+    pub verified: bool,
+    pub captures: Vec<String>,
 }
 
 /// Pure dispatch logic with side effects injected as closures so the
@@ -56,23 +65,32 @@ pub(crate) fn dispatch_enter<S, C, P>(
     mut send_enter_fn: S,
     mut capture_fn: C,
     mut sleep_fn: P,
-) -> Result<(usize, bool)>
+) -> Result<EnterDelivery>
 where
     S: FnMut() -> Result<()>,
     C: FnMut() -> Result<String>,
     P: FnMut(u64),
 {
     if !enter {
-        return Ok((1, true));
+        return Ok(EnterDelivery {
+            attempts: 1,
+            verified: true,
+            captures: Vec::new(),
+        });
     }
 
     if !verify {
         send_enter_fn()?;
-        return Ok((1, true));
+        return Ok(EnterDelivery {
+            attempts: 1,
+            verified: true,
+            captures: Vec::new(),
+        });
     }
 
     sleep_fn(100);
     let before = capture_fn()?;
+    let mut captures = vec![before.clone()];
     let mut attempts = 0;
     let mut verified = false;
 
@@ -82,7 +100,9 @@ where
         sleep_fn(200);
 
         let after = capture_fn()?;
-        if after != before {
+        let changed = after != before;
+        captures.push(after);
+        if changed {
             verified = true;
             break;
         }
@@ -92,7 +112,11 @@ where
         }
     }
 
-    Ok((attempts, verified))
+    Ok(EnterDelivery {
+        attempts,
+        verified,
+        captures,
+    })
 }
 
 fn send_text(args: &SendArgs, pane: &str) -> Result<()> {
@@ -155,9 +179,8 @@ mod tests {
             |_ms| {},
         )
         .expect("dispatch_enter should not error");
-        let (attempts, verified) = result;
         let count = *send_count.borrow();
-        (attempts, verified, count)
+        (result.attempts, result.verified, count)
     }
 
     #[test]
@@ -207,7 +230,7 @@ mod tests {
         let send_count = RefCell::new(0_usize);
         let captures = RefCell::new(vec!["before".to_owned(), "after".to_owned()]);
         let mut next_capture_index = 0_usize;
-        let (attempts, verified) = dispatch_enter(
+        let delivery = dispatch_enter(
             true,
             true,
             || {
@@ -227,7 +250,7 @@ mod tests {
         )
         .expect("dispatch_enter should not error");
         assert_eq!(*send_count.borrow(), 1);
-        assert_eq!(attempts, 1);
-        assert!(verified);
+        assert_eq!(delivery.attempts, 1);
+        assert!(delivery.verified);
     }
 }

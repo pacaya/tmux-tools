@@ -1,0 +1,60 @@
+{
+  "approval_id": "review-20260919T105312Z",
+  "approval_object": "approval.json",
+  "approval_sha256": "4d7da6eb3db5e82a7a84a20b1a3bf45867056657164b2298727b10e87be8b42e",
+  "entries": [
+    {
+      "approved_revision": "dcd052ee05c2346257b401f4d55892f3536b4a54",
+      "bytes": 9653,
+      "object": "objects/60d0fb96cf5cfadf83d02013fdaf4faaa47a8eb89fef6cf2164c6851311ec131.md",
+      "origin": {
+        "path": "docs/issues/ISSUE-260918-0525-06-prompt-mark-and-completeness.md",
+        "repository": "tmux-tools",
+        "revision": "3f75acf420545661d83271c367a65c3eed172534"
+      },
+      "role": "issue",
+      "sha256": "60d0fb96cf5cfadf83d02013fdaf4faaa47a8eb89fef6cf2164c6851311ec131",
+      "target": "tmux-tools:ISSUE-260918-0525-06"
+    },
+    {
+      "approved_revision": "d0e7bb2df25555d69a488e5feea30c055ab07c88",
+      "bytes": 804,
+      "object": "objects/5a416456cdbf417d93cf1cf17af464fbffe97c0511e3dcac6f472eb9ac9d0435.md",
+      "origin": {
+        "path": "docs/prd/PRD-260918-0323-01-agent-surfaces-and-pane-io.md",
+        "repository": "tmux-tools",
+        "revision": "3f75acf420545661d83271c367a65c3eed172534"
+      },
+      "role": "source",
+      "sha256": "5a416456cdbf417d93cf1cf17af464fbffe97c0511e3dcac6f472eb9ac9d0435",
+      "target": "tmux-tools:PRD-260918-0323-01#p3-state"
+    },
+    {
+      "approved_revision": "d0e7bb2df25555d69a488e5feea30c055ab07c88",
+      "bytes": 799,
+      "object": "objects/40c395669c2ab6b627bacde2e0124382d55ab505d66bfe28a458a326f74c1648.md",
+      "origin": {
+        "path": "docs/prd/PRD-260918-0323-01-agent-surfaces-and-pane-io.md",
+        "repository": "tmux-tools",
+        "revision": "3f75acf420545661d83271c367a65c3eed172534"
+      },
+      "role": "source",
+      "sha256": "40c395669c2ab6b627bacde2e0124382d55ab505d66bfe28a458a326f74c1648",
+      "target": "tmux-tools:PRD-260918-0323-01#p4-capture"
+    },
+    {
+      "approved_revision": "d0e7bb2df25555d69a488e5feea30c055ab07c88",
+      "bytes": 2669,
+      "object": "objects/3dadcd27ca9820bdc0fec44db65600b508a0e4ae19c505799aa1c22058f4b67a.md",
+      "origin": {
+        "path": "docs/prd/PRD-260918-0323-01-agent-surfaces-and-pane-io.md",
+        "repository": "tmux-tools",
+        "revision": "3f75acf420545661d83271c367a65c3eed172534"
+      },
+      "role": "source",
+      "sha256": "3dadcd27ca9820bdc0fec44db65600b508a0e4ae19c505799aa1c22058f4b67a",
+      "target": "tmux-tools:PRD-260918-0323-01#p7-prompt"
+    }
+  ],
+  "schema": "planning-contracts.bundle.v1"
+}

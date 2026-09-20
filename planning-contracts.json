@@ -1,0 +1,12 @@
+{
+  "schema": "planning-contracts.registry.v1",
+  "local_repository": "tmux-tools",
+  "repositories": [
+    {
+      "id": "tmux-tools",
+      "path": ".",
+      "planning_roots": ["docs"],
+      "external_planning_roots": []
+    }
+  ]
+}

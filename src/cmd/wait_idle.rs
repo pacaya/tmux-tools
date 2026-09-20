@@ -8,19 +8,12 @@ use tmux_tools_core::{
     format::Format,
     idle::{
         bottom_non_blank_lines, resolve_timeout, validate_seconds, wait_for_idle, IdleConfig,
-        IdleReason, DEFAULT_READY_SCAN_LINES, DEFAULT_READY_STABLE_SECONDS,
+        IdleReason, SurfacePatterns, DEFAULT_READY_SCAN_LINES, DEFAULT_READY_STABLE_SECONDS,
     },
     names, target,
 };
 
 use crate::CommonArgs;
-
-/// The readiness signal resolved from the pane's registered agent profile: the compiled
-/// `ready_regex` (if any) and how many bottom non-blank lines it should be tested against.
-pub(crate) struct ReadySignal {
-    pub(crate) regex: Option<Regex>,
-    pub(crate) scan_lines: usize,
-}
 
 #[derive(Args, Debug)]
 pub struct WaitIdleArgs {
@@ -60,15 +53,16 @@ struct WaitIdleJson<'a> {
 pub fn run(args: &WaitIdleArgs) -> Result<()> {
     let pane = target::resolve_from_common(&args.common)?;
 
-    let ready = ready_signal_for(&pane)?;
+    let ready = surface_patterns_for(&pane)?;
     let cfg = IdleConfig {
         idle_seconds: validate_seconds(args.idle_seconds, "idle-seconds")?,
         poll_interval: Duration::from_millis(250),
         timeout: resolve_timeout(args.timeout, "timeout")?,
-        ready_regex: ready.regex,
-        ready_scan_lines: ready.scan_lines,
+        surface: ready,
         ready_stable_seconds: validate_seconds(args.ready_stable_seconds, "ready-stable-seconds")?,
         until_regex: args.until.as_deref().map(Regex::new).transpose()?,
+        // `wait-idle` keeps the historical fallback: a quiet `Unknown` capture settles it.
+        idle_on_unknown: true,
     };
     let outcome = wait_for_idle(&pane, &cfg)?;
 
@@ -113,37 +107,135 @@ pub fn run(args: &WaitIdleArgs) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn ready_signal_for(pane: &str) -> Result<ReadySignal> {
-    let none = ReadySignal {
-        regex: None,
-        scan_lines: DEFAULT_READY_SCAN_LINES,
-    };
+/// The resolved surface facts `prompt`/`wait-idle` need: readiness patterns and the
+/// declared bracketed-paste capability. `None` when the pane resolves to no surface
+/// (no agent, or a record naming a surface the registry no longer has).
+pub(crate) struct SurfaceInfo {
+    pub patterns: Option<SurfacePatterns>,
+    pub bracketed_paste: bool,
+}
 
+/// P5's interrupt facts for the pane's resolved surface, resolved **without**
+/// compiling the surface's readiness patterns. A surface declaring no quit hazard
+/// needs no patterns, and a pattern-compile failure must not preempt the
+/// surface-unvalidated refusal. `None` when the pane resolves to no surface.
+pub(crate) struct InterruptSurface {
+    pub agent: String,
+    pub surface: String,
+    pub interrupt_key: String,
+    pub quit_when_idle: bool,
+    pub ready_regex: Option<String>,
+    pub ready_lines: Option<usize>,
+    pub busy_regex: Option<String>,
+}
+
+/// Resolve a pane's recorded surface to its owned fields. `None` when the pane names
+/// no agent the registry knows, or its record names a surface the registry does not
+/// have.
+fn resolved_surface_owned(pane: &str) -> Result<Option<(String, String, agents::Surface)>> {
     let registered = names::read(pane)?;
     let Some(agent_name) = registered.agent else {
-        return Ok(none);
+        return Ok(None);
     };
 
-    let (registry, _warnings) = agents::Registry::load()?;
-    let Some(agent) = registry.get(&agent_name) else {
-        return Ok(none);
+    let (registry, warnings) = agents::Registry::load()?;
+    for warning in &warnings {
+        eprintln!("warning: agent {}: {}", warning.agent, warning.detail);
+    }
+    let Some(resolved) = registry.resolve_surface(&agent_name, registered.surface.as_deref())
+    else {
+        return Ok(None);
     };
+
+    Ok(Some((
+        agent_name,
+        resolved.name.to_owned(),
+        resolved.surface.clone(),
+    )))
+}
+
+/// The compiled readiness patterns and declared capability of the pane's resolved
+/// surface. `None` when the pane resolves to no surface.
+pub(crate) fn surface_info_for(pane: &str) -> Result<Option<SurfaceInfo>> {
+    let Some((agent_name, surface_name, surface)) = resolved_surface_owned(pane)? else {
+        return Ok(None);
+    };
+
+    Ok(Some(SurfaceInfo {
+        patterns: compile_surface_patterns(&agent_name, &surface_name, &surface)?,
+        bracketed_paste: surface.bracketed_paste,
+    }))
+}
+
+/// The interrupt contract of the pane's resolved surface, resolved without compiling
+/// its readiness patterns. `None` when the pane resolves to no surface.
+pub(crate) fn interrupt_surface_for(pane: &str) -> Result<Option<InterruptSurface>> {
+    let Some((agent, surface_name, surface)) = resolved_surface_owned(pane)? else {
+        return Ok(None);
+    };
+
+    Ok(Some(InterruptSurface {
+        agent,
+        surface: surface_name,
+        interrupt_key: surface.interrupt_key,
+        quit_when_idle: surface.quit_when_idle,
+        ready_regex: surface.ready_regex,
+        ready_lines: surface.ready_lines,
+        busy_regex: surface.busy_regex,
+    }))
+}
+
+/// The compiled readiness patterns of the pane's resolved surface, or `None` when there
+/// is no surface or it supplies no patterns (then the wait falls back to idle detection).
+pub(crate) fn surface_patterns_for(pane: &str) -> Result<Option<SurfacePatterns>> {
+    Ok(surface_info_for(pane)?.and_then(|info| info.patterns))
+}
+
+fn compile_surface_patterns(
+    agent_name: &str,
+    surface_name: &str,
+    surface: &agents::Surface,
+) -> Result<Option<SurfacePatterns>> {
+    compile_patterns(
+        agent_name,
+        surface_name,
+        surface.ready_regex.as_deref(),
+        surface.ready_lines,
+        surface.busy_regex.as_deref(),
+    )
+}
+
+/// Compile the raw readiness patterns a resolved surface supplies. `None` when the
+/// surface supplies neither pattern.
+pub(crate) fn compile_patterns(
+    agent_name: &str,
+    surface_name: &str,
+    ready_regex: Option<&str>,
+    ready_lines: Option<usize>,
+    busy_regex: Option<&str>,
+) -> Result<Option<SurfacePatterns>> {
+    let ready_regex = match ready_regex {
+        Some(pattern) => Some(Regex::new(pattern).with_context(|| {
+            format!("invalid ready_regex for agent {agent_name} surface {surface_name}: {pattern}")
+        })?),
+        None => None,
+    };
+    let busy_regex = match busy_regex {
+        Some(pattern) => Some(Regex::new(pattern).with_context(|| {
+            format!("invalid busy_regex for agent {agent_name} surface {surface_name}: {pattern}")
+        })?),
+        None => None,
+    };
+
+    if ready_regex.is_none() && busy_regex.is_none() {
+        return Ok(None);
+    }
 
     // `ready_lines = 0` is the "scan every non-blank line" (whole-pane) sentinel, so it
     // must survive — don't clamp to 1. `None` falls back to the default (bottom line only).
-    let scan_lines = agent.ready_lines.unwrap_or(DEFAULT_READY_SCAN_LINES);
-
-    let Some(pattern) = agent.ready_regex.as_deref() else {
-        return Ok(ReadySignal {
-            regex: None,
-            scan_lines,
-        });
-    };
-
-    let regex = Regex::new(pattern)
-        .with_context(|| format!("invalid ready_regex for agent {agent_name}: {pattern}"))?;
-    Ok(ReadySignal {
-        regex: Some(regex),
-        scan_lines,
-    })
+    Ok(Some(SurfacePatterns {
+        ready_regex,
+        ready_scan_lines: ready_lines.unwrap_or(DEFAULT_READY_SCAN_LINES),
+        busy_regex,
+    }))
 }

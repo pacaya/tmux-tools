@@ -15,7 +15,8 @@ segment** of Claude's status line, which tmux-tools matches directly:
 ```
 ✓ done | 🤖 Opus 4.8 (1M context) | ⎇ main clean | 📁 myrepo | [█▒░░░] 190k/1000k (19%)
 └──────┘
- readiness indicator                ← ready_regex = "(✓ done|⏸ waiting) \| 🤖"
+ readiness indicator   ← ready_regex = "(✓ done|⏸ waiting) \| 🤖"
+                         busy_regex  = "(⚡ working|🔐 permission|⚙ [0-9]+ bg( \([^)]*\))?) \| 🤖"
 ```
 
 ## How it works
@@ -42,11 +43,13 @@ line; the unique ` | 🤖` anchor keeps that safe from false-matching conversati
 text.
 
 **Why this is correct for background work.** While subagents/teammates run, the
-hook keeps the indicator at `⚙ N bg` (busy → `ready_regex` won't fire) *and* Claude's
-footer animates (per-second task timers → idle stays suppressed). Completion fires
-only once the master has stopped **and** the background count returns to 0. The one
-case neither signal catches is a *static* `🔐 permission` prompt in a non-bypass
-permission mode — irrelevant when driving with `--access full-access`.
+hook keeps the indicator at `⚙ N bg` (busy), and Claude's footer animates
+(per-second task timers → idle stays suppressed). Completion fires only once the
+master has stopped **and** the background count returns to 0. The `busy_regex` above
+matches **every** busy indicator — `⚡ working`, `🔐 permission`, and `⚙ N bg (…)` — so
+a *static* `🔐 permission` prompt classifies as busy too and cannot be mistaken for
+completion. Leaving any of those states out would classify it *unknown* and let idle
+detection report a premature completion while the agent is blocked mid-turn.
 
 ## Install
 
@@ -58,8 +61,9 @@ permission mode — irrelevant when driving with `--access full-access`.
 2. Merge the keys from `settings.hooks.json` into `~/.claude/settings.json`
    (the `statusLine` block and the eight `hooks` entries). If you already have a
    `statusLine` or some of these hooks, append rather than overwrite.
-3. Merge the `[claude]` block from `agents.toml` into
-   `~/.config/tmux-tools/agents.toml`.
+3. Merge the `[claude]` / `[claude.surfaces.rich]` blocks from `agents.toml` into
+   `~/.config/tmux-tools/agents.toml` (add the same surface fields under
+   `[claude.surfaces.flat]` to use the status line on the flat rendering too).
 4. Restart Claude Code (or start a new session) so the hooks/status line load.
 
 Requires `jq` and `git` on `PATH`.

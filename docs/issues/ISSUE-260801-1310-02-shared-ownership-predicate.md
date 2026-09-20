@@ -2,11 +2,17 @@
 id: ISSUE-260801-1310-02
 kind: issue
 category: enhancement
-status: ready-for-agent
+status: needs-triage
 context: tmux-tools
 summary: Extract the pane-ownership predicate so layout and the destructive verbs share one definition
-prd: PRD-260801-0656-01
 terms: [Ownership, Pane registration]
+contract:
+  schema: planning-contracts.record.v1
+  clauses: []
+  references:
+    - relation: requires
+      repository: tmux-tools
+      record: PRD-260801-0656-01
 ---
 
 ## Agent Brief

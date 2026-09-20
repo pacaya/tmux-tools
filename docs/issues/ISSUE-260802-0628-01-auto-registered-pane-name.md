@@ -2,12 +2,20 @@
 id: ISSUE-260802-0628-01
 kind: issue
 category: enhancement
-status: ready-for-agent
+status: needs-triage
 context: tmux-tools
 summary: every pane this tool creates registers @tt-name, auto-derived from the command when --name is absent
-prd: PRD-260801-0656-01
 terms: [Ownership, Pane registration]
-blocked_by: [ISSUE-260801-1310-01]
+contract:
+  schema: planning-contracts.record.v1
+  clauses: []
+  references:
+    - relation: requires
+      repository: tmux-tools
+      record: PRD-260801-0656-01
+    - relation: blocked_by
+      repository: tmux-tools
+      record: ISSUE-260801-1310-01
 ---
 
 ## Agent Brief

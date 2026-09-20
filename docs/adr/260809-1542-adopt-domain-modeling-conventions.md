@@ -1,6 +1,10 @@
 ---
 id: ADR-260809-1542-01
 status: accepted
+contract:
+  schema: planning-contracts.record.v1
+  clauses: []
+  references: []
 ---
 
 # Adopt the domain-modeling record conventions

@@ -32,11 +32,23 @@ macro_rules! key_cwd {
         "@tt-cwd"
     };
 }
+macro_rules! key_surface {
+    () => {
+        "@tt-surface"
+    };
+}
+macro_rules! key_surface_unvalidated {
+    () => {
+        "@tt-surface-unvalidated"
+    };
+}
 pub const KEY_NAME: &str = key_name!();
 pub const KEY_AGENT: &str = key_agent!();
 pub const KEY_ACCESS: &str = key_access!();
 pub const KEY_LAUNCHED_AT: &str = key_launched_at!();
 pub const KEY_CWD: &str = key_cwd!();
+pub const KEY_SURFACE: &str = key_surface!();
+pub const KEY_SURFACE_UNVALIDATED: &str = key_surface_unvalidated!();
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Registered {
@@ -45,6 +57,11 @@ pub struct Registered {
     pub access: Option<String>,
     pub launched_at: Option<String>,
     pub cwd: Option<String>,
+    /// The surface recorded at spawn time. `None` for a pane created before surfaces
+    /// existed (or by `launch`), which resolves to the agent's pre-surface rendering.
+    pub surface: Option<String>,
+    /// Whether caller-supplied trailing arguments left the recorded surface unvalidated.
+    pub surface_unvalidated: bool,
 }
 
 pub fn get(pane_id: &str, key: &str) -> Result<Option<String>> {
@@ -131,23 +148,38 @@ pub fn read(pane_id: &str) -> Result<Registered> {
         "}\x1f",
         "#{",
         key_cwd!(),
+        "}\x1f",
+        "#{",
+        key_surface!(),
+        "}\x1f",
+        "#{",
+        key_surface_unvalidated!(),
         "}",
     );
     let raw = tmux::run_checked(&["display-message", "-p", "-t", pane_id, FORMAT])?;
     let line = raw.trim_end_matches('\n');
-    let mut parts = line.splitn(5, FIELD_SEP);
+    let mut parts = line.splitn(7, FIELD_SEP);
     let name = parts.next().and_then(non_empty_owned);
     let agent = parts.next().and_then(non_empty_owned);
     let access = parts.next().and_then(non_empty_owned);
     let launched_at = parts.next().and_then(non_empty_owned);
     let cwd = parts.next().and_then(non_empty_owned);
+    let surface = parts.next().and_then(non_empty_owned);
+    let surface_unvalidated = parts.next().is_some_and(truthy);
     Ok(Registered {
         name,
         agent,
         access,
         launched_at,
         cwd,
+        surface,
+        surface_unvalidated,
     })
+}
+
+fn truthy(value: &str) -> bool {
+    let value = value.trim();
+    value == "1" || value.eq_ignore_ascii_case("true")
 }
 
 fn non_empty_owned(s: &str) -> Option<String> {

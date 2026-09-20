@@ -1,0 +1,27 @@
+{
+  "approval_id": "fallout-20260919T0612Z",
+  "impact_disposition": {
+    "checked_revisions": [
+      {
+        "revision": "61a74879a6f1fe53be714833274b2d256c28c7a5",
+        "sha256": "93a3ad0c6dbb6f2d5d789705ce3553cc2e325ea347ea6a1a55d50b4a9766297c",
+        "target": "tmux-tools:PRD-260918-0323-01#p5-interrupt"
+      }
+    ],
+    "status": "accepted"
+  },
+  "issue": {
+    "revision": "e44e0453055879c1ad0beca55c1f2c5d1347b567",
+    "sha256": "40eaaa28e3cc55717b96860d22e2fe638f2ded1a05830c721cb961a6277a0164",
+    "target": "tmux-tools:ISSUE-260918-0525-04"
+  },
+  "resolution_mode": "canonical",
+  "schema": "planning-contracts.revision.v2",
+  "sources": [
+    {
+      "revision": "61a74879a6f1fe53be714833274b2d256c28c7a5",
+      "sha256": "93a3ad0c6dbb6f2d5d789705ce3553cc2e325ea347ea6a1a55d50b4a9766297c",
+      "target": "tmux-tools:PRD-260918-0323-01#p5-interrupt"
+    }
+  ]
+}
