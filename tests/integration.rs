@@ -9367,6 +9367,11 @@ fn unparsable_agents_toml_warns_and_launch_and_status_still_report_floors() {
     assert!(status_concise_field(&concise, "below_floor").is_some());
     assert_registry_warning(&concise, "status --format concise");
 
+    // Pin the window name: automatic-rename could otherwise rename the window between
+    // the two raw calls and make their stdout differ for a reason unrelated to agents.toml.
+    server
+        .tmux(&["set-window-option", "-t", &pane, "automatic-rename", "off"])
+        .assert_success("set-window-option automatic-rename off");
     let raw_broken = server.cli_env(
         &["status", "--target", &pane, "--format", "raw"],
         broken.path(),
