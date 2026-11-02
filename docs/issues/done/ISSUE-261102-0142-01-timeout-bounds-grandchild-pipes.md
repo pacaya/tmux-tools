@@ -2,7 +2,7 @@
 id: ISSUE-261102-0142-01
 kind: issue
 category: bug
-status: ready-for-agent
+status: done
 brief_contract: agent-brief.v3
 context: tmux-tools
 summary: command_output_with_timeout returns Timeout within 500 ms of its deadline and stops the command's whole process group, even when a descendant keeps stdout or stderr open
