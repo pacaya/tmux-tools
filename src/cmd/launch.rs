@@ -18,8 +18,11 @@ pub struct LaunchArgs {
     pub(crate) cmd: String,
     #[arg(long, value_name = "NAME")]
     pub(crate) name: Option<String>,
-    #[arg(long, value_enum, value_name = "h|v")]
+    /// How to place the pane. Inside tmux the default is tile
+    #[arg(long, value_enum, value_name = "tile|h|v|window")]
     pub(crate) split: Option<Split>,
+    /// The new pane's percentage of the split pane. Alone it is a horizontal split at
+    /// N% (no retile); rejected with --split tile
     #[arg(long, value_name = "N")]
     pub(crate) size: Option<u8>,
     /// Skip the keep-alive shell wrap and run the command bare. The pane closes

@@ -33,8 +33,11 @@ pub struct SpawnAgentArgs {
     pub(crate) cwd: Option<PathBuf>,
     #[arg(last = true)]
     pub(crate) extra_args: Vec<String>,
-    #[arg(long, value_enum, value_name = "h|v")]
+    /// How to place the pane. Inside tmux the default is tile
+    #[arg(long, value_enum, value_name = "tile|h|v|window")]
     pub(crate) split: Option<Split>,
+    /// The new pane's percentage of the split pane. Alone it is a horizontal split at
+    /// N% (no retile); rejected with --split tile
     #[arg(long, value_name = "N")]
     pub(crate) size: Option<u32>,
     /// Skip the keep-alive shell wrap and run the agent bare. The pane closes

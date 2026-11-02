@@ -1,9 +1,12 @@
 //! Pane placement for the spawning verbs (`launch`, `spawn-agent`).
 //!
 //! This module is the single owner of placement. [`place`] resolves where a new
-//! pane goes, creates it (split or new window), writes its whole registration, and
+//! pane goes, snapshots the ownership of the window it will split, creates it (split
+//! or new window), writes its whole registration, retiles the window when the
+//! snapshot made it eligible (or clears [`TILED_MARKER`] for explicit sizing), and
 //! then measures the window it landed in, returning a [`Landing`]. The verbs build
 //! the command and the registration; they never create a pane themselves.
+//! [`rebalance`] retiles a window and returns its measured geometry.
 //!
 //! It also owns floors: [`pane_floor`] resolves a pane's floor from its registration
 //! and the agent registry, [`effective_floor`] combines a window's, and
@@ -21,13 +24,19 @@ use crate::{names, target, tmux};
 /// The `--split` flag of the spawning verbs.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, clap::ValueEnum)]
 pub enum Split {
+    /// Tile (the default inside tmux): split, then retile the window with tmux's
+    /// `tiled` layout when it already held a pane this tool owns. The first pane in a
+    /// window not yet owned is a horizontal split giving it 70%. Cannot be combined
+    /// with --size
+    #[value(name = "tile")]
+    Tile,
+    /// Horizontal split of the target pane, 50% or --size N%; no retile
     #[value(name = "h")]
     H,
+    /// Vertical split of the target pane, 50% or --size N%; no retile
     #[value(name = "v")]
     V,
-    /// Force the legacy "new window" behavior even though the implicit default
-    /// inside tmux is now a horizontal split. Outside tmux this is the only
-    /// behavior available regardless.
+    /// A new window instead of a split
     #[value(name = "window")]
     Window,
 }
@@ -36,8 +45,14 @@ pub enum Split {
 /// the same default rules.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Layout {
-    /// Use `tmux split-window` with the given direction flag and optional size
-    /// percentage for the new pane.
+    /// Split, then retile the window with tmux's `tiled` layout when the window held
+    /// an owned pane before the split ([`place`] decides that from a snapshot). A
+    /// window that did not is split horizontally with the new pane at
+    /// [`FIRST_PANE_PERCENT`] and left as it is.
+    Tile,
+    /// Explicit sizing intent: `tmux split-window` with the given direction flag and
+    /// optional size percentage for the new pane, no retile, and `@tt-tiled` cleared
+    /// on the window.
     Split {
         direction: &'static str,
         size: Option<u32>,
@@ -46,31 +61,44 @@ pub enum Layout {
     NewWindow,
 }
 
+/// The width a tile placement gives the new pane when the window it splits held no
+/// owned pane: the first pane this tool puts into a window is placed as before tiling.
+pub const FIRST_PANE_PERCENT: u32 = 70;
+
+/// The `@tt-tiled` window option: present on a window this tool tiled, unset when a
+/// placement with explicit sizing intent targets it. It records what the tool did; it
+/// never gates placement.
+pub const TILED_MARKER: &str = "@tt-tiled";
+
 impl Layout {
-    /// Project a layout into the `(split_flag, size)` pair pane creation expects.
-    fn split_args(self) -> (Option<&'static str>, Option<u32>) {
-        match self {
-            Layout::Split { direction, size } => (Some(direction), size),
-            Layout::NewWindow => (None, None),
-        }
+    /// Whether this layout creates the pane by splitting a pane (as opposed to a new
+    /// window).
+    fn splits(self) -> bool {
+        !matches!(self, Layout::NewWindow)
     }
 }
 
-/// Resolve the effective layout from the user's flags. The implicit default
-/// inside tmux is a horizontal split with the new pane occupying 70% of the
-/// width — so that the caller (compressed to 30%) and the callee remain
-/// visible side-by-side. `--split window` opts back into the legacy
-/// new-window behavior. `--split h|v` keeps tmux's native 50/50 default
-/// unless `--size` is supplied.
+/// Resolve the effective layout from the user's flags.
+///
+/// The implicit default inside tmux is [`Layout::Tile`]: split, then retile the
+/// window with tmux's `tiled` layout when it already held a pane this tool owns. The
+/// first pane put into a window not yet owned is the horizontal split giving the new
+/// pane [`FIRST_PANE_PERCENT`]%, without a retile, so tiling engages from the second
+/// pane on.
+///
+/// Explicit sizing intent opts out of tiling and is placed as a plain split:
+/// `--split h|v` (tmux's native 50/50 unless `--size` is supplied), and `--size N`
+/// alone, which is the horizontal split at N%. `--split window` is a new window.
+/// `--split tile --size N` is an error: a tiled layout has no percentage to honour.
 ///
 /// `--session`/`--window` without `--target` indicates window-scope intent
-/// (there is no caller pane to split into), so we fall back to a new window
-/// even under the implicit default.
+/// (there is no caller pane to split into), so the implicit default there is a new
+/// window; an explicit `--split tile` splits into the scoped window, as `h|v` do.
 ///
 /// Outside tmux (`in_tmux` false) there is no current pane to split, so the
-/// implicit default is [`Layout::NewWindow`]. (Explicit `--split h|v` without an
-/// explicit `--target` is absorbed by placement, which falls back to creating a
-/// new window in the managed session — preserving long-standing behavior.)
+/// implicit default is [`Layout::NewWindow`]. (An explicit `--split tile|h|v`
+/// without an explicit `--target` is absorbed by placement, which falls back to
+/// creating a new window in the managed session — preserving long-standing behavior.)
 pub fn resolve_layout(
     split: Option<Split>,
     size: Option<u32>,
@@ -78,8 +106,18 @@ pub fn resolve_layout(
     has_session: bool,
     has_window: bool,
     in_tmux: bool,
-) -> Layout {
-    match split {
+) -> Result<Layout> {
+    Ok(match split {
+        Some(Split::Tile) => {
+            if let Some(size) = size {
+                return Err(anyhow!(
+                    "--split tile cannot be combined with --size {size}: a tiled layout has \
+                     no percentage to honour; pass --split h or --split v with --size, or \
+                     drop --size"
+                ));
+            }
+            Layout::Tile
+        }
         Some(Split::H) => Layout::Split {
             direction: "-h",
             size,
@@ -91,16 +129,18 @@ pub fn resolve_layout(
         Some(Split::Window) => Layout::NewWindow,
         None => {
             let window_scope_implied = !has_target && (has_session || has_window);
-            if in_tmux && !window_scope_implied {
+            if !in_tmux || window_scope_implied {
+                Layout::NewWindow
+            } else if size.is_some() {
                 Layout::Split {
                     direction: "-h",
-                    size: size.or(Some(70)),
+                    size,
                 }
             } else {
-                Layout::NewWindow
+                Layout::Tile
             }
         }
-    }
+    })
 }
 
 /// Where the caller asked the new pane to go: the spawning verbs' layout and
@@ -296,9 +336,20 @@ fn apply_new_pane_registration(
     }
 }
 
-/// Place a new pane running `command`: resolve the destination, create the pane
-/// there, write `registration` on it, then measure the window it landed in and give
-/// its floor verdict against `registry`.
+/// Place a new pane running `command`: resolve the layout and destination, create the
+/// pane there, write `registration` on it, apply the layout step, then measure the
+/// window it landed in and give its floor verdict against `registry`.
+///
+/// The layout step after a split depends on the resolved [`Layout`]:
+/// - [`Layout::Tile`]: before splitting, the target window's panes are snapshotted and
+///   the window is eligible when the snapshot holds a pane [`names::pane_is_owned`]
+///   reports as ours. An eligible window is split, then retiled with tmux's `tiled`
+///   layout and marked with [`TILED_MARKER`]. A window that is not eligible gets the
+///   [`FIRST_PANE_PERCENT`]% horizontal split, no retile, and no marker change.
+/// - [`Layout::Split`] (explicit sizing intent): the split as asked, no retile, and
+///   [`TILED_MARKER`] unset on the window.
+///
+/// A pane created in a new window gets no layout step: the window holds only it.
 pub fn place(
     command: &str,
     destination: &Destination<'_>,
@@ -313,23 +364,49 @@ pub fn place(
         destination.session.is_some(),
         destination.window.is_some(),
         in_tmux,
-    );
-    let (split_arg, size_arg) = layout.split_args();
+    )?;
     let launch_target = resolve_launch_target(
         destination.target,
         destination.session,
         destination.window,
-        matches!(layout, Layout::Split { .. }),
+        layout.splits(),
     )?;
+    let creation = resolve_creation(launch_target, layout.splits(), in_tmux)?;
 
-    let pane_id = create_pane(
-        command,
-        split_arg,
-        size_arg,
-        launch_target.as_ref(),
-        in_tmux,
-    )?;
+    // Eligibility comes from the window as it stood before this split, so placing a
+    // pane never grants the authority to retile the window it lands in.
+    let tile = match (layout, &creation) {
+        (Layout::Tile, Creation::Split(target)) => window_has_owned_pane(target, registration.cwd)?,
+        _ => false,
+    };
+
+    let tmux_args = match &creation {
+        Creation::Split(target) => {
+            let (direction, size) = match layout {
+                Layout::Split { direction, size } => (direction, size),
+                Layout::Tile if tile => ("-h", None),
+                Layout::Tile | Layout::NewWindow => ("-h", Some(FIRST_PANE_PERCENT)),
+            };
+            split_window_args(command, direction, size, Some(target))
+        }
+        Creation::NewWindow(session_id) => new_window_args(command, Some(session_id)),
+    };
+    let pane_id = tmux::run_checked_owned(&tmux_args)?.trim().to_owned();
+    if pane_id.is_empty() {
+        return Err(anyhow!("tmux launch command returned an empty pane id"));
+    }
+
     let name = register(&pane_id, registration)?;
+    if matches!(creation, Creation::Split(_)) {
+        match layout {
+            Layout::Tile if tile => {
+                retile(&pane_id)?;
+                set_tiled_marker(&pane_id)?;
+            }
+            Layout::Split { .. } => clear_tiled_marker(&pane_id)?,
+            Layout::Tile | Layout::NewWindow => {}
+        }
+    }
     let mut geometry = measure(&pane_id)?;
     apply_new_pane_registration(&mut geometry.panes, &pane_id, registration.agent.as_ref());
     let report = geometry.report(registry);
@@ -369,12 +446,84 @@ fn register(pane_id: &str, registration: &Registration<'_>) -> Result<String> {
     Ok(name)
 }
 
+/// Retile the window that `target` (a window or pane target) is in with tmux's
+/// `tiled` layout, then measure it.
+///
+/// This applies the layout only: it neither checks ownership nor reads or writes
+/// [`TILED_MARKER`]; callers apply their own guards.
+pub fn rebalance(target: &str) -> Result<WindowGeometry> {
+    retile(target)?;
+    measure(target)
+}
+
+/// Apply tmux's `tiled` layout to the window that `target` is in.
+fn retile(target: &str) -> Result<()> {
+    tmux::run_checked(&["select-layout", "-t", target, "tiled"])
+        .with_context(|| format!("cannot retile the window of {target}"))?;
+    Ok(())
+}
+
+/// Set [`TILED_MARKER`] on the window that `target` is in.
+fn set_tiled_marker(target: &str) -> Result<()> {
+    tmux::run_checked(&["set-option", "-w", "-t", target, TILED_MARKER, "1"])
+        .with_context(|| format!("cannot mark the window of {target} tiled"))?;
+    Ok(())
+}
+
+/// Unset [`TILED_MARKER`] on the window that `target` is in. Unsetting an absent
+/// option succeeds, so "cleared" and "never set" are one state.
+fn clear_tiled_marker(target: &str) -> Result<()> {
+    tmux::run_checked(&["set-option", "-w", "-u", "-t", target, TILED_MARKER])
+        .with_context(|| format!("cannot clear the tiled marker of the window of {target}"))?;
+    Ok(())
+}
+
+/// Whether the window that `target` is in holds a pane [`names::pane_is_owned`]
+/// reports as ours, judged against `current_cwd`.
+fn window_has_owned_pane(target: &str, current_cwd: Option<&str>) -> Result<bool> {
+    let format = [names::KEY_NAME, names::KEY_AGENT, names::KEY_CWD]
+        .map(|key| format!("#{{{key}}}"))
+        .join(&FIELD_SEP.to_string());
+    let output = tmux::run_checked(&["list-panes", "-t", target, "-F", &format])
+        .with_context(|| format!("cannot read the panes of the window of {target}"))?;
+    Ok(parse_ownership_snapshot(&output)?
+        .iter()
+        .any(|registered| names::pane_is_owned(registered, current_cwd)))
+}
+
+/// Parse ownership snapshot lines — `@tt-name`, `@tt-agent` and `@tt-cwd`, separated
+/// by [`FIELD_SEP`] — one per pane, into the registrations the ownership predicate
+/// reads. Every other registration field is left unset.
+fn parse_ownership_snapshot(output: &str) -> Result<Vec<names::Registered>> {
+    output
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            let fields: Vec<&str> = line.trim_end_matches('\r').split(FIELD_SEP).collect();
+            let [name, agent, cwd] = fields[..] else {
+                return Err(anyhow!("unexpected tmux pane registration line {line:?}"));
+            };
+            // Trimmed as `names::read` trims, so both callers of the predicate see the
+            // same registration.
+            Ok(names::Registered {
+                name: non_empty(name.trim()),
+                agent: non_empty(agent.trim()),
+                access: None,
+                launched_at: None,
+                cwd: non_empty(cwd.trim()),
+                surface: None,
+                surface_unvalidated: false,
+            })
+        })
+        .collect()
+}
+
 /// Separates the fields of a measurement line. Registration values are user strings
 /// and may hold tabs; the unit separator does not occur in them.
 const FIELD_SEP: char = '\x1f';
 
-/// Every pane of the window `pane_id` is in, with its size and registration, as tmux
-/// reports them now.
+/// Every pane of the window `pane_id` (a pane or window target) is in, with its size
+/// and registration, as tmux reports them now.
 fn measure(pane_id: &str) -> Result<WindowGeometry> {
     let format = [
         "#{window_id}".to_owned(),
@@ -514,62 +663,58 @@ fn destination_session_id(pane_target: &str, source: &str) -> Result<String> {
     Ok(session_id.to_owned())
 }
 
-/// Create the pane and return its id. Every destination path of the spawning verbs
-/// goes through here.
-fn create_pane(
-    cmd: &str,
-    split: Option<&str>,
-    size: Option<u32>,
-    target: Option<&LaunchTarget>,
-    in_tmux: bool,
-) -> Result<String> {
-    let tmux_args = match target {
+/// How the pane is created: every destination path of the spawning verbs resolves to
+/// one of these.
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum Creation {
+    /// `split-window -t <target>`: a pane id or a `session[:window]` scope.
+    Split(String),
+    /// `new-window -t <session id>`.
+    NewWindow(String),
+}
+
+/// Resolve how the pane is created from the launch target and whether the layout
+/// splits. A split with no explicit destination splits the calling pane inside tmux;
+/// outside tmux it falls back to a new window in the managed session.
+fn resolve_creation(target: Option<LaunchTarget>, split: bool, in_tmux: bool) -> Result<Creation> {
+    match target {
         Some(LaunchTarget::SplitPane(pane)) => {
-            let split = split.ok_or_else(|| {
-                anyhow!("internal: split target supplied without a split direction")
-            })?;
-            split_window_args(cmd, split, size, Some(pane))
+            if !split {
+                return Err(anyhow!(
+                    "internal: split target supplied without a split layout"
+                ));
+            }
+            Ok(Creation::Split(pane))
         }
-        Some(LaunchTarget::WindowScope(scope)) => {
-            if let Some(split) = split {
-                split_window_args(cmd, split, size, Some(scope))
+        Some(LaunchTarget::WindowScope(scope)) => Ok(if split {
+            Creation::Split(scope)
+        } else {
+            Creation::NewWindow(scope)
+        }),
+        None if in_tmux => {
+            // Pin the target to the calling pane via $TMUX_PANE. Without
+            // an explicit `-t`, tmux operates on the most-recently-active
+            // pane on the server, which races when other sessions are
+            // opened concurrently — the new pane lands in the wrong
+            // session.
+            let calling = target::calling_pane_id()
+                .ok_or_else(|| anyhow!("$TMUX is set but no calling pane id is available"))?;
+            if split {
+                Ok(Creation::Split(calling))
             } else {
-                new_window_args(cmd, Some(scope))
+                let source = format!("calling pane {calling}");
+                Ok(Creation::NewWindow(destination_session_id(
+                    &calling, &source,
+                )?))
             }
         }
-        None => {
-            if in_tmux {
-                // Pin the target to the calling pane via $TMUX_PANE. Without
-                // an explicit `-t`, tmux operates on the most-recently-active
-                // pane on the server, which races when other sessions are
-                // opened concurrently — the new pane lands in the wrong
-                // session.
-                let calling = target::calling_pane_id()
-                    .ok_or_else(|| anyhow!("$TMUX is set but no calling pane id is available"))?;
-                if let Some(split) = split {
-                    split_window_args(cmd, split, size, Some(&calling))
-                } else {
-                    let source = format!("calling pane {calling}");
-                    new_window_args(cmd, Some(&destination_session_id(&calling, &source)?))
-                }
-            } else {
-                // Outside tmux: ensure the managed session exists, then add a fresh
-                // window for our command. A session this call creates gets the deep
-                // history limit before the command's window exists, so the command's
-                // first line survives scrolling. The window is created by the session's
-                // stable id, not by name, so it cannot land in a replacement session.
-                let managed_session = ensure_managed_session_atomic()?;
-                new_window_args(cmd, Some(&managed_session))
-            }
-        }
-    };
-
-    let pane_id = tmux::run_checked_owned(&tmux_args)?.trim().to_owned();
-    if pane_id.is_empty() {
-        return Err(anyhow!("tmux launch command returned an empty pane id"));
+        // Outside tmux: ensure the managed session exists, then add a fresh
+        // window for our command. A session this call creates gets the deep
+        // history limit before the command's window exists, so the command's
+        // first line survives scrolling. The window is created by the session's
+        // stable id, not by name, so it cannot land in a replacement session.
+        None => Ok(Creation::NewWindow(ensure_managed_session_atomic()?)),
     }
-
-    Ok(pane_id)
 }
 
 /// The history depth the spawning verbs give a session they create, so `prompt`
@@ -777,68 +922,133 @@ fn private_session_name() -> String {
 mod tests {
     use super::*;
 
-    const H70: Layout = Layout::Split {
-        direction: "-h",
-        size: Some(70),
-    };
-
-    #[test]
-    fn flagless_inside_tmux_is_the_seventy_percent_horizontal_split() {
-        assert_eq!(resolve_layout(None, None, false, false, false, true), H70);
-        assert_eq!(resolve_layout(None, None, true, false, false, true), H70);
-        // `--target` with a scope still splits the resolved pane.
-        assert_eq!(resolve_layout(None, None, true, true, true, true), H70);
+    fn resolve(
+        split: Option<Split>,
+        size: Option<u32>,
+        has_target: bool,
+        has_session: bool,
+        has_window: bool,
+        in_tmux: bool,
+    ) -> Layout {
+        resolve_layout(split, size, has_target, has_session, has_window, in_tmux).unwrap()
     }
 
     #[test]
-    fn flagless_size_overrides_the_seventy_percent_default() {
-        assert_eq!(
-            resolve_layout(None, Some(40), false, false, false, true),
-            Layout::Split {
-                direction: "-h",
-                size: Some(40)
-            }
-        );
+    fn flagless_inside_tmux_is_tile() {
+        assert_eq!(resolve(None, None, false, false, false, true), Layout::Tile);
+        assert_eq!(resolve(None, None, true, false, false, true), Layout::Tile);
+        // `--target` with a scope still splits the resolved pane.
+        assert_eq!(resolve(None, None, true, true, true, true), Layout::Tile);
+    }
+
+    #[test]
+    fn size_alone_is_the_horizontal_split_at_that_percentage() {
+        let h40 = Layout::Split {
+            direction: "-h",
+            size: Some(40),
+        };
+        assert_eq!(resolve(None, Some(40), false, false, false, true), h40);
+        assert_eq!(resolve(None, Some(40), true, false, false, true), h40);
     }
 
     #[test]
     fn flagless_outside_tmux_or_with_a_scope_is_a_new_window() {
-        assert_eq!(
-            resolve_layout(None, None, false, false, false, false),
-            Layout::NewWindow
-        );
-        assert_eq!(
-            resolve_layout(None, None, false, true, false, true),
-            Layout::NewWindow
-        );
-        assert_eq!(
-            resolve_layout(None, None, false, false, true, true),
-            Layout::NewWindow
-        );
+        for size in [None, Some(40)] {
+            assert_eq!(
+                resolve(None, size, false, false, false, false),
+                Layout::NewWindow
+            );
+            assert_eq!(
+                resolve(None, size, false, true, false, true),
+                Layout::NewWindow
+            );
+            assert_eq!(
+                resolve(None, size, false, false, true, true),
+                Layout::NewWindow
+            );
+        }
     }
 
     #[test]
     fn explicit_split_flags_resolve_regardless_of_context() {
         for in_tmux in [true, false] {
             assert_eq!(
-                resolve_layout(Some(Split::H), None, false, true, false, in_tmux),
+                resolve(Some(Split::H), None, false, true, false, in_tmux),
                 Layout::Split {
                     direction: "-h",
                     size: None
                 }
             );
             assert_eq!(
-                resolve_layout(Some(Split::V), Some(30), false, false, false, in_tmux),
+                resolve(Some(Split::V), Some(30), false, false, false, in_tmux),
                 Layout::Split {
                     direction: "-v",
                     size: Some(30)
                 }
             );
             assert_eq!(
-                resolve_layout(Some(Split::Window), Some(30), true, false, false, in_tmux),
+                resolve(Some(Split::Window), Some(30), true, false, false, in_tmux),
                 Layout::NewWindow
             );
+            // An explicit tile chooses its destination as `h|v` do, scope included.
+            for (target, session, window) in [
+                (false, false, false),
+                (true, false, false),
+                (false, true, false),
+                (false, true, true),
+            ] {
+                assert_eq!(
+                    resolve(Some(Split::Tile), None, target, session, window, in_tmux),
+                    Layout::Tile
+                );
+            }
         }
+    }
+
+    #[test]
+    fn split_tile_with_size_is_rejected_naming_both_flags() {
+        for in_tmux in [true, false] {
+            let error = resolve_layout(Some(Split::Tile), Some(50), false, false, false, in_tmux)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains("--split") && error.contains("--size"),
+                "the diagnostic must name both flags: {error}"
+            );
+        }
+    }
+
+    /// One ownership snapshot line: `@tt-name`, `@tt-agent`, `@tt-cwd`.
+    fn snapshot_line(name: &str, agent: &str, cwd: &str) -> String {
+        [name, agent, cwd].join(&FIELD_SEP.to_string()) + "\n"
+    }
+
+    #[test]
+    fn ownership_snapshot_reads_name_agent_and_cwd_per_pane() {
+        let output = [
+            snapshot_line("", "", ""),
+            snapshot_line("npm-a3f2", "", "/work"),
+            snapshot_line("", "codex", ""),
+        ]
+        .concat();
+        let panes = parse_ownership_snapshot(&output).unwrap();
+        assert_eq!(panes.len(), 3);
+        assert_eq!(
+            (panes[0].name.as_deref(), panes[0].agent.as_deref()),
+            (None, None)
+        );
+        assert_eq!(panes[1].name.as_deref(), Some("npm-a3f2"));
+        assert_eq!(panes[1].cwd.as_deref(), Some("/work"));
+        assert_eq!(panes[2].agent.as_deref(), Some("codex"));
+        assert_eq!(panes[2].cwd, None);
+    }
+
+    #[test]
+    fn ownership_snapshot_rejects_malformed_lines() {
+        let sep = FIELD_SEP.to_string();
+        assert!(parse_ownership_snapshot(&["a", "b"].join(&sep)).is_err());
+        assert!(parse_ownership_snapshot(&["a", "b", "c", "d"].join(&sep)).is_err());
+        assert!(parse_ownership_snapshot("").unwrap().is_empty());
     }
 
     /// One `list-panes` geometry line in the measurement format.

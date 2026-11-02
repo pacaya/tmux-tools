@@ -511,6 +511,24 @@ impl IsolatedTmuxServer {
         )
     }
 
+    /// A core-library `TmuxInvocation` addressed to this server: `-L <label>`, with
+    /// this server's `TMUX_TMPDIR` and the ambient `TMUX`/`TMUX_PANE` removed, as
+    /// [`Self::tmux_command`] runs tmux.
+    fn core_invocation(&self) -> tmux_tools_core::TmuxInvocation {
+        tmux_tools_core::TmuxInvocation {
+            prefix: vec![
+                "env".to_owned(),
+                "-u".to_owned(),
+                "TMUX".to_owned(),
+                "-u".to_owned(),
+                "TMUX_PANE".to_owned(),
+                format!("TMUX_TMPDIR={}", self.tmpdir.display()),
+            ],
+            socket: Some(self.label.clone()),
+            tmux_bin: "tmux".to_owned(),
+        }
+    }
+
     /// Whether the server still answers `has-session`.
     fn answers(&self) -> bool {
         self.tmux_command(&["has-session"])
@@ -8561,8 +8579,9 @@ fn sorted_keys(keys: &[&str]) -> Vec<String> {
     keys
 }
 
-/// Preservation: a flagless `launch` inside tmux is still the horizontal split that
-/// gives the new pane 70% of the window width, with both panes at full height.
+/// Preservation: a flagless `launch` from a window holding only the (not owned)
+/// caller pane is still the horizontal split that gives the new pane 70% of the
+/// window width, with both panes at full height, and `@tt-tiled` stays absent.
 #[test]
 fn flagless_launch_inside_tmux_splits_horizontally_giving_the_new_pane_seventy_percent() {
     let _serial = serial_guard();
@@ -8621,6 +8640,12 @@ fn flagless_launch_inside_tmux_splits_horizontally_giving_the_new_pane_seventy_p
     assert!(
         (field(new, 3) - width * 70 / 100).abs() <= 1,
         "the new pane must have 70% of the {width}-column window: {panes:?}"
+    );
+    // The calling pane is not ours, so the window was not ours before the split: the
+    // first placement is not a tiling one and records no layout intent.
+    assert!(
+        !tiled_marker_present(&server, &window),
+        "the first placement into a window not owned must leave @tt-tiled absent"
     );
 }
 
@@ -8946,8 +8971,8 @@ fn register_agent_directly(server: &IsolatedTmuxServer, pane: &str, agent: &str)
 }
 
 /// Crowd the harness window: a 200-column pane to the right of the calling pane, which
-/// leaves the calling pane 79 columns wide, so a flagless 70% split of it yields panes
-/// narrower than 58 columns. Returns the new right-hand pane.
+/// leaves the calling pane 79 columns wide, so a 70% split of it yields panes narrower
+/// than 58 columns. Returns the new right-hand pane.
 fn crowd_calling_pane(server: &IsolatedTmuxServer) -> String {
     let out = server.tmux(&[
         "split-window",
@@ -8992,7 +9017,9 @@ fn assert_spawn_verdict(out: &CmdOutput, format: &str, below: bool, ctx: &str) {
     }
 }
 
-/// `launch` into a window whose agent pane's floor (58x16) the landing breaks.
+/// `launch` into a window whose agent pane's floor (58x16) the landing breaks. The
+/// agent pane makes the window owned, so the setup's 70% split of the calling pane is
+/// the explicit opt-out `--split h --size 70` rather than a (tiling) flagless launch.
 fn launch_into_crowded_agent_window(format: &str) {
     let _serial = serial_guard();
     let server = IsolatedTmuxServer::start_inside();
@@ -9001,7 +9028,17 @@ fn launch_into_crowded_agent_window(format: &str) {
     register_agent_directly(&server, &agent_pane, FLOOR_PROBE_AGENT);
 
     let out = server.cli_env(
-        &["launch", "--cmd", "sleep 600", "--format", format],
+        &[
+            "launch",
+            "--cmd",
+            "sleep 600",
+            "--split",
+            "h",
+            "--size",
+            "70",
+            "--format",
+            format,
+        ],
         xdg.path(),
     );
     assert_spawn_verdict(
@@ -9515,6 +9552,565 @@ fn readme_documents_surface_floors_and_their_limits() {
         assert!(
             normalized.contains(needle),
             "README's floor section must mention {needle:?}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ISSUE-260802-0128-01 — tile is the default placement inside tmux: split, then
+// retile the window with tmux's `tiled` layout when it held an owned pane before the
+// split, recorded by the `@tt-tiled` window marker; explicit sizing opts out.
+//
+// "Retiled" means the window's pane geometry equals what an explicit
+// `select-layout tiled` of the same panes produces. These cases carry no "tmux not on
+// PATH" skip: when the behavior or tmux is absent they fail.
+// ---------------------------------------------------------------------------
+
+/// The `@tt-tiled` window marker.
+const TILED_MARKER: &str = "@tt-tiled";
+
+/// One pane's rectangle: `(pane_id, left, top, width, height)`.
+type PaneRect = (String, i64, i64, i64, i64);
+
+/// Every pane of `window` (any window target) with its rectangle, in pane order.
+fn window_rects(server: &IsolatedTmuxServer, window: &str) -> Vec<PaneRect> {
+    let out = server.tmux(&[
+        "list-panes",
+        "-t",
+        window,
+        "-F",
+        "#{pane_id} #{pane_left} #{pane_top} #{pane_width} #{pane_height}",
+    ]);
+    out.assert_success(&format!("list-panes -t {window}"));
+    out.stdout
+        .lines()
+        .map(|line| {
+            let fields: Vec<&str> = line.split(' ').collect();
+            let number = |i: usize| -> i64 { fields[i].parse().unwrap() };
+            (
+                fields[0].to_owned(),
+                number(1),
+                number(2),
+                number(3),
+                number(4),
+            )
+        })
+        .collect()
+}
+
+/// Whether `tmux show-options -w -t <window>` lists `@tt-tiled`.
+fn tiled_marker_present(server: &IsolatedTmuxServer, window: &str) -> bool {
+    let out = server.tmux(&["show-options", "-w", "-t", window]);
+    out.assert_success(&format!("show-options -w -t {window}"));
+    out.stdout
+        .lines()
+        .any(|line| line.split_whitespace().next() == Some(TILED_MARKER))
+}
+
+/// Assert `window` is retiled: an explicit `select-layout tiled` of its panes changes
+/// no pane's rectangle.
+fn assert_retiled(server: &IsolatedTmuxServer, window: &str, ctx: &str) {
+    let placed = window_rects(server, window);
+    server
+        .tmux(&["select-layout", "-t", window, "tiled"])
+        .assert_success("explicit select-layout tiled");
+    let tiled = window_rects(server, window);
+    assert_eq!(
+        placed, tiled,
+        "{ctx}: the window must already be in tmux's tiled arrangement"
+    );
+}
+
+/// The window id of `pane`.
+fn window_of(server: &IsolatedTmuxServer, pane: &str) -> String {
+    tmux_format(server, pane, "#{window_id}")
+}
+
+/// Register `pane` directly through tmux with `@tt-name` and `@tt-cwd`.
+fn register_name_and_cwd(server: &IsolatedTmuxServer, pane: &str, name: &str, cwd: &str) {
+    server
+        .tmux(&["set-option", "-p", "-t", pane, "@tt-name", name])
+        .assert_success("set @tt-name directly");
+    server
+        .tmux(&["set-option", "-p", "-t", pane, "@tt-cwd", cwd])
+        .assert_success("set @tt-cwd directly");
+}
+
+/// The cwd the CLI runs in under the harness (the test process's own).
+fn harness_cwd() -> String {
+    std::env::current_dir()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// Assert the window holds three panes whose heights are within one row of each
+/// other, none spanning the full window height.
+fn assert_three_tiled_rows(server: &IsolatedTmuxServer, window: &str, ctx: &str) {
+    let panes = window_rects(server, window);
+    assert_eq!(
+        panes.len(),
+        3,
+        "{ctx}: the window must hold three panes: {panes:?}"
+    );
+    let window_height: i64 = tmux_format(server, window, "#{window_height}")
+        .parse()
+        .unwrap();
+    let heights: Vec<i64> = panes.iter().map(|pane| pane.4).collect();
+    let (min, max) = (
+        *heights.iter().min().unwrap(),
+        *heights.iter().max().unwrap(),
+    );
+    assert!(
+        max - min <= 1,
+        "{ctx}: pane heights must be within one row of each other: {panes:?}"
+    );
+    assert!(
+        heights.iter().all(|height| *height < window_height),
+        "{ctx}: no pane may span the full {window_height}-row window height: {panes:?}"
+    );
+}
+
+/// Acceptance: two flagless `spawn-agent` placements from a window holding only the
+/// caller pane tile it, and the second reports the window's measured minima.
+#[cfg(feature = "test-fixtures")]
+#[test]
+fn two_flagless_spawn_agents_tile_the_callers_window() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    let config = fake_tui_agent_config();
+    let args = ["spawn-agent", "tt-fake-tui", "--bare", "--format", "json"];
+
+    server
+        .cli_env(&args, config.xdg())
+        .assert_success("first flagless spawn-agent");
+    let second = server.cli_env(&args, config.xdg());
+    let (pane, window, cols, rows) = json_landing(&second, "second flagless spawn-agent");
+
+    assert_eq!(window, window_of(&server, server.pane()));
+    assert_three_tiled_rows(&server, &window, "two flagless spawn-agents");
+    assert_eq!(
+        tmux_landing(&server, &pane),
+        (window, cols, rows),
+        "the second placement must report the window's measured minima: {}",
+        second.stdout
+    );
+}
+
+/// Acceptance: two flagless, unnamed `launch` placements tile the caller's window.
+#[test]
+fn two_flagless_launches_tile_the_callers_window() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+
+    launch_flagless_json(&server, "sh");
+    let pane = launch_flagless_json(&server, "sh");
+
+    let window = window_of(&server, &pane);
+    assert_eq!(window, window_of(&server, server.pane()));
+    assert_three_tiled_rows(&server, &window, "two flagless launches");
+}
+
+/// Acceptance: a flagless placement into a window whose panes carry a different
+/// `@tt-cwd` neither retiles nor marks it; one into an owned window does both.
+#[test]
+fn flagless_launch_tiles_an_owned_window_but_not_a_foreign_cwd_one() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+
+    // A window whose two panes were registered from another project's cwd.
+    let foreign = new_window_pane(&server);
+    let sibling = server.tmux(&[
+        "split-window",
+        "-v",
+        "-d",
+        "-t",
+        &foreign,
+        "-P",
+        "-F",
+        "#{pane_id}",
+        "sleep",
+        "600",
+    ]);
+    sibling.assert_success("add a sibling to the foreign window");
+    let sibling = sibling.stdout.trim().to_owned();
+    register_name_and_cwd(&server, &foreign, "foreign-a", "/nonexistent/other-project");
+    register_name_and_cwd(&server, &sibling, "foreign-b", "/nonexistent/other-project");
+    let foreign_window = window_of(&server, &foreign);
+    let sibling_rect = |server: &IsolatedTmuxServer| {
+        window_rects(server, &foreign_window)
+            .into_iter()
+            .find(|rect| rect.0 == sibling)
+            .unwrap()
+    };
+    let sibling_before = sibling_rect(&server);
+
+    let out = server.cli(&[
+        "launch",
+        "--cmd",
+        "sleep 600",
+        "--target",
+        &foreign,
+        "--format",
+        "json",
+    ]);
+    let (_, landed, _, _) = json_landing(&out, "flagless launch --target <foreign pane>");
+    assert_eq!(
+        landed, foreign_window,
+        "the pane must land in the foreign window"
+    );
+    assert_eq!(window_rects(&server, &foreign_window).len(), 3);
+    assert_eq!(
+        sibling_rect(&server),
+        sibling_before,
+        "the foreign window's other pane must keep its geometry"
+    );
+    assert!(
+        !tiled_marker_present(&server, &foreign_window),
+        "a foreign-cwd window must not be marked tiled"
+    );
+
+    // A window holding one pane registered from this cwd.
+    let owned = new_window_pane(&server);
+    register_name_and_cwd(&server, &owned, "owned-a", &harness_cwd());
+    let owned_window = window_of(&server, &owned);
+    let out = server.cli(&[
+        "launch",
+        "--cmd",
+        "sleep 600",
+        "--target",
+        &owned,
+        "--format",
+        "json",
+    ]);
+    let (_, landed, _, _) = json_landing(&out, "flagless launch --target <owned pane>");
+    assert_eq!(landed, owned_window);
+    assert_eq!(window_rects(&server, &owned_window).len(), 2);
+    assert!(
+        tiled_marker_present(&server, &owned_window),
+        "a flagless placement into an owned window must mark it tiled"
+    );
+    assert_retiled(
+        &server,
+        &owned_window,
+        "flagless launch into an owned window",
+    );
+}
+
+/// Acceptance: the marker is set by tiling, cleared by an explicit `--split v`, and
+/// set again by the next flagless placement, which tiles the window again.
+#[test]
+fn tiled_marker_is_cleared_by_an_explicit_split_and_restored_by_a_flagless_placement() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    let window = window_of(&server, server.pane());
+
+    // The harness pane is not ours, so the first placement splits; the second tiles.
+    launch_flagless_json(&server, "sleep 600");
+    launch_flagless_json(&server, "sleep 600");
+    assert!(
+        tiled_marker_present(&server, &window),
+        "a flagless placement into an owned window must mark it tiled"
+    );
+    assert_retiled(&server, &window, "first tiling placement");
+
+    let split = server.cli(&[
+        "launch",
+        "--cmd",
+        "sleep 600",
+        "--split",
+        "v",
+        "--format",
+        "json",
+    ]);
+    let (_, landed, _, _) = json_landing(&split, "launch --split v");
+    assert_eq!(landed, window);
+    assert!(
+        !tiled_marker_present(&server, &window),
+        "an explicit --split v must clear the marker"
+    );
+
+    launch_flagless_json(&server, "sleep 600");
+    assert!(
+        tiled_marker_present(&server, &window),
+        "a later flagless placement into the owned window must mark it again"
+    );
+    assert_retiled(&server, &window, "flagless placement after --split v");
+}
+
+/// A tiled harness window (three panes, marker present); returns its window id.
+fn tiled_harness_window(server: &IsolatedTmuxServer) -> String {
+    launch_flagless_json(server, "sleep 600");
+    let pane = launch_flagless_json(server, "sleep 600");
+    let window = window_of(server, &pane);
+    assert!(
+        tiled_marker_present(server, &window),
+        "setup: the second flagless placement must mark the window tiled"
+    );
+    window
+}
+
+/// Acceptance: a sizing opt-out into a tiled window divides only the target pane's
+/// rectangle (horizontally unless `vertical`; the new pane `percent`% when given),
+/// keeps every other pane's geometry, and clears the marker.
+fn assert_opt_out_divides_only_the_target(flags: &[&str], vertical: bool, percent: Option<i64>) {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    let window = tiled_harness_window(&server);
+    let before = window_rects(&server, &window);
+    // The widest pane: tiled's full-width last row.
+    let target = before.iter().max_by_key(|rect| rect.3).unwrap().clone();
+
+    let mut args = vec![
+        "launch",
+        "--cmd",
+        "sleep 600",
+        "--target",
+        target.0.as_str(),
+        "--format",
+        "json",
+    ];
+    args.extend_from_slice(flags);
+    let out = server.cli(&args);
+    let (new_pane, landed, _, _) = json_landing(&out, &format!("launch {flags:?}"));
+    assert_eq!(landed, window);
+
+    let after = window_rects(&server, &window);
+    for rect in before.iter().filter(|rect| rect.0 != target.0) {
+        assert!(
+            after.contains(rect),
+            "{flags:?}: pane {} must keep its geometry; before {before:?}, after {after:?}",
+            rect.0
+        );
+    }
+    let find = |id: &str| after.iter().find(|rect| rect.0 == id).unwrap().clone();
+    let (old, new) = (find(&target.0), find(&new_pane));
+    let (_, left, top, width, height) = target.clone();
+    if vertical {
+        for rect in [&old, &new] {
+            assert_eq!((rect.1, rect.3), (left, width), "{flags:?}: {after:?}");
+        }
+        assert_eq!(old.2, top, "{flags:?}: {after:?}");
+        assert!(new.2 > top, "{flags:?}: new pane below: {after:?}");
+        assert_eq!(old.4 + new.4 + 1, height, "{flags:?}: {after:?}");
+    } else {
+        for rect in [&old, &new] {
+            assert_eq!((rect.2, rect.4), (top, height), "{flags:?}: {after:?}");
+        }
+        assert_eq!(old.1, left, "{flags:?}: {after:?}");
+        assert!(new.1 > left, "{flags:?}: new pane to the right: {after:?}");
+        assert_eq!(old.3 + new.3 + 1, width, "{flags:?}: {after:?}");
+    }
+    if let Some(percent) = percent {
+        assert!(
+            (new.3 - width * percent / 100).abs() <= 1,
+            "{flags:?}: the new pane must have {percent}% of the {width}-column rectangle: {after:?}"
+        );
+    }
+    assert!(
+        !tiled_marker_present(&server, &window),
+        "{flags:?} must clear the marker"
+    );
+}
+
+#[test]
+fn split_h_into_a_tiled_window_divides_only_the_target_and_clears_the_marker() {
+    assert_opt_out_divides_only_the_target(&["--split", "h"], false, None);
+}
+
+#[test]
+fn split_v_into_a_tiled_window_divides_only_the_target_and_clears_the_marker() {
+    assert_opt_out_divides_only_the_target(&["--split", "v"], true, None);
+}
+
+#[test]
+fn size_alone_into_a_tiled_window_divides_only_the_target_and_clears_the_marker() {
+    assert_opt_out_divides_only_the_target(&["--size", "40"], false, Some(40));
+}
+
+/// Acceptance: an explicit `--split tile` into an owned window tiles and marks it.
+#[test]
+fn explicit_split_tile_into_an_owned_window_tiles_and_marks_it() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    let window = window_of(&server, server.pane());
+    launch_flagless_json(&server, "sleep 600");
+
+    let out = server.cli(&[
+        "launch", "--cmd", "sh", "--split", "tile", "--format", "json",
+    ]);
+    let (_, landed, _, _) = json_landing(&out, "launch --split tile");
+    assert_eq!(landed, window);
+    assert_retiled(&server, &window, "launch --split tile");
+    assert!(tiled_marker_present(&server, &window));
+}
+
+/// Acceptance: `--split tile --size N` is rejected before any pane is created, with a
+/// diagnostic naming both flags.
+#[test]
+fn split_tile_with_size_is_rejected_naming_both_flags() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    let before = all_pane_ids(&server);
+
+    let out = server.cli(&["launch", "--cmd", "sh", "--split", "tile", "--size", "50"]);
+
+    assert_ne!(out.status, 0, "--split tile --size must fail: {out:?}");
+    assert!(
+        out.stderr.contains("--split") && out.stderr.contains("--size"),
+        "stderr must name --split and --size: {:?}",
+        out.stderr
+    );
+    assert_eq!(all_pane_ids(&server), before, "no pane may be created");
+}
+
+/// Acceptance: a flagless `--session S` placement makes a new single-pane window W;
+/// `--session S --window W --split tile` then splits W and tiles it.
+#[test]
+fn split_tile_with_session_and_window_scope_tiles_the_scoped_window() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    let windows_before = window_indexes(&server, HARNESS_SESSION);
+
+    let first = server.cli(&[
+        "launch",
+        "--session",
+        HARNESS_SESSION,
+        "--cmd",
+        "sleep 600",
+        "--format",
+        "json",
+    ]);
+    let (pane, window, _, _) = json_landing(&first, "flagless launch --session");
+    let windows = window_indexes(&server, HARNESS_SESSION);
+    assert_eq!(
+        windows.len(),
+        windows_before.len() + 1,
+        "S must gain one window"
+    );
+    assert_eq!(window_rects(&server, &window).len(), 1);
+    let index = tmux_format(&server, &pane, "#{window_index}");
+
+    let second = server.cli(&[
+        "launch",
+        "--session",
+        HARNESS_SESSION,
+        "--window",
+        &index,
+        "--split",
+        "tile",
+        "--cmd",
+        "sleep 600",
+        "--format",
+        "json",
+    ]);
+    let (_, landed, _, _) = json_landing(&second, "launch --session --window --split tile");
+    assert_eq!(landed, window, "the pane must land in W");
+    assert_eq!(
+        window_rects(&server, &window).len(),
+        2,
+        "W must hold two panes"
+    );
+    assert_eq!(
+        window_indexes(&server, HARNESS_SESSION),
+        windows,
+        "S's window count must not change"
+    );
+    assert_retiled(&server, &window, "--split tile into the scoped window");
+    assert!(tiled_marker_present(&server, &window));
+}
+
+/// Acceptance: a tiled placement's `raw` output is exactly the pane id and a newline.
+#[test]
+fn tiled_launch_raw_output_is_exactly_the_pane_id() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    let window = window_of(&server, server.pane());
+    launch_flagless_json(&server, "sleep 600");
+    let before = all_pane_ids(&server);
+
+    let out = server.cli(&["launch", "--cmd", "sleep 600", "--format", "raw"]);
+    out.assert_success("tiled launch --format raw");
+
+    let created: Vec<String> = all_pane_ids(&server)
+        .into_iter()
+        .filter(|pane| !before.contains(pane))
+        .collect();
+    assert_eq!(created.len(), 1, "exactly one pane must be created");
+    assert_eq!(out.stdout, format!("{}\n", created[0]));
+    assert!(
+        tiled_marker_present(&server, &window),
+        "the placement must have tiled the window"
+    );
+}
+
+/// Acceptance: the core `rebalance` operation retiles a ragged window and returns the
+/// geometry tmux reports for it.
+#[test]
+fn core_rebalance_retiles_a_ragged_window_and_returns_its_measured_geometry() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    let window = window_of(&server, server.pane());
+    for split in [["-h", "70"], ["-h", "70"], ["-v", "20"]] {
+        server
+            .tmux(&[
+                "split-window",
+                split[0],
+                "-p",
+                split[1],
+                "-d",
+                "-t",
+                server.pane(),
+                "sleep",
+                "600",
+            ])
+            .assert_success("make the window ragged");
+    }
+    let ragged = window_rects(&server, &window);
+
+    let geometry = tmux_tools_core::with_invocation(server.core_invocation(), || {
+        tmux_tools_core::layout::rebalance(&window)
+    })
+    .expect("rebalance must succeed");
+
+    assert_ne!(
+        window_rects(&server, &window),
+        ragged,
+        "rebalance must change the ragged window"
+    );
+    assert_retiled(&server, &window, "core rebalance");
+    let (measured_window, cols, rows) = tmux_landing(&server, server.pane());
+    assert_eq!(
+        (
+            geometry.window_id.clone(),
+            u64::from(geometry.min_pane_cols()),
+            u64::from(geometry.min_pane_rows())
+        ),
+        (measured_window, cols, rows),
+        "rebalance must return the window id and minima tmux reports"
+    );
+    assert_eq!(geometry.panes.len(), 4);
+}
+
+/// Acceptance: `launch --help` and `spawn-agent --help` list `tile` and no longer
+/// say the implicit default is a horizontal split.
+#[test]
+fn spawning_verb_help_lists_tile_and_not_the_horizontal_split_default() {
+    for verb in ["launch", "spawn-agent"] {
+        let out = Command::new(BIN)
+            .args([verb, "--help"])
+            .output()
+            .expect("run --help");
+        assert!(out.status.success(), "{verb} --help must succeed");
+        let help = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            help.split(|c: char| !(c.is_alphanumeric() || c == '_'))
+                .any(|word| word == "tile"),
+            "{verb} --help must list tile: {help}"
+        );
+        assert!(
+            !help.contains("now a horizontal split"),
+            "{verb} --help must not say the default is a horizontal split: {help}"
         );
     }
 }
