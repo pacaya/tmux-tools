@@ -36,7 +36,7 @@ verbs report `relocated` and the final `window_id`. Only the new pane moves.
 break, fallback marking, `-d`), § Floor: per surface, in the registry (pane floor and effective floor),
 § Ownership and § Layout intent (candidate eligibility), § Flags (opt-outs placed as today),
 § Reporting surface (`relocated`, `window_id`, `below_floor` describe the final window; `status` for
-the origin), § Accepted limits (crowding not repaired), § Module shape (overflow trial inside `layout`, `place`
+the origin; the pane-gone result and the `relocated` value in it), § Accepted limits (crowding not repaired), § Module shape (overflow trial inside `layout`, `place`
 returns where the pane landed), § Solution (no invocation starts failing), ## Out of Scope (one
 session; no locking, repair or prediction), § Testing Decisions (seams, closing check).
 
@@ -65,15 +65,26 @@ reports `relocated`.
 - Trial per candidate: `join-pane -d` the new pane into it, retile, measure against the candidate's
   effective floor including the new pane. If it does not breach, the pane stays. If it breaches, move
   the pane on and retile the rejected candidate again after the pane leaves. A refused `join-pane`
-  counts as a rejected trial: the search continues to the next candidate or the fresh-window fallback,
-  and the invocation still exits 0 and reports the final window.
+  while the new pane still exists counts as a rejected trial: the search continues to the next
+  candidate or the fresh-window fallback, and the invocation still exits 0 and reports the final
+  window.
 - Fallback when every candidate breaches or none exists: `break-pane -d` with the target window's
   session named as destination, then tile the new window and set `@tt-tiled` on it.
+- A failed `break-pane` while the new pane still exists leaves the pane in the window it is in,
+  retiles that window, and reports it with exit 0 and `below_floor: true`; `relocated` is true only
+  when that window is not the origin.
+- Pane gone: when the new pane no longer exists at any relocation step (`join-pane`, candidate retile
+  and measurement, `break-pane`, fallback tile and marker, origin retile, final measurement), give the
+  PRD § Reporting surface pane-gone result: exit 0, the pane id, `window_id`, `min_pane_cols`,
+  `min_pane_rows` and `below_floor` left out, one stderr warning line, `name` as chosen. `relocated` is
+  true only when a `join-pane` or `break-pane` of the new pane succeeded before it was gone. Check
+  existence on the server (`list-panes -a`), as `place` does today, never by tmux error text.
+- Any other failure at a relocation step fails the verb.
 - After any move, retile the origin window.
 - No move or retile selects a window: the session's current window is unchanged.
 - Both spawning verbs report `relocated` (true only when a breach forced a move) in `concise` and
   `json`; `window_id`, `min_pane_cols`, `min_pane_rows` and `below_floor` describe the window the pane
-  finally landed in. `raw` still emits only the pane id. Pane user-options travel with the pane; do
+  finally landed in, except in the pane-gone result. `raw` still emits only the pane id. Pane user-options travel with the pane; do
   not rewrite registration after a move.
 - A window already below its floor before the placement is not repaired; only the new pane leaves it.
 
@@ -104,8 +115,9 @@ read tmux state independently with `tmux -L <socket>` queries (`#{window_id}`, `
 - [ ] Given a breaching placement whose `--target` is in a session other than the caller's
       (`TMUX_PANE` in another session on the same server), where the caller's session has an eligible
       marked window with room and the target's session has no candidate with room, when it completes,
-      then the reported `window_id` belongs to the target's session (`#{session_name}` of that window),
-      observable at the `spawn-agent --format json` output.
+      then `relocated` is true, the reported `window_id` differs from the target window's id and
+      belongs to the target's session (`#{session_name}` of that window), observable at the
+      `spawn-agent --format json` output.
 - [ ] Given a breaching placement, then both `launch` and `spawn-agent` report `relocated` and the final
       `window_id` in `concise` and `json`. Given a placement that does not breach, then `relocated` is
       false and `window_id` equals the target window's id.
@@ -122,6 +134,19 @@ read tmux state independently with `tmux -L <socket>` queries (`#{window_id}`, `
       `spawn-agent` places into the origin, then it exits 0, `relocated` is true, the reported
       `window_id` is the higher-index candidate's, and the refused candidate's pane count is unchanged; observable at `spawn-agent --format json` and `tmux -L
       <socket>` queries.
+- [ ] Given a breaching placement that joins into an eligible candidate, and separately one that falls
+      back to `break-pane`, when each completes, then the reported `min_pane_cols` and `min_pane_rows`
+      equal the smallest pane width and height of the reported window as read by `tmux -L <socket>`,
+      and `below_floor` is false.
+- [ ] Given a breaching origin and an eligible candidate with room, where the new pane is killed when
+      its `join-pane` runs (a tmux wrapper kills the pane, then passes the call to real tmux), when
+      `spawn-agent --format json` completes, then it exits 0, prints the pane id, leaves out
+      `window_id`, `min_pane_cols`, `min_pane_rows` and `below_floor`, reports `relocated: false`, and
+      prints exactly one warning line on stderr.
+- [ ] Given a breaching origin and no candidate, where `break-pane` fails while the new pane exists (a
+      tmux wrapper refuses `break-pane` and passes every other call to real tmux), when
+      `spawn-agent --format json` completes, then it exits 0, the pane is still in the origin,
+      `relocated` is false, `below_floor` is true, and the reported `window_id` is the origin's.
 - [ ] Unit tests in `core` cover overflow-candidate ordering: unmarked windows, windows without an
       owned pane, and the origin are excluded; the remainder are in ascending index order.
 
