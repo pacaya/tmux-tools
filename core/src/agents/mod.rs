@@ -2046,13 +2046,52 @@ args = ["--unsafe"]
         );
     }
 
+    #[test]
+    fn write_temp_agents_file_returns_distinct_paths_under_concurrency() {
+        use std::collections::BTreeSet;
+        use std::sync::{Arc, Barrier};
+
+        const ROUNDS: usize = 100;
+        const THREADS: usize = 8;
+
+        for round in 0..ROUNDS {
+            let barrier = Arc::new(Barrier::new(THREADS));
+            let handles: Vec<_> = (0..THREADS)
+                .map(|_| {
+                    let barrier = Arc::clone(&barrier);
+                    std::thread::spawn(move || {
+                        barrier.wait();
+                        write_temp_agents_file("")
+                    })
+                })
+                .collect();
+            let paths: Vec<PathBuf> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+
+            // Clean up before asserting so a failure does not leak files.
+            for path in &paths {
+                let _ = fs::remove_file(path);
+            }
+
+            let distinct: BTreeSet<&PathBuf> = paths.iter().collect();
+            assert_eq!(
+                distinct.len(),
+                THREADS,
+                "round {round}: duplicate temp paths {paths:?}"
+            );
+        }
+    }
+
     fn write_temp_agents_file(contents: &str) -> PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
         let suffix = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
         let path = std::env::temp_dir().join(format!(
-            "tmux-tools-agents-{}-{suffix}.toml",
+            "tmux-tools-agents-{}-{seq}-{suffix}.toml",
             std::process::id()
         ));
 
