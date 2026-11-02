@@ -4,8 +4,10 @@
 //! pane goes, snapshots the ownership of the window it will split, creates it (split
 //! or new window), writes its whole registration, retiles the window when the
 //! snapshot made it eligible (or clears [`TILED_MARKER`] for explicit sizing), and
-//! then measures the window it landed in, returning a [`Landing`]. The verbs build
-//! the command and the registration; they never create a pane themselves.
+//! then measures the window it landed in, returning a [`Landing`]. When the new pane
+//! no longer exists at one of those steps after the split, placement stops there and
+//! the [`Landing`] carries no window. The verbs build the command and the
+//! registration; they never create a pane themselves.
 //! [`rebalance`] retiles a window and returns its measured geometry.
 //!
 //! It also owns floors: [`pane_floor`] resolves a pane's floor from its registration
@@ -188,16 +190,13 @@ pub struct AgentRegistration<'a> {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Landing {
     pub pane_id: String,
-    /// The `@tt-name` actually written.
+    /// The `@tt-name` chosen for the pane: the `--name` value, else the derived name.
+    /// It is the name written, unless the pane was gone before registration wrote it.
     pub name: String,
-    /// The stable tmux id of the window the pane landed in.
-    pub window_id: String,
-    /// The smallest pane width measured across every pane in that window.
-    pub min_pane_cols: u32,
-    /// The smallest pane height measured across every pane in that window.
-    pub min_pane_rows: u32,
-    /// Whether that window is below its effective floor (see [`below_floor`]).
-    pub below_floor: bool,
+    /// The window the pane landed in, measured, with its floor verdict. `None` when
+    /// the pane no longer existed at a placement step after the split (registration,
+    /// retile, marker or measurement), so the window was not measured.
+    pub window: Option<WindowReport>,
 }
 
 /// A window's measured geometry and floor verdict, as [`inspect`] reports it.
@@ -350,6 +349,13 @@ fn apply_new_pane_registration(
 ///   [`TILED_MARKER`] unset on the window.
 ///
 /// A pane created in a new window gets no layout step: the window holds only it.
+///
+/// The pane's name is chosen before anything is written on it. When a tmux call at a
+/// step after the split (registration, retile, marker, measurement) exits non-zero
+/// and the new pane no longer exists on the server, the remaining steps are skipped
+/// and the [`Landing`] carries that name and no window. Every other failure at those
+/// steps — the pane still exists, the call could not run, or its output cannot be
+/// parsed — is an error.
 pub fn place(
     command: &str,
     destination: &Destination<'_>,
@@ -396,33 +402,86 @@ pub fn place(
         return Err(anyhow!("tmux launch command returned an empty pane id"));
     }
 
-    let name = register(&pane_id, registration)?;
-    if matches!(creation, Creation::Split(_)) {
-        match layout {
-            Layout::Tile if tile => {
-                retile(&pane_id)?;
-                set_tiled_marker(&pane_id)?;
-            }
-            Layout::Split { .. } => clear_tiled_marker(&pane_id)?,
-            Layout::Tile | Layout::NewWindow => {}
-        }
-    }
-    let mut geometry = measure(&pane_id)?;
-    apply_new_pane_registration(&mut geometry.panes, &pane_id, registration.agent.as_ref());
-    let report = geometry.report(registry);
+    // Chosen before any write, so the landing reports it even when the pane is gone
+    // before registration writes it.
+    let name = names::choose_name(&pane_id, registration.name, registration.name_source)?;
+    let window = measured_window(&pane_id, &name, registration, &creation, layout, tile)?;
+    let window = window.map(|mut geometry| {
+        apply_new_pane_registration(&mut geometry.panes, &pane_id, registration.agent.as_ref());
+        geometry.report(registry)
+    });
 
     Ok(Landing {
         pane_id,
         name,
-        window_id: report.window_id,
-        min_pane_cols: report.min_pane_cols,
-        min_pane_rows: report.min_pane_rows,
-        below_floor: report.below_floor,
+        window,
     })
 }
 
-/// Write the whole registration on `pane_id` and return the `@tt-name` written.
-fn register(pane_id: &str, registration: &Registration<'_>) -> Result<String> {
+/// The placement steps after the split: write the registration on `pane_id`, apply
+/// the layout step, and measure the window it landed in. `None` when a step found the
+/// pane gone (see [`unless_pane_gone`]); the remaining steps are then skipped.
+fn measured_window(
+    pane_id: &str,
+    name: &str,
+    registration: &Registration<'_>,
+    creation: &Creation,
+    layout: Layout,
+    tile: bool,
+) -> Result<Option<WindowGeometry>> {
+    if unless_pane_gone(pane_id, register(pane_id, name, registration))?.is_none() {
+        return Ok(None);
+    }
+    if matches!(creation, Creation::Split(_)) {
+        let layout_step = match layout {
+            Layout::Tile if tile => {
+                if unless_pane_gone(pane_id, retile(pane_id))?.is_none() {
+                    return Ok(None);
+                }
+                set_tiled_marker(pane_id)
+            }
+            Layout::Split { .. } => clear_tiled_marker(pane_id),
+            Layout::Tile | Layout::NewWindow => Ok(()),
+        };
+        if unless_pane_gone(pane_id, layout_step)?.is_none() {
+            return Ok(None);
+        }
+    }
+    let Some(output) = unless_pane_gone(pane_id, read_measurement(pane_id))? else {
+        return Ok(None);
+    };
+    parse_measurement(pane_id, &output).map(Some)
+}
+
+/// `Some` of a placement step's value; `None` when the step failed on a tmux call that
+/// exited non-zero ([`tmux::CommandFailed`]) and `pane_id` is no longer on the server.
+/// Any other failure — including one whose pane still exists, or whose existence
+/// cannot be read — is the step's own error.
+///
+/// "Gone" is judged by the server's pane list rather than by tmux's error text, which
+/// differs per command (`no such pane`, `no such window`, `can't find pane`).
+fn unless_pane_gone<T>(pane_id: &str, step: Result<T>) -> Result<Option<T>> {
+    match step {
+        Ok(value) => Ok(Some(value)),
+        Err(error) if error.downcast_ref::<tmux::CommandFailed>().is_some() => {
+            match pane_exists(pane_id) {
+                Ok(false) => Ok(None),
+                Ok(true) | Err(_) => Err(error),
+            }
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// Whether the server lists `pane_id` among all its panes.
+fn pane_exists(pane_id: &str) -> Result<bool> {
+    let output = tmux::run_checked(&["list-panes", "-a", "-F", "#{pane_id}"])?;
+    Ok(output.lines().any(|line| line.trim() == pane_id))
+}
+
+/// Write the whole registration on `pane_id`, with `name` (from
+/// [`names::choose_name`]) as its `@tt-name`.
+fn register(pane_id: &str, name: &str, registration: &Registration<'_>) -> Result<()> {
     if let Some(agent) = &registration.agent {
         names::set(pane_id, names::KEY_AGENT, agent.agent)?;
         // Record the resolved surface unconditionally, whether or not one was named: an
@@ -438,12 +497,12 @@ fn register(pane_id: &str, registration: &Registration<'_>) -> Result<String> {
             names::set(pane_id, names::KEY_ACCESS, access)?;
         }
     }
-    let name = names::set_name_or_derive(pane_id, registration.name, registration.name_source)?;
+    names::set(pane_id, names::KEY_NAME, name)?;
     names::set(pane_id, names::KEY_LAUNCHED_AT, registration.launched_at)?;
     if let Some(cwd) = registration.cwd {
         names::set(pane_id, names::KEY_CWD, cwd)?;
     }
-    Ok(name)
+    Ok(())
 }
 
 /// Retile the window that `target` (a window or pane target) is in with tmux's
@@ -525,6 +584,11 @@ const FIELD_SEP: char = '\x1f';
 /// Every pane of the window `pane_id` (a pane or window target) is in, with its size
 /// and registration, as tmux reports them now.
 fn measure(pane_id: &str) -> Result<WindowGeometry> {
+    parse_measurement(pane_id, &read_measurement(pane_id)?)
+}
+
+/// The measurement's tmux call: the raw lines [`parse_measurement`] reads.
+fn read_measurement(pane_id: &str) -> Result<String> {
     let format = [
         "#{window_id}".to_owned(),
         "#{pane_id}".to_owned(),
@@ -535,9 +599,13 @@ fn measure(pane_id: &str) -> Result<WindowGeometry> {
     ]
     .join(&FIELD_SEP.to_string());
     // `list-panes -t <pane>` lists the panes of that pane's window.
-    let output = tmux::run_checked(&["list-panes", "-t", pane_id, "-F", &format])
-        .with_context(|| format!("cannot measure the window of pane {pane_id}"))?;
-    parse_window_geometry(&output)
+    tmux::run_checked(&["list-panes", "-t", pane_id, "-F", &format])
+        .with_context(|| format!("cannot measure the window of pane {pane_id}"))
+}
+
+/// Parse the output of [`read_measurement`] for `pane_id`.
+fn parse_measurement(pane_id: &str, output: &str) -> Result<WindowGeometry> {
+    parse_window_geometry(output)
         .with_context(|| format!("cannot measure the window of pane {pane_id}"))
 }
 

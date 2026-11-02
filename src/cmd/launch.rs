@@ -38,10 +38,54 @@ struct LaunchJson<'a> {
     name: &'a str,
     pane_id: &'a str,
     launched_at: &'a str,
+    #[serde(flatten)]
+    window: Option<WindowJson<'a>>,
+}
+
+/// The landing window's fields of the spawning verbs' JSON. Absent, keys and all,
+/// when the pane was gone before its window was measured.
+#[derive(Serialize)]
+pub(crate) struct WindowJson<'a> {
     window_id: &'a str,
     min_pane_cols: u32,
     min_pane_rows: u32,
     below_floor: bool,
+}
+
+impl<'a> WindowJson<'a> {
+    pub(crate) fn of(landing: &'a Landing) -> Option<Self> {
+        landing.window.as_ref().map(|window| WindowJson {
+            window_id: &window.window_id,
+            min_pane_cols: window.min_pane_cols,
+            min_pane_rows: window.min_pane_rows,
+            below_floor: window.below_floor,
+        })
+    }
+}
+
+/// The landing window's fields of the spawning verbs' concise line, each preceded by
+/// a space; empty when the pane was gone before its window was measured.
+pub(crate) fn concise_window_fields(landing: &Landing) -> String {
+    landing
+        .window
+        .as_ref()
+        .map(|window| {
+            format!(
+                " window_id={} min_pane_cols={} min_pane_rows={} below_floor={}",
+                window.window_id, window.min_pane_cols, window.min_pane_rows, window.below_floor
+            )
+        })
+        .unwrap_or_default()
+}
+
+/// Warn on stderr, once, when the pane was gone before its window was measured.
+pub(crate) fn warn_if_unmeasured(landing: &Landing) {
+    if landing.window.is_none() {
+        eprintln!(
+            "warning: pane {} no longer exists; window geometry not measured",
+            landing.pane_id
+        );
+    }
 }
 
 pub fn run(args: &LaunchArgs) -> Result<()> {
@@ -113,17 +157,16 @@ pub(crate) fn wrap_keep_open(cmd: &str) -> String {
     format!("({cmd}); exec {shell}")
 }
 
-/// Print the launch result; the name is the registered `@tt-name`, not the flag value.
+/// Print the launch result; the name is the one placement chose (`--name`, else the
+/// derived name), which is the registered `@tt-name` whenever registration completed.
 fn render_output(args: &LaunchArgs, landing: &Landing, launched_at: &str) -> Result<()> {
+    warn_if_unmeasured(landing);
     match args.common.format {
         Format::Concise => println!(
-            "name={} pane={} window_id={} min_pane_cols={} min_pane_rows={} below_floor={}",
+            "name={} pane={}{}",
             landing.name,
             landing.pane_id,
-            landing.window_id,
-            landing.min_pane_cols,
-            landing.min_pane_rows,
-            landing.below_floor
+            concise_window_fields(landing)
         ),
         Format::Raw => println!("{}", landing.pane_id),
         Format::Json => {
@@ -131,10 +174,7 @@ fn render_output(args: &LaunchArgs, landing: &Landing, launched_at: &str) -> Res
                 name: &landing.name,
                 pane_id: &landing.pane_id,
                 launched_at,
-                window_id: &landing.window_id,
-                min_pane_cols: landing.min_pane_cols,
-                min_pane_rows: landing.min_pane_rows,
-                below_floor: landing.below_floor,
+                window: WindowJson::of(landing),
             };
             println!("{}", serde_json::to_string(&output)?);
         }

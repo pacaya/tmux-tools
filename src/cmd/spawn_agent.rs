@@ -9,7 +9,10 @@ use tmux_tools_core::{
 };
 
 use crate::{
-    cmd::launch::{destination, invoking_cwd, wrap_keep_open},
+    cmd::launch::{
+        concise_window_fields, destination, invoking_cwd, warn_if_unmeasured, wrap_keep_open,
+        WindowJson,
+    },
     util::rfc3339_utc_now,
     CommonArgs,
 };
@@ -59,10 +62,8 @@ struct SpawnAgentJson<'a> {
     binary: &'a str,
     argv: &'a [String],
     launched_at: &'a str,
-    window_id: &'a str,
-    min_pane_cols: u32,
-    min_pane_rows: u32,
-    below_floor: bool,
+    #[serde(flatten)]
+    window: Option<WindowJson<'a>>,
 }
 
 pub fn run(args: &SpawnAgentArgs) -> Result<()> {
@@ -162,7 +163,8 @@ pub(crate) fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
-/// Print the spawn result; the name is the registered `@tt-name`, not the flag value.
+/// Print the spawn result; the name is the one placement chose (`--name`, else the
+/// derived name), which is the registered `@tt-name` whenever registration completed.
 fn render_output(
     args: &SpawnAgentArgs,
     landing: &Landing,
@@ -171,18 +173,16 @@ fn render_output(
     launched_at: &str,
     surface: &str,
 ) -> Result<()> {
+    warn_if_unmeasured(landing);
     match args.common.format {
         Format::Concise => println!(
-            "agent={} access={} surface={} name={} pane={} window_id={} min_pane_cols={} min_pane_rows={} below_floor={}",
+            "agent={} access={} surface={} name={} pane={}{}",
             args.agent,
             display_value(args.access.as_deref()),
             surface,
             landing.name,
             landing.pane_id,
-            landing.window_id,
-            landing.min_pane_cols,
-            landing.min_pane_rows,
-            landing.below_floor
+            concise_window_fields(landing)
         ),
         Format::Json => {
             let output = SpawnAgentJson {
@@ -194,10 +194,7 @@ fn render_output(
                 binary,
                 argv,
                 launched_at,
-                window_id: &landing.window_id,
-                min_pane_cols: landing.min_pane_cols,
-                min_pane_rows: landing.min_pane_rows,
-                below_floor: landing.below_floor,
+                window: WindowJson::of(landing),
             };
             println!("{}", serde_json::to_string(&output)?);
         }

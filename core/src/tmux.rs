@@ -152,17 +152,40 @@ pub fn run_checked_owned(args: &[String]) -> Result<String> {
     run_checked(&refs)
 }
 
+/// A tmux command that ran and exited non-zero, as the `run_checked*` functions report
+/// it. Callers tell it apart from a command that could not run (spawn failure, timeout)
+/// with `error.downcast_ref::<CommandFailed>()`, which sees through added context.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CommandFailed {
+    pub args: Vec<String>,
+    pub exit_code: i32,
+    /// tmux's stderr, trimmed.
+    pub stderr: String,
+}
+
+impl fmt::Display for CommandFailed {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "tmux command failed (args: {:?}, exit code {}): {}",
+            self.args, self.exit_code, self.stderr
+        )
+    }
+}
+
+impl std::error::Error for CommandFailed {}
+
 fn check(result: Result<TmuxOutput>, args: &[&str]) -> Result<String> {
     let output =
         result.with_context(|| format!("failed to run tmux command: tmux {}", args.join(" ")))?;
 
     if output.exit_code != 0 {
-        return Err(anyhow!(
-            "tmux command failed (args: {:?}, exit code {}): {}",
-            args,
-            output.exit_code,
-            output.stderr.trim()
-        ));
+        return Err(CommandFailed {
+            args: args.iter().map(|arg| (*arg).to_owned()).collect(),
+            exit_code: output.exit_code,
+            stderr: output.stderr.trim().to_owned(),
+        }
+        .into());
     }
 
     Ok(output.stdout)
@@ -343,6 +366,38 @@ mod tests {
     fn test_mutex() -> &'static Mutex<()> {
         static TEST_MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
         TEST_MUTEX.get_or_init(|| Mutex::new(()))
+    }
+
+    #[test]
+    fn a_non_zero_exit_is_a_command_failed_seen_through_context_with_the_same_message() {
+        let output = TmuxOutput {
+            stdout: String::new(),
+            stderr: "can't find pane: %7\n".to_owned(),
+            exit_code: 1,
+        };
+        let error = check(Ok(output), &["list-panes", "-t", "%7"])
+            .context("cannot measure the window of pane %7")
+            .unwrap_err();
+
+        assert_eq!(
+            error.downcast_ref::<CommandFailed>(),
+            Some(&CommandFailed {
+                args: vec!["list-panes".into(), "-t".into(), "%7".into()],
+                exit_code: 1,
+                stderr: "can't find pane: %7".into(),
+            })
+        );
+        assert_eq!(
+            error.root_cause().to_string(),
+            r#"tmux command failed (args: ["list-panes", "-t", "%7"], exit code 1): can't find pane: %7"#
+        );
+    }
+
+    #[test]
+    fn a_command_that_could_not_run_is_not_a_command_failed() {
+        let error = check(Err(anyhow!("tmux command timed out")), &["list-panes"]).unwrap_err();
+
+        assert!(error.downcast_ref::<CommandFailed>().is_none());
     }
 
     #[test]

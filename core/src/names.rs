@@ -115,22 +115,23 @@ pub const DERIVED_NAME_FALLBACK_STEM: &str = "pane";
 /// Hex digits in a derived name's random suffix (`npm-a3f2`).
 pub const DERIVED_NAME_SUFFIX_LEN: usize = 4;
 
-/// How many fresh derivations [`set_name_or_derive`] tries when a derived name is
-/// already taken by another pane.
+/// How many fresh derivations [`choose_name`] tries when a derived name is already
+/// taken by another pane.
 const DERIVED_NAME_ATTEMPTS: usize = 16;
 
-/// Register the pane's `@tt-name` and return the name written.
+/// The `@tt-name` to register on `pane_id`, chosen without writing it and without a
+/// tmux call that targets `pane_id`, so the name is known even when the pane is gone
+/// before it is written.
 ///
-/// With `explicit` (the `--name` value) the name is written unchanged, under the
-/// usual collision check. Without it, the name is derived from `program` — the
-/// launched command's first word, never the keep-alive wrap — as
+/// With `explicit` (the `--name` value) that is the name, unchanged; writing it with
+/// [`set`] applies the usual collision check. Without it, the name is derived from
+/// `program` — the launched command's first word, never the keep-alive wrap — as
 /// `<stem>-<random hex>` (see [`derive_name`]). A derived name that another pane
 /// already carries is re-derived; the random suffix alone keeps concurrent
 /// same-command collisions negligible, since [`set`]'s uniqueness check and write
 /// are not atomic.
-pub fn set_name_or_derive(pane_id: &str, explicit: Option<&str>, program: &str) -> Result<String> {
+pub fn choose_name(pane_id: &str, explicit: Option<&str>, program: &str) -> Result<String> {
     if let Some(name) = explicit {
-        set(pane_id, KEY_NAME, name)?;
         return Ok(name.to_owned());
     }
     for _ in 0..DERIVED_NAME_ATTEMPTS {
@@ -141,7 +142,6 @@ pub fn set_name_or_derive(pane_id: &str, explicit: Option<&str>, program: &str) 
         {
             continue;
         }
-        set(pane_id, KEY_NAME, &candidate)?;
         return Ok(candidate);
     }
     Err(anyhow!(

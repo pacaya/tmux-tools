@@ -10114,3 +10114,434 @@ fn spawning_verb_help_lists_tile_and_not_the_horizontal_split_default() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// ISSUE-261102-0329-01 — `launch` and `spawn-agent` succeed, without window
+// geometry, when their new pane no longer exists at a placement step after the
+// split; every other failure at those steps still fails the verb.
+// ---------------------------------------------------------------------------
+
+/// A placement step after the split, as a fake `tmux` recognizes its first call that
+/// targets the new pane.
+#[cfg(feature = "test-fixtures")]
+#[derive(Clone, Copy, Debug)]
+enum PlacementStep {
+    /// The registration's first `set-option -p -t <pane>`.
+    Registration,
+    /// `select-layout -t <pane> tiled`.
+    Retile,
+    /// The `@tt-tiled` window marker's `set-option -w -t <pane>`.
+    Marker,
+    /// The measurement's `list-panes -t <pane>` (its format reads `#{pane_width}`).
+    Measurement,
+}
+
+/// What a fake `tmux` does to the first call of a [`PlacementStep`].
+#[cfg(feature = "test-fixtures")]
+#[derive(Clone, Copy, Debug)]
+enum StepFault {
+    /// Kill the call's target pane, then pass the call to real tmux unchanged, so the
+    /// CLI gets tmux's own error and exit status.
+    PaneGone,
+    /// Leave the pane alive and make the call exit 1 with an error message.
+    InjectedError,
+    /// Leave the pane alive and answer the call with output that cannot be parsed.
+    UnparsableOutput,
+}
+
+/// A fake `tmux` that applies `fault` to the first call of `step` and delegates every
+/// other call to the real binary. It records the call's target pane in `state`, which
+/// therefore exists only once the fault fired.
+#[cfg(feature = "test-fixtures")]
+fn tmux_wrapper_at_placement_step(
+    step: PlacementStep,
+    fault: StepFault,
+    state: &std::path::Path,
+) -> String {
+    let matches = match step {
+        PlacementStep::Registration => "[ \"$1\" = set-option ] && [ $has_p = 1 ]",
+        PlacementStep::Retile => "[ \"$1\" = select-layout ]",
+        PlacementStep::Marker => "[ \"$1\" = set-option ] && [ $has_w = 1 ]",
+        PlacementStep::Measurement => "[ \"$1\" = list-panes ] && [ $has_width = 1 ]",
+    };
+    let action = match fault {
+        StepFault::PaneGone => "\t\"$REAL\" kill-pane -t \"$target\" || exit 99\n".to_owned(),
+        StepFault::InjectedError => {
+            format!("\tprintf '%s\\n' 'injected {step:?} failure' >&2\n\texit 1\n")
+        }
+        StepFault::UnparsableOutput => {
+            "\tprintf '%s\\n' 'not a pane geometry line'\n\texit 0\n".to_owned()
+        }
+    };
+    format!(
+        "#!/bin/sh\n\
+         REAL='{real}'\n\
+         STATE='{state}'\n\
+         target=\n\
+         has_p=0\n\
+         has_w=0\n\
+         has_width=0\n\
+         prev=\n\
+         for arg in \"$@\"; do\n\
+         \t[ \"$prev\" = -t ] && target=$arg\n\
+         \tcase \"$arg\" in\n\
+         \t\t-p) has_p=1 ;;\n\
+         \t\t-w) has_w=1 ;;\n\
+         \t\t*'#{{pane_width}}'*) has_width=1 ;;\n\
+         \tesac\n\
+         \tprev=$arg\n\
+         done\n\
+         if {matches} && [ ! -e \"$STATE\" ]; then\n\
+         \tprintf '%s\\n' \"$target\" > \"$STATE\"\n\
+         {action}\
+         fi\n\
+         exec \"$REAL\" \"$@\"\n",
+        real = real_tmux_path(),
+        state = state.display(),
+    )
+}
+
+/// The fields a spawning verb leaves out when its pane is gone before measurement.
+#[cfg(feature = "test-fixtures")]
+const UNMEASURED_KEYS: [&str; 4] = ["window_id", "min_pane_cols", "min_pane_rows", "below_floor"];
+
+/// Install a fake `tmux` applying `fault` at `step` in `config`'s directory; returns
+/// the path of its state file.
+#[cfg(feature = "test-fixtures")]
+fn install_step_fault(
+    config: &AgentsConfig,
+    step: PlacementStep,
+    fault: StepFault,
+) -> std::path::PathBuf {
+    let state = config.xdg().join("step-fault-fired");
+    config.write_executable("tmux", &tmux_wrapper_at_placement_step(step, fault, &state));
+    state
+}
+
+/// The pane id the fake `tmux` recorded when its fault fired.
+#[cfg(feature = "test-fixtures")]
+fn faulted_pane(state: &std::path::Path, ctx: &str) -> String {
+    std::fs::read_to_string(state)
+        .unwrap_or_else(|e| panic!("{ctx}: the step fault must have fired ({e})"))
+        .trim()
+        .to_owned()
+}
+
+/// Assert the pane-gone result's stderr and that `pane` really left the server.
+#[cfg(feature = "test-fixtures")]
+fn assert_pane_gone_warning(server: &IsolatedTmuxServer, out: &CmdOutput, pane: &str, ctx: &str) {
+    let warning = format!("warning: pane {pane} no longer exists; window geometry not measured");
+    assert_eq!(
+        out.stderr.lines().filter(|line| *line == warning).count(),
+        1,
+        "{ctx}: stderr must carry the warning line {warning:?} once; stderr: {:?}",
+        out.stderr
+    );
+    assert!(
+        !all_pane_ids(server).contains(&pane.to_owned()),
+        "{ctx}: the test must have removed pane {pane}"
+    );
+}
+
+/// Assert the pane-gone `--format json` result: exit 0, `pane_id` is the faulted
+/// pane, the four geometry keys are absent, and the warning is on stderr. Returns the
+/// parsed payload.
+#[cfg(feature = "test-fixtures")]
+fn assert_pane_gone_json(
+    server: &IsolatedTmuxServer,
+    out: &CmdOutput,
+    state: &std::path::Path,
+    ctx: &str,
+) -> serde_json::Value {
+    out.assert_success(ctx);
+    let pane = faulted_pane(state, ctx);
+    let payload: serde_json::Value = serde_json::from_str(out.stdout.trim())
+        .unwrap_or_else(|e| panic!("{ctx}: JSON should parse ({e}): {:?}", out.stdout));
+    assert_eq!(
+        payload.get("pane_id").and_then(|value| value.as_str()),
+        Some(pane.as_str()),
+        "{ctx}: JSON must carry the new pane's pane_id; stdout: {}",
+        out.stdout
+    );
+    for key in UNMEASURED_KEYS {
+        assert!(
+            payload.get(key).is_none(),
+            "{ctx}: JSON must leave out {key}; stdout: {}",
+            out.stdout
+        );
+    }
+    assert_pane_gone_warning(server, out, &pane, ctx);
+    payload
+}
+
+/// Acceptance: the pane gone at measurement — `launch --format json` exits 0 with the
+/// pane id and without the window geometry, and warns on stderr.
+#[cfg(feature = "test-fixtures")]
+#[test]
+fn launch_json_succeeds_without_geometry_when_the_pane_is_gone_at_measurement() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    let config = AgentsConfig::new();
+    let state = install_step_fault(&config, PlacementStep::Measurement, StepFault::PaneGone);
+
+    let out = server.cli_env_path(
+        &["launch", "--cmd", "sleep 600", "--format", "json"],
+        config.xdg(),
+        config.xdg(),
+    );
+
+    assert_pane_gone_json(
+        &server,
+        &out,
+        &state,
+        "launch json, pane gone at measurement",
+    );
+}
+
+/// Acceptance: with the pane gone at measurement, `concise` exits 0 without the four
+/// geometry keys and `raw` prints exactly the pane id and a newline.
+#[cfg(feature = "test-fixtures")]
+#[test]
+fn launch_concise_and_raw_succeed_when_the_pane_is_gone_at_measurement() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+
+    let config = AgentsConfig::new();
+    let state = install_step_fault(&config, PlacementStep::Measurement, StepFault::PaneGone);
+    let concise = server.cli_env_path(
+        &["launch", "--cmd", "sleep 600", "--format", "concise"],
+        config.xdg(),
+        config.xdg(),
+    );
+    concise.assert_success("launch concise, pane gone at measurement");
+    let pane = faulted_pane(&state, "launch concise");
+    assert_eq!(
+        concise_field(&concise, "pane"),
+        Some(pane.clone()),
+        "concise must carry pane=<the new pane>; stdout: {}",
+        concise.stdout
+    );
+    for key in UNMEASURED_KEYS {
+        assert!(
+            !concise.stdout.contains(key),
+            "concise must not print {key}; stdout: {}",
+            concise.stdout
+        );
+    }
+    assert_pane_gone_warning(&server, &concise, &pane, "launch concise");
+    drop(config);
+
+    let config = AgentsConfig::new();
+    let state = install_step_fault(&config, PlacementStep::Measurement, StepFault::PaneGone);
+    let raw = server.cli_env_path(
+        &["launch", "--cmd", "sleep 600", "--format", "raw"],
+        config.xdg(),
+        config.xdg(),
+    );
+    raw.assert_success("launch raw, pane gone at measurement");
+    let pane = faulted_pane(&state, "launch raw");
+    assert_eq!(
+        raw.stdout,
+        format!("{pane}\n"),
+        "raw stdout must be exactly the pane id and a newline"
+    );
+    assert_pane_gone_warning(&server, &raw, &pane, "launch raw");
+}
+
+/// Acceptance: the pane gone at registration — `launch --name <n>` exits 0 with the
+/// same result and reports `name` as `<n>`; without `--name` it reports the derived
+/// name.
+#[cfg(feature = "test-fixtures")]
+#[test]
+fn launch_succeeds_and_reports_the_chosen_name_when_the_pane_is_gone_at_registration() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+
+    let config = AgentsConfig::new();
+    let state = install_step_fault(&config, PlacementStep::Registration, StepFault::PaneGone);
+    let name = format!("gone-at-registration-{}", std::process::id());
+    let named = server.cli_env_path(
+        &[
+            "launch",
+            "--cmd",
+            "sleep 600",
+            "--name",
+            &name,
+            "--format",
+            "json",
+        ],
+        config.xdg(),
+        config.xdg(),
+    );
+    let payload = assert_pane_gone_json(
+        &server,
+        &named,
+        &state,
+        "launch --name, gone at registration",
+    );
+    assert_eq!(
+        payload.get("name").and_then(|value| value.as_str()),
+        Some(name.as_str()),
+        "name must be the --name value; stdout: {}",
+        named.stdout
+    );
+    drop(config);
+
+    let config = AgentsConfig::new();
+    let state = install_step_fault(&config, PlacementStep::Registration, StepFault::PaneGone);
+    let derived = server.cli_env_path(
+        &["launch", "--cmd", "sleep 600", "--format", "json"],
+        config.xdg(),
+        config.xdg(),
+    );
+    let payload = assert_pane_gone_json(&server, &derived, &state, "launch, gone at registration");
+    let name = payload
+        .get("name")
+        .and_then(|value| value.as_str())
+        .unwrap_or_else(|| panic!("JSON must carry name; stdout: {}", derived.stdout));
+    let suffix = name
+        .strip_prefix("sleep-")
+        .unwrap_or_else(|| panic!("name must be derived from `sleep`; got {name:?}"));
+    assert!(
+        suffix.len() == 4 && suffix.chars().all(|c| c.is_ascii_hexdigit()),
+        "name must be the derived sleep-<4 hex digits>; got {name:?}"
+    );
+}
+
+/// Make the caller's window owned: one flagless launch registers a pane in it, so the
+/// next flagless launch tiles it.
+#[cfg(feature = "test-fixtures")]
+fn own_the_harness_window(server: &IsolatedTmuxServer) {
+    launch_flagless_json(server, "sleep 600");
+}
+
+/// Acceptance: in an owned window, the pane gone at retile — a flagless `launch`
+/// exits 0 with the pane-gone result.
+#[cfg(feature = "test-fixtures")]
+#[test]
+fn flagless_launch_succeeds_when_the_pane_is_gone_at_retile() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    own_the_harness_window(&server);
+    let config = AgentsConfig::new();
+    let state = install_step_fault(&config, PlacementStep::Retile, StepFault::PaneGone);
+
+    let out = server.cli_env_path(
+        &["launch", "--cmd", "sleep 600", "--format", "json"],
+        config.xdg(),
+        config.xdg(),
+    );
+
+    assert_pane_gone_json(
+        &server,
+        &out,
+        &state,
+        "flagless launch, pane gone at retile",
+    );
+}
+
+/// Acceptance: in an owned window, the pane gone at the `@tt-tiled` marker step — a
+/// flagless `launch` exits 0 with the pane-gone result.
+#[cfg(feature = "test-fixtures")]
+#[test]
+fn flagless_launch_succeeds_when_the_pane_is_gone_at_the_tiled_marker() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    own_the_harness_window(&server);
+    let config = AgentsConfig::new();
+    let state = install_step_fault(&config, PlacementStep::Marker, StepFault::PaneGone);
+
+    let out = server.cli_env_path(
+        &["launch", "--cmd", "sleep 600", "--format", "json"],
+        config.xdg(),
+        config.xdg(),
+    );
+
+    assert_pane_gone_json(
+        &server,
+        &out,
+        &state,
+        "flagless launch, pane gone at marker",
+    );
+}
+
+/// Acceptance: the pane gone at measurement — `spawn-agent --format json` exits 0 with
+/// the pane-gone result.
+#[cfg(feature = "test-fixtures")]
+#[test]
+fn spawn_agent_json_succeeds_without_geometry_when_the_pane_is_gone_at_measurement() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    let config = fake_tui_agent_config();
+    let state = install_step_fault(&config, PlacementStep::Measurement, StepFault::PaneGone);
+
+    let out = server.cli_env_path(
+        &["spawn-agent", "tt-fake-tui", "--format", "json"],
+        config.xdg(),
+        config.xdg(),
+    );
+
+    let payload = assert_pane_gone_json(
+        &server,
+        &out,
+        &state,
+        "spawn-agent, pane gone at measurement",
+    );
+    assert_eq!(
+        payload.get("agent").and_then(|value| value.as_str()),
+        Some("tt-fake-tui"),
+        "spawn-agent JSON keeps its other fields; stdout: {}",
+        out.stdout
+    );
+}
+
+/// Run `launch --format json` with `fault` at `step` while the pane stays alive, and
+/// assert it fails.
+#[cfg(feature = "test-fixtures")]
+fn assert_launch_fails_with_live_pane_fault(step: PlacementStep, fault: StepFault) {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    let config = AgentsConfig::new();
+    let state = install_step_fault(&config, step, fault);
+
+    let out = server.cli_env_path(
+        &["launch", "--cmd", "sleep 600", "--format", "json"],
+        config.xdg(),
+        config.xdg(),
+    );
+
+    let pane = faulted_pane(&state, &format!("{fault:?} at {step:?}"));
+    assert!(
+        all_pane_ids(&server).contains(&pane),
+        "{fault:?} at {step:?}: the pane must still exist"
+    );
+    assert_ne!(
+        out.status, 0,
+        "{fault:?} at {step:?} with the pane alive must fail launch; stdout: {} stderr: {}",
+        out.stdout, out.stderr
+    );
+}
+
+/// Acceptance: a live pane whose measurement output cannot be parsed fails `launch`.
+#[cfg(feature = "test-fixtures")]
+#[test]
+fn launch_fails_when_the_measurement_output_cannot_be_parsed() {
+    assert_launch_fails_with_live_pane_fault(
+        PlacementStep::Measurement,
+        StepFault::UnparsableOutput,
+    );
+}
+
+/// Acceptance: an injected measurement error with the pane alive fails `launch`.
+#[cfg(feature = "test-fixtures")]
+#[test]
+fn launch_fails_on_an_injected_measurement_error_with_the_pane_alive() {
+    assert_launch_fails_with_live_pane_fault(PlacementStep::Measurement, StepFault::InjectedError);
+}
+
+/// Acceptance: an injected registration error with the pane alive fails `launch`.
+#[cfg(feature = "test-fixtures")]
+#[test]
+fn launch_fails_on_an_injected_registration_error_with_the_pane_alive() {
+    assert_launch_fails_with_live_pane_fault(PlacementStep::Registration, StepFault::InjectedError);
+}
