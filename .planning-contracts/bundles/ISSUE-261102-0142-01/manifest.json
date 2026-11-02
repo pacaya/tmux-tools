@@ -1,0 +1,21 @@
+{
+  "approval_id": "dispatch-20261102T042102Z",
+  "approval_object": "approval.json",
+  "approval_sha256": "7695b97deca8e7673784f3940601d09ada38d8b275766a190dbbddb8990a27f5",
+  "entries": [
+    {
+      "approved_revision": "2d0d571826dfbe3b490d56ed4855f82cf3161312",
+      "bytes": 3267,
+      "object": "objects/15a438ec7d091222f2fb5a850cae29e0956cd4427f42006cf1f9af69e4b3f43d.md",
+      "origin": {
+        "path": "docs/issues/ISSUE-261102-0142-01-timeout-bounds-grandchild-pipes.md",
+        "repository": "tmux-tools",
+        "revision": "6b8de9d484e85f7f6875436a3f364cd1517cdbd9"
+      },
+      "role": "issue",
+      "sha256": "15a438ec7d091222f2fb5a850cae29e0956cd4427f42006cf1f9af69e4b3f43d",
+      "target": "tmux-tools:ISSUE-261102-0142-01"
+    }
+  ],
+  "schema": "planning-contracts.bundle.v1"
+}
