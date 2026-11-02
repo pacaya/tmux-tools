@@ -22,15 +22,13 @@ use it pass when they run in parallel. Only test code changes.
 **Required sources:** none — standalone issue.
 
 **Current observable:** `cargo test -p tmux-tools-core --lib` sometimes fails one of the tests that use
-the helper (for example `load_with_user_path_deep_merges_user_agent_over_builtin` or
-`user_ready_regex_on_builtin_binds_to_pre_surface_rendering`) with `Os { code: 2, kind: NotFound }`.
-The helper names the file from the process id and `SystemTime::now().as_nanos()`. On macOS that clock
-has a resolution of 1 µs, so two tests that call the helper in the same microsecond get the same path,
-and the first test to finish removes the file the other test still reads.
+the helper with `Os { code: 2, kind: NotFound }`.
 
 **Required change:**
 - The helper's path is unique per call within the process and does not depend on the clock alone (for
   example, add a process-wide atomic counter to the name).
+- The helper's paths also stay distinct from paths made by other test processes running at the same
+  time in the same `std::env::temp_dir()` (keep the process id in the name).
 - The helper keeps its signature and its location under `std::env::temp_dir()`; its callers do not
   change.
 
