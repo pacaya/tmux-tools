@@ -2,7 +2,7 @@
 id: ISSUE-261102-0802-01
 kind: issue
 category: bug
-status: needs-triage
+status: ready-for-agent
 brief_contract: agent-brief.v3
 context: tmux-tools
 summary: The core agents tests' temp-file helper gives two parallel tests the same path, so one test deletes the other's file
