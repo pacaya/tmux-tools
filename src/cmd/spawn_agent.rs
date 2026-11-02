@@ -53,7 +53,7 @@ struct SpawnAgentJson<'a> {
     agent: &'a str,
     access: Option<&'a str>,
     surface: &'a str,
-    name: Option<&'a str>,
+    name: &'a str,
     pane_id: &'a str,
     binary: &'a str,
     argv: &'a [String],
@@ -110,9 +110,8 @@ pub fn run(args: &SpawnAgentArgs) -> Result<()> {
     if let Some(access) = &args.access {
         names::set(&pane_id, names::KEY_ACCESS, access)?;
     }
-    if let Some(name) = &args.name {
-        names::set(&pane_id, names::KEY_NAME, name)?;
-    }
+    // Derive from the agent's resolved command (its binary), never the keep-alive wrap.
+    let name = names::set_name_or_derive(&pane_id, args.name.as_deref(), &binary)?;
     names::set(&pane_id, names::KEY_LAUNCHED_AT, &launched_at)?;
     if let Ok(cwd) = std::env::current_dir() {
         names::set(&pane_id, names::KEY_CWD, &cwd.to_string_lossy())?;
@@ -120,6 +119,7 @@ pub fn run(args: &SpawnAgentArgs) -> Result<()> {
 
     render_output(
         args,
+        &name,
         &pane_id,
         &binary,
         &argv,
@@ -176,8 +176,10 @@ pub(crate) fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
+/// Print the spawn result; `name` is the registered `@tt-name`, not the flag value.
 fn render_output(
     args: &SpawnAgentArgs,
+    name: &str,
     pane_id: &str,
     binary: &str,
     argv: &[String],
@@ -190,7 +192,7 @@ fn render_output(
             args.agent,
             display_value(args.access.as_deref()),
             surface,
-            display_value(args.name.as_deref()),
+            name,
             pane_id
         ),
         Format::Json => {
@@ -198,7 +200,7 @@ fn render_output(
                 agent: &args.agent,
                 access: args.access.as_deref(),
                 surface,
-                name: args.name.as_deref(),
+                name,
                 pane_id,
                 binary,
                 argv,

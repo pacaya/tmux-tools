@@ -62,7 +62,7 @@ pub(crate) enum Layout {
 
 #[derive(Serialize)]
 struct LaunchJson<'a> {
-    name: Option<&'a str>,
+    name: &'a str,
     pane_id: &'a str,
     launched_at: &'a str,
 }
@@ -98,15 +98,18 @@ pub fn run(args: &LaunchArgs) -> Result<()> {
     )?;
     let launched_at = rfc3339_utc_now()?;
 
-    if let Some(name) = &args.name {
-        names::set(&pane_id, names::KEY_NAME, name)?;
-    }
+    // Derive from the user's command, never from the keep-alive wrap.
+    let name = names::set_name_or_derive(
+        &pane_id,
+        args.name.as_deref(),
+        names::first_command_word(&args.cmd),
+    )?;
     names::set(&pane_id, names::KEY_LAUNCHED_AT, &launched_at)?;
     if let Ok(cwd) = std::env::current_dir() {
         names::set(&pane_id, names::KEY_CWD, &cwd.to_string_lossy())?;
     }
 
-    render_output(args, &pane_id, &launched_at)
+    render_output(args, &name, &pane_id, &launched_at)
 }
 
 /// Resolve the caller's `--target`/`--session`/`--window` flags into a
@@ -427,19 +430,14 @@ fn private_session_name() -> String {
     format!("tt-pending-{}-{nanos}", std::process::id())
 }
 
-fn render_output(args: &LaunchArgs, pane_id: &str, launched_at: &str) -> Result<()> {
+/// Print the launch result; `name` is the registered `@tt-name`, not the flag value.
+fn render_output(args: &LaunchArgs, name: &str, pane_id: &str, launched_at: &str) -> Result<()> {
     match args.common.format {
-        Format::Concise => {
-            if let Some(name) = &args.name {
-                println!("name={name} pane={pane_id}");
-            } else {
-                println!("pane={pane_id}");
-            }
-        }
+        Format::Concise => println!("name={name} pane={pane_id}"),
         Format::Raw => println!("{pane_id}"),
         Format::Json => {
             let output = LaunchJson {
-                name: args.name.as_deref(),
+                name,
                 pane_id,
                 launched_at,
             };

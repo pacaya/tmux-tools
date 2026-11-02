@@ -113,6 +113,8 @@ struct CliOptions<'a> {
     /// of the private server, for a test whose subject is resolution without
     /// `TMUX_PANE`.
     caller_session_without_pane: Option<&'a str>,
+    /// The CLI's working directory (default: the test process's own).
+    cwd: Option<&'a std::path::Path>,
 }
 
 /// Per-process counter for `tt-tests-<pid>-<n>` server labels.
@@ -388,6 +390,9 @@ impl IsolatedTmuxServer {
         command.env("PATH", path_dirs.join(":"));
         if let Some(xdg) = options.xdg {
             command.env("XDG_CONFIG_HOME", xdg);
+        }
+        if let Some(cwd) = options.cwd {
+            command.current_dir(cwd);
         }
         command
     }
@@ -7386,5 +7391,443 @@ fn interrupt_on_validated_hazardous_surface_with_malformed_regex_refuses() {
     assert!(
         keys_before_last_sentinel(&report).is_empty(),
         "a malformed hazardous surface must send no key"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// ISSUE-260802-0628-01 — every pane `launch` / `spawn-agent` creates carries a
+// non-empty `@tt-name`: the `--name` value, or one derived from the launched
+// command plus a random suffix.
+//
+// These tests deliberately carry no "tmux not on PATH" skip: when the behavior or
+// tmux is absent they fail.
+// ---------------------------------------------------------------------------
+
+/// The pane's user options as `tmux show-options -p -t <pane>` lists them.
+fn pane_user_options(server: &IsolatedTmuxServer, pane: &str) -> Vec<(String, String)> {
+    let out = server.tmux(&["show-options", "-p", "-t", pane]);
+    out.assert_success("show-options -p");
+    out.stdout
+        .lines()
+        .filter_map(|line| {
+            let (key, value) = line.split_once(' ').unwrap_or((line, ""));
+            key.starts_with('@')
+                .then(|| (key.to_owned(), value.trim_matches('"').to_owned()))
+        })
+        .collect()
+}
+
+/// The pane's `@tt-name` as `tmux show-options -p` reports it (empty when unset).
+fn registered_name(server: &IsolatedTmuxServer, pane: &str) -> String {
+    pane_user_options(server, pane)
+        .into_iter()
+        .find(|(key, _)| key == "@tt-name")
+        .map(|(_, value)| value)
+        .unwrap_or_default()
+}
+
+/// Every pane id on the server.
+fn all_pane_ids(server: &IsolatedTmuxServer) -> Vec<String> {
+    let out = server.tmux(&["list-panes", "-a", "-F", "#{pane_id}"]);
+    out.assert_success("list-panes -a");
+    out.stdout.lines().map(str::to_owned).collect()
+}
+
+/// Parse a spawning verb's `--format json` stdout into `(pane_id, name)`.
+fn json_pane_and_name(out: &CmdOutput) -> (String, serde_json::Value) {
+    let payload: serde_json::Value =
+        serde_json::from_str(out.stdout.trim()).expect("spawning verb JSON should parse");
+    let pane = payload
+        .get("pane_id")
+        .and_then(|value| value.as_str())
+        .expect("JSON should carry pane_id")
+        .to_owned();
+    let name = payload.get("name").cloned().unwrap_or_default();
+    (pane, name)
+}
+
+/// The `key=value` field of a concise output line.
+fn concise_field(out: &CmdOutput, key: &str) -> Option<String> {
+    let prefix = format!("{key}=");
+    out.stdout
+        .split_whitespace()
+        .find_map(|field| field.strip_prefix(&prefix).map(str::to_owned))
+}
+
+/// Flagless `launch --cmd <cmd> --format json`; returns the created pane id.
+fn launch_flagless_json(server: &IsolatedTmuxServer, cmd: &str) -> String {
+    let out = server.cli(&["launch", "--cmd", cmd, "--format", "json"]);
+    out.assert_success("flagless launch");
+    json_pane_and_name(&out).0
+}
+
+/// Kill `target` from the creating cwd without `--any` and assert exactly that pane
+/// left the server.
+fn assert_guarded_kill_removes_exactly(server: &IsolatedTmuxServer, target: &str, pane: &str) {
+    let before = all_pane_ids(server);
+    assert!(before.contains(&pane.to_owned()), "pane {pane} must exist");
+    let killed = server.cli(&["kill", "--target", target]);
+    killed.assert_success("kill --target <derived name> without --any");
+    let expected: Vec<String> = before.into_iter().filter(|p| p != pane).collect();
+    assert_eq!(
+        all_pane_ids(server),
+        expected,
+        "kill --target {target} must remove exactly pane {pane}"
+    );
+}
+
+#[test]
+fn flagless_launch_registers_a_non_empty_name() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+
+    let pane = launch_flagless_json(&server, "sh");
+
+    assert!(
+        !registered_name(&server, &pane).is_empty(),
+        "a flagless launch pane must carry a non-empty @tt-name; options: {:?}",
+        pane_user_options(&server, &pane)
+    );
+}
+
+#[test]
+fn flagless_launch_name_derives_from_the_command_first_word() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+
+    let pane = launch_flagless_json(&server, "cargo --version");
+
+    let name = registered_name(&server, &pane);
+    assert!(
+        name.starts_with("cargo-"),
+        "a flagless `launch --cmd 'cargo --version'` must be named cargo-<suffix>; got {name:?}"
+    );
+}
+
+#[test]
+fn flagless_launch_registers_name_launched_at_and_cwd() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+
+    let pane = launch_flagless_json(&server, "sleep 600");
+
+    let keys: Vec<String> = pane_user_options(&server, &pane)
+        .into_iter()
+        .map(|(key, _)| key)
+        .collect();
+    for key in ["@tt-name", "@tt-launched-at", "@tt-cwd"] {
+        assert!(
+            keys.iter().any(|k| k == key),
+            "show-options -p must list {key} on a flagless launch pane; got {keys:?}"
+        );
+    }
+}
+
+#[test]
+fn flagless_launch_with_no_usable_first_word_uses_the_fixed_stem_and_resolves_by_name() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+
+    // `:` yields no letter or digit, so the stem falls back to `pane`.
+    let pane = launch_flagless_json(&server, ": ; sleep 600");
+
+    let name = registered_name(&server, &pane);
+    assert!(
+        name.starts_with("pane-"),
+        "a first word without a letter or digit must give the fixed stem; got {name:?}"
+    );
+    assert_guarded_kill_removes_exactly(&server, &name, &pane);
+}
+
+#[test]
+fn flagless_launch_json_and_concise_report_the_registered_name() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+
+    let json = server.cli(&["launch", "--cmd", "sleep 600", "--format", "json"]);
+    json.assert_success("flagless launch --format json");
+    let (pane, name) = json_pane_and_name(&json);
+    let registered = registered_name(&server, &pane);
+    assert!(!registered.is_empty(), "the pane must carry @tt-name");
+    assert_eq!(
+        name.as_str(),
+        Some(registered.as_str()),
+        "launch JSON name must equal the pane's @tt-name; stdout: {}",
+        json.stdout
+    );
+
+    let concise = server.cli(&["launch", "--cmd", "sleep 600"]);
+    concise.assert_success("flagless concise launch");
+    let pane = concise_field(&concise, "pane").expect("concise output must carry pane=");
+    let registered = registered_name(&server, &pane);
+    assert!(!registered.is_empty(), "the pane must carry @tt-name");
+    assert_eq!(
+        concise_field(&concise, "name"),
+        Some(registered),
+        "concise launch must print name=<@tt-name>; stdout: {}",
+        concise.stdout
+    );
+}
+
+#[test]
+fn three_concurrent_flagless_launches_get_distinct_names() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+
+    let children: Vec<_> = (0..3)
+        .map(|_| {
+            server
+                .command_with_cli_env(BIN, &CliOptions::default())
+                .args(["launch", "--cmd", "sleep 600", "--format", "json"])
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .expect("spawn concurrent launch")
+        })
+        .collect();
+    let outputs: Vec<CmdOutput> = children
+        .into_iter()
+        .enumerate()
+        .map(|(i, child)| {
+            wait_for_child(
+                child,
+                &format!("concurrent launch {i}"),
+                Duration::from_secs(60),
+            )
+        })
+        .collect();
+
+    let mut names = Vec::new();
+    for (i, out) in outputs.iter().enumerate() {
+        out.assert_success(&format!("concurrent launch {i}"));
+        let (pane, _) = json_pane_and_name(out);
+        let name = registered_name(&server, &pane);
+        assert!(!name.is_empty(), "concurrent launch {i} pane must be named");
+        names.push(name);
+    }
+    names.sort();
+    names.dedup();
+    assert_eq!(
+        names.len(),
+        3,
+        "three concurrent same-command launches must get pairwise distinct names: {names:?}"
+    );
+}
+
+/// A per-test working directory under the server's private tmpdir, canonicalized
+/// (on macOS `/tmp` is a symlink, and the CLI records the resolved cwd).
+fn private_cwd(server: &IsolatedTmuxServer, leaf: &str) -> std::path::PathBuf {
+    let dir = server.tmpdir().join(leaf);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::canonicalize(&dir).unwrap()
+}
+
+fn cli_in(server: &IsolatedTmuxServer, args: &[&str], cwd: &std::path::Path) -> CmdOutput {
+    server.run_cli(
+        args,
+        CliOptions {
+            cwd: Some(cwd),
+            ..CliOptions::default()
+        },
+    )
+}
+
+#[test]
+fn kill_without_any_acts_on_a_flagless_launch_pane_from_the_creating_cwd() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    let cwd_a = private_cwd(&server, "cwd-a");
+
+    let launched = cli_in(
+        &server,
+        &["launch", "--cmd", "sleep 600", "--format", "json"],
+        &cwd_a,
+    );
+    launched.assert_success("flagless launch from cwd A");
+    let (pane, _) = json_pane_and_name(&launched);
+
+    let killed = cli_in(&server, &["kill", "--target", &pane], &cwd_a);
+    killed.assert_success("kill --target <pane id> from cwd A without --any");
+    assert!(
+        !all_pane_ids(&server).contains(&pane),
+        "pane {pane} must be gone after kill"
+    );
+}
+
+#[test]
+fn kill_from_another_cwd_is_denied_naming_the_creating_cwd() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    let cwd_a = private_cwd(&server, "cwd-a");
+    let cwd_b = private_cwd(&server, "cwd-b");
+
+    let launched = cli_in(
+        &server,
+        &["launch", "--cmd", "sleep 600", "--format", "json"],
+        &cwd_a,
+    );
+    launched.assert_success("flagless launch from cwd A");
+    let (pane, _) = json_pane_and_name(&launched);
+
+    let killed = cli_in(&server, &["kill", "--target", &pane], &cwd_b);
+    assert_ne!(killed.status, 0, "kill from cwd B must be denied");
+    let cwd_a = cwd_a.to_string_lossy();
+    assert!(
+        killed
+            .stderr
+            .contains(&format!("owned by another cwd ({cwd_a})")),
+        "the denial must name cwd A as the other cwd; stderr: {}",
+        killed.stderr
+    );
+    assert!(
+        !killed.stderr.contains("not created by tmux-tools"),
+        "the denial must not claim the pane is foreign; stderr: {}",
+        killed.stderr
+    );
+    assert!(
+        all_pane_ids(&server).contains(&pane),
+        "pane {pane} must survive"
+    );
+}
+
+#[test]
+fn explicit_name_collision_and_raw_output_are_preserved() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    let name = format!("explicit-{}", std::process::id());
+
+    let first = server.cli(&[
+        "launch",
+        "--cmd",
+        "sleep 600",
+        "--name",
+        &name,
+        "--format",
+        "json",
+    ]);
+    first.assert_success("launch --name");
+    let (pane, reported) = json_pane_and_name(&first);
+    assert_eq!(
+        registered_name(&server, &pane),
+        name,
+        "--name registers exactly"
+    );
+    assert_eq!(reported.as_str(), Some(name.as_str()));
+
+    let second = server.cli(&["launch", "--cmd", "sleep 600", "--name", &name]);
+    assert_ne!(second.status, 0, "a second launch --name {name} must fail");
+    assert!(
+        second
+            .stderr
+            .contains(&format!("name '{name}' is already used by pane {pane}")),
+        "the existing name-collision error must be reported; stderr: {}",
+        second.stderr
+    );
+
+    let raw = server.cli(&["launch", "--cmd", "sleep 600", "--format", "raw"]);
+    raw.assert_success("flagless launch --format raw");
+    let pane_id = raw.stdout.strip_suffix('\n').unwrap_or_default();
+    assert!(
+        pane_id.starts_with('%')
+            && pane_id.len() > 1
+            && pane_id[1..].chars().all(|c| c.is_ascii_digit()),
+        "raw stdout must be exactly the bare pane id and a newline; got {:?}",
+        raw.stdout
+    );
+}
+
+/// The registry the auto-name `spawn-agent` criteria use: one agent, `tt-fake-tui`,
+/// whose binary is the fixture (no installed vendor agent).
+#[cfg(feature = "test-fixtures")]
+fn fake_tui_agent_config() -> AgentsConfig {
+    let config = AgentsConfig::new();
+    config.write_agents_toml(&format!(
+        r#"
+[tt-fake-tui]
+binary = "{fake}"
+
+[tt-fake-tui.access.default]
+args = []
+"#,
+        fake = FAKE_TUI_BIN
+    ));
+    config
+}
+
+#[cfg(feature = "test-fixtures")]
+#[test]
+fn flagless_spawn_agent_registers_a_non_empty_name() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    let config = fake_tui_agent_config();
+
+    let spawned = server.cli_env(
+        &["spawn-agent", "tt-fake-tui", "--bare", "--format", "json"],
+        config.xdg(),
+    );
+    spawned.assert_success("flagless spawn-agent");
+    let (pane, _) = json_pane_and_name(&spawned);
+
+    assert!(
+        !registered_name(&server, &pane).is_empty(),
+        "a flagless spawn-agent pane must carry a non-empty @tt-name; options: {:?}",
+        pane_user_options(&server, &pane)
+    );
+}
+
+#[cfg(feature = "test-fixtures")]
+#[test]
+fn flagless_spawn_agent_name_derives_from_the_agent_command_and_resolves_by_name() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    let config = fake_tui_agent_config();
+
+    let spawned = server.cli_env(
+        &["spawn-agent", "tt-fake-tui", "--bare", "--format", "json"],
+        config.xdg(),
+    );
+    spawned.assert_success("flagless spawn-agent");
+    let (pane, _) = json_pane_and_name(&spawned);
+
+    let name = registered_name(&server, &pane);
+    assert!(
+        name.starts_with("tt-fake-tui-"),
+        "the name must derive from the agent binary's basename; got {name:?}"
+    );
+    assert_guarded_kill_removes_exactly(&server, &name, &pane);
+}
+
+#[cfg(feature = "test-fixtures")]
+#[test]
+fn flagless_spawn_agent_json_and_concise_report_the_registered_name() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    let config = fake_tui_agent_config();
+
+    let json = server.cli_env(
+        &["spawn-agent", "tt-fake-tui", "--bare", "--format", "json"],
+        config.xdg(),
+    );
+    json.assert_success("flagless spawn-agent --format json");
+    let (pane, name) = json_pane_and_name(&json);
+    let registered = registered_name(&server, &pane);
+    assert!(!registered.is_empty(), "the pane must carry @tt-name");
+    assert_eq!(
+        name.as_str(),
+        Some(registered.as_str()),
+        "spawn-agent JSON name must equal the pane's @tt-name; stdout: {}",
+        json.stdout
+    );
+
+    let concise = server.cli_env(&["spawn-agent", "tt-fake-tui", "--bare"], config.xdg());
+    concise.assert_success("flagless concise spawn-agent");
+    let pane = concise_field(&concise, "pane").expect("concise output must carry pane=");
+    let registered = registered_name(&server, &pane);
+    assert!(!registered.is_empty(), "the pane must carry @tt-name");
+    assert_eq!(
+        concise_field(&concise, "name"),
+        Some(registered),
+        "concise spawn-agent must print name=<@tt-name>; stdout: {}",
+        concise.stdout
     );
 }
