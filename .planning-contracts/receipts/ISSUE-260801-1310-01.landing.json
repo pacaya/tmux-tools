@@ -1,0 +1,7 @@
+{
+  "implementation_revision": "b4d70cd8ba9004c16962ef02978dd2b75322d642",
+  "issue": "tmux-tools:ISSUE-260801-1310-01",
+  "landed_revision": "7b5b281316b8427d4e8596dd12d96441b11a9d06",
+  "receipt_id": "receipt-20261102T0141Z",
+  "schema": "planning-contracts.landing-binding.v1"
+}
