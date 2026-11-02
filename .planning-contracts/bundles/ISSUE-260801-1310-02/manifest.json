@@ -1,0 +1,34 @@
+{
+  "approval_id": "dispatch-20261102T003513Z",
+  "approval_object": "approval.json",
+  "approval_sha256": "04601cbd4c02053c0c7c3858ba2c7215d1e734f4e545603c3f091650fded92b8",
+  "entries": [
+    {
+      "approved_revision": "0d90a228d92107e7460abb10ca3a54ca94bea357",
+      "bytes": 4582,
+      "object": "objects/fcbc9eaf699ea73fffcdd19ac010caf0bd5040bb39f02e20940fcc8c11eaf9ba.md",
+      "origin": {
+        "path": "docs/issues/ISSUE-260801-1310-02-shared-ownership-predicate.md",
+        "repository": "tmux-tools",
+        "revision": "3fbe302f61aee231a6e5f1493531e30feb793b94"
+      },
+      "role": "issue",
+      "sha256": "fcbc9eaf699ea73fffcdd19ac010caf0bd5040bb39f02e20940fcc8c11eaf9ba",
+      "target": "tmux-tools:ISSUE-260801-1310-02"
+    },
+    {
+      "approved_revision": "3fbe302f61aee231a6e5f1493531e30feb793b94",
+      "bytes": 56674,
+      "object": "objects/3b8142ee6d316689b26ed647da69b05c0433fb31490b3891a990da6d8e03d31b.md",
+      "origin": {
+        "path": "docs/prd/PRD-260801-0656-01-auto-tile-layout.md",
+        "repository": "tmux-tools",
+        "revision": "3fbe302f61aee231a6e5f1493531e30feb793b94"
+      },
+      "role": "source",
+      "sha256": "3b8142ee6d316689b26ed647da69b05c0433fb31490b3891a990da6d8e03d31b",
+      "target": "tmux-tools:PRD-260801-0656-01"
+    }
+  ],
+  "schema": "planning-contracts.bundle.v1"
+}
