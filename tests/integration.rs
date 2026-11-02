@@ -115,6 +115,10 @@ struct CliOptions<'a> {
     caller_session_without_pane: Option<&'a str>,
     /// The CLI's working directory (default: the test process's own).
     cwd: Option<&'a std::path::Path>,
+    /// Inside-tmux mode only: point `TMUX_PANE` at this pane of the private server
+    /// and `TMUX` at its session, for a test whose calling pane is not the harness
+    /// pane.
+    caller_pane: Option<&'a str>,
 }
 
 /// Per-process counter for `tt-tests-<pid>-<n>` server labels.
@@ -267,7 +271,7 @@ impl IsolatedTmuxServer {
         )
     }
 
-    /// The `TMUX` value naming this server and `session`.
+    /// The `TMUX` value naming this server and `session` (a session or pane target).
     fn tmux_env_for_session(&self, session: &str) -> String {
         let out = self.tmux(&["display-message", "-p", "-t", session, "#{session_id}"]);
         out.assert_success("query session id");
@@ -365,13 +369,22 @@ impl IsolatedTmuxServer {
         let mut command = Command::new(program);
         command.env("TMUX_TMPDIR", &self.tmpdir);
         match self.mode {
-            CliMode::InsideTmux => match options.caller_session_without_pane {
-                Some(session) => {
+            CliMode::InsideTmux => match (options.caller_session_without_pane, options.caller_pane)
+            {
+                (Some(_), Some(_)) => {
+                    panic!("caller_session_without_pane and caller_pane are exclusive")
+                }
+                (Some(session), None) => {
                     command
                         .env("TMUX", self.tmux_env_for_session(session))
                         .env_remove("TMUX_PANE");
                 }
-                None => {
+                (None, Some(pane)) => {
+                    command
+                        .env("TMUX", self.tmux_env_for_session(pane))
+                        .env("TMUX_PANE", pane);
+                }
+                (None, None) => {
                     command
                         .env("TMUX", self.tmux_env())
                         .env("TMUX_PANE", &self.pane);
@@ -381,6 +394,10 @@ impl IsolatedTmuxServer {
                 assert!(
                     options.caller_session_without_pane.is_none(),
                     "resolution without TMUX_PANE needs inside-tmux mode"
+                );
+                assert!(
+                    options.caller_pane.is_none(),
+                    "a calling pane needs inside-tmux mode"
                 );
                 path_dirs.push(self.bin_dir.display().to_string());
                 command.env_remove("TMUX").env_remove("TMUX_PANE");
@@ -476,6 +493,19 @@ impl IsolatedTmuxServer {
             CliOptions {
                 timeout: Some(timeout),
                 caller_session_without_pane: Some(session),
+                ..CliOptions::default()
+            },
+        )
+    }
+
+    /// Run the CLI with `pane` as the calling pane: `TMUX_PANE` is `pane` and `TMUX`
+    /// names its session. `xdg`, when given, injects an agent registry.
+    fn cli_from_pane(&self, args: &[&str], pane: &str, xdg: Option<&std::path::Path>) -> CmdOutput {
+        self.run_cli(
+            args,
+            CliOptions {
+                xdg,
+                caller_pane: Some(pane),
                 ..CliOptions::default()
             },
         )
@@ -1623,6 +1653,369 @@ fn launch_targets_calling_pane_not_most_recent_client() {
         "new pane should land in harness session ({harness_session}), not {actual_session} \
          (decoy was {decoy_session}) — regression for $TMUX_PANE-based targeting"
     );
+}
+
+// ---------------------------------------------------------------------------
+// ISSUE-260801-1310-03 — new-window placement lands in the destination session.
+//
+// `--split window` (from the calling pane, or with `--target <pane>`) and
+// `--session`/`--window` without `--target` create a new window in the
+// destination session for every session name, including tmux's numeric ones.
+// ---------------------------------------------------------------------------
+
+/// Create a detached session `name` on the private server and return its pane id.
+fn new_session_pane(server: &IsolatedTmuxServer, name: &str) -> String {
+    let out = server.tmux(&[
+        "new-session",
+        "-d",
+        "-s",
+        name,
+        "-P",
+        "-F",
+        "#{pane_id}",
+        "sleep",
+        "86400",
+    ]);
+    out.assert_success(&format!("create session {name}"));
+    let pane = out.stdout.trim().to_owned();
+    assert!(pane.starts_with('%'), "pane id must look like %N: {pane:?}");
+    pane
+}
+
+/// One tmux format of `target` on the private server.
+fn tmux_format(server: &IsolatedTmuxServer, target: &str, format: &str) -> String {
+    let out = server.tmux(&["display-message", "-p", "-t", target, format]);
+    out.assert_success(&format!("display {format} for {target}"));
+    out.stdout.trim().to_owned()
+}
+
+/// The window indexes of the session whose exact name is `session`.
+fn window_indexes(server: &IsolatedTmuxServer, session: &str) -> Vec<String> {
+    let target = format!("={session}");
+    let out = server.tmux(&["list-windows", "-t", &target, "-F", "#{window_index}"]);
+    out.assert_success(&format!("list windows of {session}"));
+    out.stdout.lines().map(str::to_owned).collect()
+}
+
+/// Every pane id on the private server.
+fn all_pane_ids(server: &IsolatedTmuxServer) -> Vec<String> {
+    let out = server.tmux(&["list-panes", "-a", "-F", "#{pane_id}"]);
+    out.assert_success("list all panes");
+    out.stdout.lines().map(str::to_owned).collect()
+}
+
+/// The `pane_id` of a successful `--format json` launch.
+fn launched_pane_id(out: &CmdOutput, ctx: &str) -> String {
+    out.assert_success(ctx);
+    serde_json::from_str::<serde_json::Value>(out.stdout.trim())
+        .unwrap_or_else(|e| panic!("{ctx}: JSON should parse ({e}): {:?}", out.stdout))
+        .get("pane_id")
+        .and_then(|value| value.as_str())
+        .unwrap_or_else(|| panic!("{ctx}: JSON should carry pane_id: {:?}", out.stdout))
+        .to_owned()
+}
+
+/// `launch --cmd 'sleep 600' --name <name> --format json` plus `extra`.
+fn launch_args<'a>(name: &'a str, extra: &[&'a str]) -> Vec<&'a str> {
+    let mut args = vec![
+        "launch",
+        "--cmd",
+        "sleep 600",
+        "--name",
+        name,
+        "--format",
+        "json",
+    ];
+    args.extend_from_slice(extra);
+    args
+}
+
+/// Acceptance: from inside tmux, `--split window` with no target creates a new window
+/// in the calling pane's (non-numeric) session.
+#[test]
+fn split_window_from_calling_pane_lands_in_callers_session() {
+    let _serial = serial_guard();
+
+    if Command::new("tmux").arg("-V").output().is_err() {
+        eprintln!("SKIP: tmux not on PATH");
+        return;
+    }
+
+    let server = IsolatedTmuxServer::start_inside();
+    let name = format!("split-window-caller-{}", std::process::id());
+
+    let launched = server.cli(&launch_args(&name, &["--split", "window"]));
+    let pane = launched_pane_id(&launched, "launch --split window from the calling pane");
+
+    assert_ne!(
+        tmux_format(&server, &pane, "#{window_id}"),
+        tmux_format(&server, server.pane(), "#{window_id}"),
+        "--split window must create a new window, not split the calling pane's"
+    );
+    assert_eq!(
+        tmux_format(&server, &pane, "#{session_id}"),
+        tmux_format(&server, server.pane(), "#{session_id}"),
+        "the new window must be in the calling pane's session"
+    );
+}
+
+/// Acceptance: a calling pane in a numeric-named session (`0`, which already has
+/// window `0`) gets its new window in that session.
+#[test]
+fn split_window_from_calling_pane_in_numeric_session_lands_in_callers_session() {
+    let _serial = serial_guard();
+
+    if Command::new("tmux").arg("-V").output().is_err() {
+        eprintln!("SKIP: tmux not on PATH");
+        return;
+    }
+
+    let server = IsolatedTmuxServer::start_inside();
+    let calling = new_session_pane(&server, "0");
+    assert_eq!(
+        window_indexes(&server, "0"),
+        ["0"],
+        "session 0 must have window 0"
+    );
+    let name = format!("split-window-numeric-caller-{}", std::process::id());
+
+    let launched =
+        server.cli_from_pane(&launch_args(&name, &["--split", "window"]), &calling, None);
+    let pane = launched_pane_id(&launched, "launch --split window from a pane in session 0");
+
+    assert_ne!(
+        tmux_format(&server, &pane, "#{window_id}"),
+        tmux_format(&server, &calling, "#{window_id}"),
+        "--split window must create a new window, not split the calling pane's"
+    );
+    assert_eq!(
+        tmux_format(&server, &pane, "#{session_id}"),
+        tmux_format(&server, &calling, "#{session_id}"),
+        "the new window must be in the calling pane's session 0"
+    );
+}
+
+/// Acceptance: `--target <pane> --split window` with the target in session `0` (which
+/// has window `0`) and the caller elsewhere lands in the target pane's session.
+#[test]
+fn split_window_with_target_in_numeric_session_lands_in_targets_session() {
+    let _serial = serial_guard();
+
+    if Command::new("tmux").arg("-V").output().is_err() {
+        eprintln!("SKIP: tmux not on PATH");
+        return;
+    }
+
+    let server = IsolatedTmuxServer::start_inside();
+    let target = new_session_pane(&server, "0");
+    assert_eq!(
+        window_indexes(&server, "0"),
+        ["0"],
+        "session 0 must have window 0"
+    );
+    assert_ne!(
+        tmux_format(&server, server.pane(), "#{session_id}"),
+        tmux_format(&server, &target, "#{session_id}"),
+        "the caller must not be in the target's session"
+    );
+    let name = format!("split-window-numeric-target-{}", std::process::id());
+
+    let launched = server.cli(&launch_args(
+        &name,
+        &["--target", &target, "--split", "window"],
+    ));
+    let pane = launched_pane_id(&launched, "launch --target <pane in 0> --split window");
+
+    assert_eq!(
+        tmux_format(&server, &pane, "#{session_id}"),
+        tmux_format(&server, &target, "#{session_id}"),
+        "the new window must be in the target pane's session 0"
+    );
+}
+
+/// Acceptance: `--target <pane> --split window` with the target in a non-numeric
+/// session lands in the target pane's session.
+#[test]
+fn split_window_with_target_in_named_session_lands_in_targets_session() {
+    let _serial = serial_guard();
+
+    if Command::new("tmux").arg("-V").output().is_err() {
+        eprintln!("SKIP: tmux not on PATH");
+        return;
+    }
+
+    let server = IsolatedTmuxServer::start_inside();
+    let pid = std::process::id();
+    let target = new_session_pane(&server, &format!("tt-target-{pid}"));
+    let name = format!("split-window-named-target-{pid}");
+
+    let launched = server.cli(&launch_args(
+        &name,
+        &["--target", &target, "--split", "window"],
+    ));
+    let pane = launched_pane_id(
+        &launched,
+        "launch --target <named-session pane> --split window",
+    );
+
+    assert_eq!(
+        tmux_format(&server, &pane, "#{session_id}"),
+        tmux_format(&server, &target, "#{session_id}"),
+        "the new window must be in the target pane's session"
+    );
+}
+
+/// Acceptance: `--session 0 --split window` with no `--target`, where session `0`
+/// already has window `0`, lands in session `0`.
+#[test]
+fn split_window_with_numeric_session_scope_lands_in_scoped_session() {
+    let _serial = serial_guard();
+
+    if Command::new("tmux").arg("-V").output().is_err() {
+        eprintln!("SKIP: tmux not on PATH");
+        return;
+    }
+
+    let server = IsolatedTmuxServer::start_inside();
+    let scoped = new_session_pane(&server, "0");
+    assert_eq!(
+        window_indexes(&server, "0"),
+        ["0"],
+        "session 0 must have window 0"
+    );
+    let name = format!("split-window-numeric-scope-{}", std::process::id());
+
+    let launched = server.cli(&launch_args(
+        &name,
+        &["--session", "0", "--split", "window"],
+    ));
+    let pane = launched_pane_id(&launched, "launch --session 0 --split window");
+
+    assert_eq!(
+        tmux_format(&server, &pane, "#{session_id}"),
+        tmux_format(&server, &scoped, "#{session_id}"),
+        "the new window must be in session 0"
+    );
+}
+
+/// Acceptance: `--session 0` with no `--split` and no `--target` (a new-window
+/// placement) adds exactly one window to session `0`, which already has window `0`.
+#[test]
+fn numeric_session_scope_without_split_adds_one_window_to_scoped_session() {
+    let _serial = serial_guard();
+
+    if Command::new("tmux").arg("-V").output().is_err() {
+        eprintln!("SKIP: tmux not on PATH");
+        return;
+    }
+
+    let server = IsolatedTmuxServer::start_inside();
+    let scoped = new_session_pane(&server, "0");
+    assert_eq!(
+        window_indexes(&server, "0"),
+        ["0"],
+        "session 0 must have window 0"
+    );
+    let name = format!("numeric-scope-no-split-{}", std::process::id());
+
+    let launched = server.cli(&launch_args(&name, &["--session", "0"]));
+    let pane = launched_pane_id(&launched, "launch --session 0");
+
+    assert_eq!(
+        window_indexes(&server, "0").len(),
+        2,
+        "session 0 must gain exactly one window"
+    );
+    assert_eq!(
+        tmux_format(&server, &pane, "#{session_id}"),
+        tmux_format(&server, &scoped, "#{session_id}"),
+        "the new window must be in session 0"
+    );
+}
+
+/// Acceptance: `--session 0 --window 1 --split window` with no `--target`, where
+/// session `0` has windows `0` and `1`, lands in session `0`.
+#[test]
+fn split_window_with_numeric_session_and_window_scope_lands_in_scoped_session() {
+    let _serial = serial_guard();
+
+    if Command::new("tmux").arg("-V").output().is_err() {
+        eprintln!("SKIP: tmux not on PATH");
+        return;
+    }
+
+    let server = IsolatedTmuxServer::start_inside();
+    let scoped = new_session_pane(&server, "0");
+    server
+        .tmux(&["new-window", "-d", "-t", "=0:1", "sleep", "86400"])
+        .assert_success("create window 1 in session 0");
+    assert_eq!(
+        window_indexes(&server, "0"),
+        ["0", "1"],
+        "session 0 must have windows 0 and 1"
+    );
+    let name = format!("split-window-numeric-window-scope-{}", std::process::id());
+
+    let launched = server.cli(&launch_args(
+        &name,
+        &["--session", "0", "--window", "1", "--split", "window"],
+    ));
+    let pane = launched_pane_id(&launched, "launch --session 0 --window 1 --split window");
+
+    assert_eq!(
+        tmux_format(&server, &pane, "#{session_id}"),
+        tmux_format(&server, &scoped, "#{session_id}"),
+        "the new window must be in session 0"
+    );
+}
+
+/// Required change: when the destination session cannot be resolved, a new-window
+/// placement exits non-zero, creates no pane, and names the failing operation rather
+/// than passing through tmux's `can't specify pane here`.
+#[test]
+fn new_window_placement_with_unresolvable_session_fails_without_a_pane() {
+    let _serial = serial_guard();
+
+    if Command::new("tmux").arg("-V").output().is_err() {
+        eprintln!("SKIP: tmux not on PATH");
+        return;
+    }
+
+    let server = IsolatedTmuxServer::start_inside();
+    let pid = std::process::id();
+    let missing = format!("tt-missing-{pid}");
+    let before = all_pane_ids(&server);
+
+    for (case, extra) in [
+        (
+            "split-window",
+            vec!["--session", missing.as_str(), "--split", "window"],
+        ),
+        ("no-split", vec!["--session", missing.as_str()]),
+    ] {
+        let name = format!("unresolvable-{case}-{pid}");
+        let out = server.cli(&launch_args(&name, &extra));
+        assert_ne!(
+            out.status, 0,
+            "{case}: an unresolvable destination session must fail; stdout: {:?}",
+            out.stdout
+        );
+        assert!(
+            out.stderr.contains("new-window placement failed"),
+            "{case}: the error must name the failing operation; stderr: {:?}",
+            out.stderr
+        );
+        assert!(
+            !out.stderr.contains("can't specify pane here"),
+            "{case}: the error must not be the tmux passthrough; stderr: {:?}",
+            out.stderr
+        );
+        assert_eq!(
+            all_pane_ids(&server),
+            before,
+            "{case}: a failed placement must create no pane"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -3005,6 +3398,64 @@ fn builtin_claude_no_surface_records_rich_pre_surface() {
         !spawn.stderr.contains("warning:"),
         "the shipped default needs no warning; stderr: {:?}",
         spawn.stderr
+    );
+}
+
+/// ISSUE-260801-1310-03 acceptance: `spawn-agent --split window` from a calling pane
+/// in a numeric-named session (`0`, which already has window `0`) creates the agent's
+/// window in that session and records `@tt-agent`. Uses `tt-fake-tui` as the agent
+/// binary, so no vendor agent is needed.
+#[cfg(feature = "test-fixtures")]
+#[test]
+fn spawn_agent_split_window_from_numeric_session_lands_in_callers_session() {
+    let _serial = serial_guard();
+
+    if Command::new("tmux").arg("-V").output().is_err() {
+        eprintln!("SKIP: tmux not on PATH");
+        return;
+    }
+
+    let server = IsolatedTmuxServer::start_inside();
+    let calling = new_session_pane(&server, "0");
+    assert_eq!(
+        window_indexes(&server, "0"),
+        ["0"],
+        "session 0 must have window 0"
+    );
+
+    let config = AgentsConfig::new();
+    config.write_agents_toml(&format!("[claude]\nbinary = \"{FAKE_TUI_BIN}\"\n"));
+    let name = format!("spawn-split-window-numeric-{}", std::process::id());
+
+    let spawn = server.cli_from_pane(
+        &[
+            "spawn-agent",
+            "claude",
+            "--split",
+            "window",
+            "--bare",
+            "--name",
+            &name,
+            "--format",
+            "json",
+        ],
+        &calling,
+        Some(config.xdg()),
+    );
+    let pane = launched_pane_id(
+        &spawn,
+        "spawn-agent --split window from a pane in session 0",
+    );
+
+    assert_eq!(
+        tmux_format(&server, &pane, "#{session_id}"),
+        tmux_format(&server, &calling, "#{session_id}"),
+        "the agent's window must be in the calling pane's session 0"
+    );
+    assert_eq!(
+        tmux_format(&server, &pane, "#{@tt-agent}"),
+        "claude",
+        "the created pane must carry @tt-agent"
     );
 }
 
@@ -7424,13 +7875,6 @@ fn registered_name(server: &IsolatedTmuxServer, pane: &str) -> String {
         .find(|(key, _)| key == "@tt-name")
         .map(|(_, value)| value)
         .unwrap_or_default()
-}
-
-/// Every pane id on the server.
-fn all_pane_ids(server: &IsolatedTmuxServer) -> Vec<String> {
-    let out = server.tmux(&["list-panes", "-a", "-F", "#{pane_id}"]);
-    out.assert_success("list-panes -a");
-    out.stdout.lines().map(str::to_owned).collect()
 }
 
 /// Parse a spawning verb's `--format json` stdout into `(pane_id, name)`.

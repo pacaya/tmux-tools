@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use clap::{Args, ValueEnum};
 use serde::Serialize;
 use std::env;
@@ -11,7 +11,8 @@ use crate::{util::rfc3339_utc_now, CommonArgs};
 pub enum LaunchTarget {
     /// Pane id to split (used when `split` is also supplied).
     SplitPane(String),
-    /// `session[:window]` (or session id) for new-window placement.
+    /// The destination session id for new-window placement, or the
+    /// `session[:window]` scope to split when a split direction is also supplied.
     WindowScope(String),
 }
 
@@ -117,7 +118,7 @@ pub fn run(args: &LaunchArgs) -> Result<()> {
 ///
 /// `target::resolve` always yields a pane id (`%N`). For split that's
 /// exactly what we want; for new-window we widen the scope to the
-/// containing session so tmux creates the window in the right place.
+/// containing session's id so tmux creates the window in the right place.
 pub(crate) fn resolve_launch_target(
     target: Option<&str>,
     session: Option<&str>,
@@ -130,28 +131,52 @@ pub(crate) fn resolve_launch_target(
         if split {
             return Ok(Some(LaunchTarget::SplitPane(pane_id)));
         }
-        let session = session_for_pane(&pane_id)?;
-        return Ok(Some(LaunchTarget::WindowScope(session)));
+        let session_id = destination_session_id(&pane_id, &format!("target pane {pane_id}"))?;
+        return Ok(Some(LaunchTarget::WindowScope(session_id)));
     }
 
     if session.is_some() || window.is_some() {
-        return Ok(Some(LaunchTarget::WindowScope(target::scoped_target(
-            session, window,
-        ))));
+        if split {
+            return Ok(Some(LaunchTarget::WindowScope(target::scoped_target(
+                session, window,
+            ))));
+        }
+        // A new window is placed in the scoped session; `--window` names no index for it.
+        let (scope, source) = match session {
+            Some(session) => (format!("{session}:"), format!("session {session:?}")),
+            None => (
+                target::managed_session_pane_target(),
+                format!("managed session {:?}", target::MANAGED_SESSION),
+            ),
+        };
+        let session_id = destination_session_id(&scope, &source)?;
+        return Ok(Some(LaunchTarget::WindowScope(session_id)));
     }
 
     Ok(None)
 }
 
-fn session_for_pane(pane_id: &str) -> Result<String> {
-    let args = ["display", "-p", "-t", pane_id, "#{session_name}"];
-    let session = tmux::run_checked(&args)?.trim().to_owned();
-    if session.is_empty() {
-        return Err(anyhow!(
-            "tmux failed to report session for pane {pane_id:?}"
-        ));
+/// The stable `#{session_id}` of the session that `pane_target` resolves to: the
+/// destination of a new-window placement. `new-window -t` accepts neither a pane id
+/// (tmux: `can't specify pane here`) nor a bare session name (tmux reads a numeric
+/// name such as `0` as a window index), so every new-window placement targets the
+/// session id, as the outside-tmux path does. `source` describes `pane_target` for
+/// the error.
+fn destination_session_id(pane_target: &str, source: &str) -> Result<String> {
+    let failed = || {
+        format!("new-window placement failed: cannot resolve the destination session of {source}")
+    };
+    let output = tmux::run(&["display-message", "-p", "-t", pane_target, "#{session_id}"])
+        .with_context(failed)?;
+    let session_id = output.stdout.trim();
+    if output.exit_code != 0 || session_id.is_empty() {
+        let reason = match output.stderr.trim() {
+            "" => "tmux reported no session id",
+            stderr => stderr,
+        };
+        return Err(anyhow!("{}: {reason}", failed()));
     }
-    Ok(session)
+    Ok(session_id.to_owned())
 }
 
 /// Wrap a command so the pane survives its exit by `exec`-ing into a fallback
@@ -207,7 +232,8 @@ pub fn launch_pane(
                 if let Some(split) = split {
                     split_window_args(cmd, split, size, Some(&calling))
                 } else {
-                    new_window_args(cmd, Some(&calling))
+                    let source = format!("calling pane {calling}");
+                    new_window_args(cmd, Some(&destination_session_id(&calling, &source)?))
                 }
             } else {
                 // Outside tmux: ensure the managed session exists, then add a fresh
