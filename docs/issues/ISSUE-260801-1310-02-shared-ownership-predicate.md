@@ -36,30 +36,35 @@ behavior, no new flag, no new persisted field.
   messages ("not created by tmux-tools …" and "owned by another cwd (<recorded cwd>) …"). Its
   ownership answer is the return value of the core predicate. To select the message, call the
   predicate with no current cwd (registration alone), then with the real cwd; any equivalent
-  decomposition is allowed, but no name/agent presence test may remain in `src/`.
+  decomposition is allowed, but no code in `src/` may decide whether a pane was created by tmux-tools
+  or is owned by testing whether `@tt-name`/`@tt-agent` is set, except by calling the core
+  `pane_is_owned`. Code reading those fields for other purposes (printing a name, resolving an agent)
+  is unaffected.
 
 **Acceptance:**
-- [ ] `rg -n 'pub fn pane_is_owned' core/src` returns the definition (no match before this change).
-- [ ] `rg -n 'pane_is_owned\s*\(' src/cmd/safety.rs` returns a call (no match before this change).
-- [ ] `rg -n '(name|agent)\.is_some' src/` returns no match that tests a `Registered` value's `name`
-      or `agent` (one match before this change, in `evaluate`). This is a necessary signal, not proof.
+- [ ] `rg -n 'pub fn pane_is_owned' core/src` returns the definition.
+- [ ] `rg -n 'pane_is_owned\s*\(' src/cmd/safety.rs` returns a call.
+- [ ] `rg -n '(name|agent)\.is_some' src/` returns no match that decides ownership from a `Registered`
+      value's `name` or `agent`.
 - [ ] Reviewer check by reading `evaluate`: its ownership answer is the live return value of the
-      **core** `pane_is_owned` (not dead code, not a same-named local function), and no equivalent
-      name/agent presence test survives anywhere in `src/` under any spelling.
-- [ ] Given a registration with `@tt-name` or `@tt-agent` set and no recorded cwd, when
+      **core** `pane_is_owned` (not dead code, not a same-named local function), and no other ownership decision
+      from `@tt-name`/`@tt-agent` presence survives anywhere in `src/` under any spelling.
+- [ ] Given a registration with `@tt-agent` set, `@tt-name` unset and no recorded cwd, when
+      `pane_is_owned` is called with a known current cwd, then it returns owned.
+- [ ] Given a registration with `@tt-name` set, `@tt-agent` unset and no recorded cwd, when
       `pane_is_owned` is called with a known current cwd, then it returns owned.
 - [ ] Given a registration with `@tt-name` set and a recorded cwd equal to the current cwd, when
       `pane_is_owned` is called, then it returns owned.
 - [ ] Given a registration with `@tt-name` set and a recorded cwd, when `pane_is_owned` is called with
       no current cwd, then it returns owned.
-- [ ] Given a registration with neither `@tt-name` nor `@tt-agent`, when `pane_is_owned` is called,
-      then it returns not owned.
+- [ ] Given a registration with neither `@tt-name` nor `@tt-agent` and a recorded cwd equal to the
+      current cwd, when `pane_is_owned` is called, then it returns not owned.
 - [ ] Given a registration with `@tt-name` set and a recorded cwd different from the known current
       cwd, when `pane_is_owned` is called, then it returns not owned.
 - [ ] The existing unit tests in `src/cmd/safety.rs` pass unmodified, including both denial-message
       assertions.
 
-**Verification and release:** Core unit tests for `pane_is_owned` cover the five cases above.
+**Verification and release:** Core unit tests for `pane_is_owned` cover the six cases above.
 `cargo test --workspace --features test-fixtures` passes against an isolated tmux server
 (PRD-260801-0656-01 § How to run the suite). A failure that survives isolation and that this change
 did not introduce is reported, not fixed. No release action.

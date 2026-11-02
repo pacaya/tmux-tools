@@ -20,6 +20,9 @@ contract:
     - relation: implementation_after
       repository: tmux-tools
       record: ISSUE-260802-0128-01
+    - relation: implementation_after
+      repository: tmux-tools
+      record: ISSUE-260801-1310-06
 ---
 
 ## Agent Brief
@@ -33,12 +36,13 @@ verbs report `relocated` and the final `window_id`. Only the new pane moves.
 break, fallback marking, `-d`), § Floor: per surface, in the registry (pane floor and effective floor),
 § Ownership and § Layout intent (candidate eligibility), § Flags (opt-outs placed as today),
 § Reporting surface (`relocated`, `window_id`, `below_floor` describe the final window; `status` for
-the origin), § Accepted limits (crowding not repaired), § Testing Decisions (seams, closing check).
+the origin), § Accepted limits (crowding not repaired), § Module shape (overflow trial inside `layout`, `place`
+returns where the pane landed), § Solution (no invocation starts failing), ## Out of Scope (one
+session; no locking, repair or prediction), § Testing Decisions (seams, closing check).
 
 **Current observable:** With ISSUE-260801-1310-05 and ISSUE-260802-0128-01 landed, a tiled placement
 that breaches leaves the new pane in the target window and reports `below_floor: true`; neither verb
-reports `relocated`. No code path moves a pane between windows (`join-pane` and `break-pane` appear
-nowhere in `src/` or `core/src/`).
+reports `relocated`.
 
 **Required change:**
 - The layout module's `place` gains a trial-and-move stage after the post-retile measurement and
@@ -51,14 +55,16 @@ nowhere in `src/` or `core/src/`).
   and is not retiled (PRD § Flags, § Ownership).
 - Session binding: candidate windows and the fresh fallback window are in the session of the target
   (origin) window, never the caller's session.
-- Candidates: the session's windows other than the origin that carry `@tt-tiled` and hold a pane owned
-  under the shared ownership predicate, judged before any pane is joined into them, tried in ascending
-  window index. Overflow-candidate ordering (eligible marked windows, ascending index) is pure given
+- Candidates: the session's windows other than the origin that pass the shared window guard owned by
+  ISSUE-260801-1310-06 (`@tt-tiled` marker and an owned pane), with no second marker read or ownership
+  scan, judged before any pane is joined into them, tried in ascending window index. Overflow-candidate ordering (eligible marked windows, ascending index) is pure given
   the session's windows, their markers and their panes' registrations, and is unit-testable without a
   tmux server.
 - Trial per candidate: `join-pane -d` the new pane into it, retile, measure against the candidate's
   effective floor including the new pane. If it does not breach, the pane stays. If it breaches, move
-  the pane on and retile the rejected candidate again after the pane leaves.
+  the pane on and retile the rejected candidate again after the pane leaves. A refused `join-pane`
+  counts as a rejected trial: the search continues to the next candidate or the fresh-window fallback,
+  and the invocation still exits 0 and reports the final window.
 - Fallback when every candidate breaches or none exists: `break-pane -d` with the target window's
   session named as destination, then tile the new window and set `@tt-tiled` on it.
 - After any move, retile the origin window.
@@ -80,24 +86,33 @@ read tmux state independently with `tmux -L <socket>` queries (`#{window_id}`, `
 - [ ] Given that breaching origin and an eligible marked window in the same session with room, when
       `spawn-agent` places into the origin, then the reported `window_id` is that eligible window's id
       and the session gains no window.
-- [ ] Given a breaching origin, a lower-index eligible candidate that also breaches with one more pane,
-      and a higher-index eligible candidate with room, when `spawn-agent` places into the origin, then
-      in the same run the reported `window_id` is the higher-index candidate's and the lower-index
-      candidate's `window_layout` equals its value before the placement.
+- [ ] Given a breaching origin and three eligible candidates, where the lowest-index one breaches with
+      one more pane and the middle and highest-index ones have room, when `spawn-agent` places into the
+      origin, then in the same run the reported `window_id` is the middle candidate's and the
+      lowest-index candidate's `window_layout` equals its value before the placement.
 - [ ] Given a breaching origin and no candidate with room, when `spawn-agent` places into it, then the
       reported `window_id` is a window that did not exist before the placement and
       `show-options -w -t <window_id> @tt-tiled` returns a value.
-- [ ] Given a breaching placement, when it completes, then in the same run `relocated` is true, the
-      reported `window_id` differs from the target's, and the session's current window
-      (`display -p -t <session> '#{window_id}'`) equals its value before the placement.
+- [ ] Given a breaching placement that joins into an eligible candidate, and separately one that falls
+      back to `break-pane`, when each completes, then in the same run `relocated` is true, the reported
+      `window_id` differs from the target's, the session's current window
+      (`display -p -t <session> '#{window_id}'`) equals its value before the placement, and
+      `show-options -p -t <pane_id>` on the moved pane gives `@tt-name` equal to the reported name,
+      `@tt-agent` the spawned agent, `@tt-surface` its resolved surface and `@tt-cwd` the invoking cwd.
 - [ ] Given a breaching placement whose `--target` is in a session other than the caller's
-      (`TMUX_PANE` in another session on the same server), when it completes, then the reported
-      `window_id` belongs to the target's session (`#{session_name}` of that window), observable at the
-      `spawn-agent --format json` output.
+      (`TMUX_PANE` in another session on the same server), where the caller's session has an eligible
+      marked window with room and the target's session has no candidate with room, when it completes,
+      then the reported `window_id` belongs to the target's session (`#{session_name}` of that window),
+      observable at the `spawn-agent --format json` output.
 - [ ] Given a breaching placement, then both `launch` and `spawn-agent` report `relocated` and the final
       `window_id` in `concise` and `json`. Given a placement that does not breach, then `relocated` is
       false and `window_id` equals the target window's id.
-- [ ] Given a target window already below its effective floor before the placement, when
+- [ ] Given (a) an owned window where `spawn-agent --split v` leaves it below its effective floor, and
+      (b) a first placement into a window not owned before the split that leaves it below its effective
+      floor, when each completes, then the pane stays in the target window and `json` reports
+      `relocated: false`, `below_floor: true` and the target's `window_id`.
+- [ ] Given an owned over-full target window, still below its effective floor after
+      `select-layout tiled` before the placement, when
       `spawn-agent` places into it, then in the same run `relocated` is true, the reported `window_id`
       differs from the target's, and `status` pointed at the origin window reports it below floor.
 - [ ] Unit tests in `core` cover overflow-candidate ordering: unmarked windows, windows without an
@@ -122,3 +137,4 @@ release action.
 ## Triage Notes
 
 - 2026-11-02: reminted to agent-brief.v3 after dispatch readiness; prior gate rounds in Git history.
+- 2026-11-02: mint-check repair applied.

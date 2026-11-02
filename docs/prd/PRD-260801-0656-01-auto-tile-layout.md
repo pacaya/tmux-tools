@@ -433,8 +433,10 @@ them rather than have sibling verbs import from each other.
 
 Its public surface is `place`, which takes the target and the incoming pane's agent identity and
 performs the snapshot-split-register-retile-measure-move sequence, returning where the pane landed;
-`rebalance`, which retiles a window and returns its measured geometry; and `floor_violations`, which
-reports panes below a given effective floor. The tmux calls and the overflow trial stay inside.
+`rebalance`, which retiles a window and returns its measured geometry; `floor_violations`, which
+reports panes below a given effective floor; and the kill-time removal operation, which sends the pane
+removal and, when the window guard holds, the retile to tmux as one command sequence (§ Reclamation on
+kill). The tmux calls and the overflow trial stay inside.
 
 The **ownership predicate is public in the core crate**, not layout-internal. Both the layout module
 (core) and the destructive verbs' safety evaluator (binary) must answer "is this pane ours"

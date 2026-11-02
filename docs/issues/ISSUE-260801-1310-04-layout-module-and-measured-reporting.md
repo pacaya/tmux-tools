@@ -46,11 +46,11 @@ contract:
 - `tmux-tools:PRD-260918-0323-01#p2-surface`: `@tt-surface` written unconditionally; the surface-unvalidated mark.
 - `tmux-tools:PRD-260918-0323-01#p7-prompt`: `history-limit` on sessions that tmux-tools creates.
 
-**Current observable:** `launch` and `spawn-agent` output only the pane registration: `raw` is the pane id, and `concise`/`json` show name and pane fields. Neither verb reports the window the pane landed in or that window's geometry. `rg -n 'min_pane_cols|min_pane_rows' src/ core/src/` returns nothing. `Split`, `Layout` and `resolve_layout` are in `src/cmd/launch.rs`. Registration happens after `launch_pane` returns, in a separate block in each verb.
+**Current observable:** `launch` and `spawn-agent` output only the pane registration: `raw` is the pane id, and `concise`/`json` show name and pane fields. Neither verb reports the window the pane landed in or that window's geometry. `Split`, `Layout` and `resolve_layout` are in `src/cmd/launch.rs`.
 
 **Required change:**
 - **Module and type move.** Add `pub mod layout;` to `core/src/lib.rs`. Move the split-direction enum `Split`, the resolved-layout type `Layout` and the flags-to-layout resolution into it. This is a move: the binary crate keeps no second definition. Both verbs get placement only through this module. The later stages (retile, `rebalance`, `floor_violations`, overflow) do not need stubs in this slice.
-- **`place` inputs.** `place` receives the target and the full registration to write. It does not read registration back from the pane. The registration includes the pane's agent and resolved surface, which are absent for `launch`. A later slice resolves floors from that registration.
+- **`place` inputs.** `place` receives the target and the full registration to write. It does not read registration back from the pane. The registration includes the pane's agent and resolved surface, which are absent for `launch`.
 - **Registration inside `place`.** `place` writes the whole registration after the split and before it reads geometry. It never writes an unset field, not even as an empty value. The written sets must equal the sets each verb writes today:
   - `launch`: `@tt-name`, `@tt-launched-at`, and `@tt-cwd` (the invoking process's cwd, written only when readable).
   - `spawn-agent`: the `launch` set, plus `@tt-agent` and `@tt-surface` (always), `@tt-access` (only with `--access`), and `@tt-surface-unvalidated` (only when trailing caller arguments are present). See `src/cmd/spawn_agent.rs`.
@@ -62,11 +62,12 @@ contract:
 - **Binary-crate dependencies.** `place` depends on two helpers in the binary crate. Resolve each one in one of two ways:
   - The timestamp helper `rfc3339_utc_now` (`src/util.rs`): move it to core, or let the caller compute the timestamp and pass it in the registration.
   - Managed-session creation `ensure_managed_session_atomic` (`src/cmd/launch.rs`): move it to core with the split, or keep it with the caller.
-  The P7 `history-limit` behavior must not change: 50000 is set on a session that tmux-tools creates, before that session's first output, and is never set on a session that tmux-tools did not create.
+  The `history-limit` behavior of `PRD-260918-0323-01#p7-prompt` does not change.
 - **Landing report and output.** The landing report contains the destination window's stable id and the smallest pane width and height measured across every pane in that window. In `concise` and `json`, both verbs add these values. The JSON field names are exactly `window_id`, `min_pane_cols` and `min_pane_rows`. The implementer chooses the `concise` key spelling and order, with two limits: the minima must not be spelled `min_cols`/`min_rows`, and the window field must not be spelled `window`. `raw` output does not change.
 
 **Acceptance:**
 - [ ] Given this change, `rg -n '^pub mod layout;' core/src/lib.rs` returns one match, and `rg -n 'enum Split\b|enum Layout\b' src/` returns no matches. Both checks give the opposite result before this change.
+- [ ] Given this change, `src/` contains no definition of `Split` or `Layout` (any item kind) and no flags-to-layout resolution. A reviewer check by reading code confirms that `launch` and `spawn-agent` create panes only through `layout::place`, with no split or new-window placement call left in `src/`, for every path listed under Destinations. Fails while placement stays in the binary crate.
 - [ ] Given the private harness in inside-tmux mode, when `launch --cmd <shell>` runs with no layout flags, then `tmux list-panes -t <window> -F '#{pane_left} #{pane_top} #{pane_width} #{pane_height}'` shows a horizontal split: the new pane has 70% of the window width, and both panes span the full window height. This is a preservation check: it passes before and after this change.
 - [ ] Given the private harness, when `launch --format json` runs, and when `spawn-agent <fake agent> --format json` runs, then each JSON object contains `window_id`, `min_pane_cols` and `min_pane_rows`, observable at the CLI seam. `window_id` equals `tmux display -p -t <pane_id> '#{window_id}'`. The two minima equal the componentwise minimum of `tmux list-panes -t <window_id> -F '#{pane_width} #{pane_height}'`. Fails before this change because the fields are absent.
 - [ ] Given the same invocations with `--format concise`, then stdout contains the same window id and the same two minima as the JSON output.
@@ -93,3 +94,4 @@ contract:
 
 - Split from the original record; tile default, ownership gating, @tt-tiled marker and docs → ISSUE-260802-0128-01.
 - 2026-11-02: reminted to agent-brief.v3 after dispatch readiness; prior gate rounds in Git history.
+- 2026-11-02: mint-check repair applied.

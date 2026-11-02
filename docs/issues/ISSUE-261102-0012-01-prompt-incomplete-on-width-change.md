@@ -17,16 +17,23 @@ contract:
       clause: p7-prompt
     - relation: requires
       repository: tmux-tools
+      record: PRD-260918-0323-01
+      clause: verification
+    - relation: requires
+      repository: tmux-tools
       record: PRD-260801-0656-01
+    - relation: implementation_after
+      repository: tmux-tools
+      record: ISSUE-260801-1310-01
 ---
 
 ## Agent Brief
 
 **Outcome and scope:** `prompt` reports `complete: false` whenever the target pane's width at settle differs from its width at the history mark. No other `prompt` behavior changes.
 
-**Required sources:** `tmux-tools:PRD-260918-0323-01#p7-prompt` — Completeness conditions and reporting channels; `tmux-tools:PRD-260801-0656-01` — § Accepted limits (retiles are not deferred for in-flight prompts; this report is the mitigation).
+**Required sources:** `tmux-tools:PRD-260918-0323-01#p7-prompt` — Completeness conditions and reporting channels; `tmux-tools:PRD-260918-0323-01#verification` — the width-change scenario, the `tt-fake-tui` fixture and the CLI seam; `tmux-tools:PRD-260801-0656-01` — § Accepted limits (retiles are not deferred for in-flight prompts; this report is the mitigation), § Sequencing (pane-creating slices land after the private harness).
 
-**Current observable:** On a main-screen pane, a width change during an in-flight `prompt` (e.g. `tmux resize-pane -x` or `select-layout tiled`) rewraps history; `prompt` then returns output from before the submission and still reports `complete: true`.
+**Current observable:** On a main-screen pane, a width change during an in-flight `prompt` still yields `complete: true`.
 
 **Required change:**
 - Read the pane's width with the mark probe and again at settle; a difference makes the result incomplete, as a third condition beside no-scrollback and eviction.
@@ -45,4 +52,4 @@ contract:
 
 ## Triage Notes
 
-- 2026-11-02: minted from maintainer decision Q3 (retile vs in-flight prompt) during auto-tile dispatch readiness.
+- 2026-11-02: minted from maintainer decision Q3 (retile vs in-flight prompt) during auto-tile dispatch readiness; mint-check repair applied.

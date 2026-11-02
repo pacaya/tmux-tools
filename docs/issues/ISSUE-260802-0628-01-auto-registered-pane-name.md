@@ -32,7 +32,7 @@ tool created. No placement or tiling change.
 **Required sources:** tmux-tools:PRD-260801-0656-01 — § Persistent shape (always-registered name,
 derivation, accepted widening), § Ownership (predicate unchanged), § Documentation (installed skill
 copy and its release step), § Out of Scope (no lineage-derived names), § How to run the suite
-(closing check). ISSUE-260801-1310-01 delivers the private tmux test server these criteria run on.
+(closing check).
 
 **Current observable:**
 - A flagless `launch --cmd <cmd>` pane has no `@tt-name`; concise prints `pane=<id>` with no name,
@@ -46,6 +46,12 @@ copy and its release step), § Out of Scope (no lineage-derived names), § How t
   a name derived from the command being launched (the user's command, for `spawn-agent` the agent's
   resolved command line — never the keep-alive wrap) plus a random suffix; a fixed stem when no
   usable word can be taken. A derived name must resolve back to its pane through `--target <name>`.
+- Derivation: the stem is the basename of the command's first word (for `spawn-agent`, the first
+  word of the resolved agent command line — never the keep-alive wrap), reduced to characters valid
+  in a tmux option value and a `--target` name. A first word that yields no letter or digit is
+  unusable and gets the fixed stem `pane`.
+- Every pane either verb creates without `--name` also carries `@tt-launched-at`, and `@tt-cwd` when
+  the cwd is readable, beside the derived `@tt-name` (PRD § Persistent shape).
 - The random suffix alone must make concurrent same-command collisions negligible (`names::set`
   checks uniqueness then writes, non-atomically). Re-deriving after a rejected write is only an
   addition for a name already taken.
@@ -55,16 +61,24 @@ copy and its release step), § Out of Scope (no lineage-derived names), § How t
   for a pane to be named or addressable, and state that a name is derived when `--name` is absent.
   The installed copy is `/Users/Shared/Data/work/Programming/ai/claude/user/skills/tmux-tools/SKILL.md`
   (the same file `~/.claude/skills/tmux-tools/SKILL.md` resolves to), in the separate repository
-  `/Users/Shared/Data/work/Programming/ai/claude`. Its edit is a commit on branch
-  `agent/auto-tile-layout` in that repository, made without modifying the live working tree the
-  symlink resolves to.
+  `/Users/Shared/Data/work/Programming/ai/claude` (the claude-settings repo). Its edit is committed
+  on branch `agent/auto-tile-layout` in that repo and pushed to its lane, without modifying the live
+  working tree the symlink resolves to.
 
 **Acceptance:**
 - [ ] Given the private test server, when `launch --cmd <shell>` runs with no `--name`, then the
       created pane's `@tt-name` read back from tmux is non-empty (unset before this change),
       observable at the CLI binary plus `tmux show-options`.
-- [ ] Given the private test server, when `launch --cmd 'cargo test'` runs with no `--name`, then the
+- [ ] Given the private test server, when `launch --cmd 'cargo --version'` runs with no `--name`, then the
   pane's `@tt-name` starts with `cargo-`; fails before this change.
+- [ ] Given the private test server, when a flagless `launch` runs, then the created pane read with
+      `tmux show-options -p` contains `@tt-name`, `@tt-launched-at` and `@tt-cwd`. Observable at the
+      CLI binary plus tmux.
+- [ ] Given the private test server and the `tt-fake-tui` registry below: (a) a flagless
+      `spawn-agent` of the `tt-fake-tui` agent gives an `@tt-name` starting with `tt-fake-tui-`;
+      (b) a `launch --cmd` whose first word yields no letter or digit gives an `@tt-name` starting
+      with `pane-`. In both cases a guarded verb run with `--target <reported name>` from the
+      creating cwd acts on exactly that pane. Observable at the CLI binary plus tmux.
 - [ ] Given an `agents.toml` registry injected through `XDG_CONFIG_HOME` with a `tt-fake-tui` agent
       (test-fixtures feature, no installed vendor agent), when `spawn-agent <that agent>` runs with no
       `--name`, then the created pane's `@tt-name` is non-empty; the test fails, never skips, when the
@@ -77,9 +91,8 @@ copy and its release step), § Out of Scope (no lineage-derived names), § How t
       equals its pane's `@tt-name`. Observable at stdout plus tmux.
 - [ ] Given three concurrent flagless `launch` invocations of the same command into one window of
       the private server, then all three exit 0 and the three created panes' `@tt-name` values are
-      pairwise distinct. Use three; this slice does not tile, so more untiled splits in one window
-      can exhaust its width. Observable at exit codes plus tmux.
-- [ ] Given a pane created by a flagless `launch` from cwd A, when `kill --target <its reported name>`
+      pairwise distinct. Use three. Observable at exit codes plus tmux.
+- [ ] Given a pane created by a flagless `launch` from cwd A, when `kill --target <its pane id>`
       runs from cwd A without `--any`, then it exits 0 and the pane is gone (denied with "not created
       by tmux-tools" before this change). Observable at exit code plus tmux.
 - [ ] Given a pane created by a flagless `launch` from cwd A, when `kill` targeting it runs from a
@@ -97,9 +110,10 @@ copy and its release step), § Out of Scope (no lineage-derived names), § How t
 against the private tmux server from ISSUE-260801-1310-01. `cargo test --workspace --features
 test-fixtures` passes against an isolated tmux server (PRD-260801-0656-01 § How to run the suite). A
 failure that survives isolation and that this change did not introduce is reported, not fixed.
-Release action: the installed SKILL.md commit on `agent/auto-tile-layout` in
-`/Users/Shared/Data/work/Programming/ai/claude` is merged only after the tiled binary is installed
-(PRD-260801-0656-01 § Documentation).
+Release action: the installed SKILL.md edit is committed on branch `agent/auto-tile-layout` in the
+claude-settings repo and pushed to its lane; this issue closes on that branch commit. The control Mac
+lands that branch once, after the whole auto-tile epic's binary is installed (PRD-260801-0656-01
+§ Documentation).
 
 **Out of scope:**
 - Tiling, floors, relocation, and the `@tt-tiled` marker.
@@ -113,3 +127,4 @@ Release action: the installed SKILL.md commit on `agent/auto-tile-layout` in
 ## Triage Notes
 
 - 2026-11-02: reminted to agent-brief.v3 after dispatch readiness; prior gate rounds in Git history.
+- 2026-11-02: mint-check repair applied.

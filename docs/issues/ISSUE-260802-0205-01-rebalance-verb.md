@@ -31,14 +31,13 @@ contract:
 marker-and-ownership guard `kill` uses, and reports the window's measured geometry and floor verdict.
 It wraps existing layout-module capability; it adds no placement, floor, relocation, or kill behavior.
 
-**Required sources:** tmux-tools:PRD-260801-0656-01 — § Layout intent (marker gates `rebalance`),
-§ Ownership (the predicate), § Module shape (`rebalance` operation in core), § Floor: per surface, in
-the registry (effective floor), § Reporting surface (field names and meanings), § Documentation (doc
-copies and the installed-copy release step), § Accepted limits (ragged vs over-full), § How to run the
-suite (closing check).
+**Required sources:** tmux-tools:PRD-260801-0656-01 — § Layout template, § Layout intent (marker
+gates `rebalance`), § Ownership (the predicate), § Module shape (`rebalance` operation in core),
+§ Floor: per surface, in the registry (effective floor), § Reporting surface (field names and
+meanings), § Documentation (doc copies and the installed-copy release step), § Accepted limits
+(ragged vs over-full), § How to run the suite (closing check).
 
-**Current observable:** `tmux-tools rebalance --help` exits 2 (`unrecognized subcommand`). No verb
-retiles an existing window.
+**Current observable:** `tmux-tools rebalance --help` exits 2 (`unrecognized subcommand`).
 
 **Required change:**
 - New verb `rebalance` with the common target arguments (`--target`, `--session`, `--window`,
@@ -48,10 +47,9 @@ retiles an existing window.
   non-zero exit before target resolution runs, so it never creates the managed session.
 - Guard: the shared window guard owned by ISSUE-260801-1310-06 in the core layout module (`@tt-tiled`
   present on the window, and at least one pane in the window owned per the shared ownership predicate
-  for this invocation's cwd). Reuse it; do not build a second marker read or ownership scan. If it
-  does not expose which half failed, extend it in place so it does. A window failing either half is
-  refused, non-zero exit, geometry untouched, with a diagnostic that names the failed guard (layout
-  intent / `@tt-tiled` vs ownership).
+  for this invocation's cwd). Reuse it; do not build a second marker read or ownership scan. A
+  window failing either half is refused, non-zero exit, geometry untouched, with a diagnostic that
+  names the failed guard (layout intent / `@tt-tiled` vs ownership).
 - On pass: retile through the layout module's `rebalance` operation (ISSUE-260802-0128-01), then
   report the window's geometry and verdict. The effective floor is resolved per surface from each
   pane's `@tt-agent`/`@tt-surface` (ISSUE-260801-1310-05).
@@ -61,21 +59,22 @@ retiles an existing window.
 - Docs: the verb is documented in `README.md` § Verb Summary, the repo `SKILL.md`, and the installed
   copy `/Users/Shared/Data/work/Programming/ai/claude/user/skills/tmux-tools/SKILL.md`.
 
-**Acceptance:**
+**Acceptance:** "Retiled" means the window's pane geometry equals what an explicit
+`tmux select-layout tiled` of the same panes produces; "ragged" means it differs from that geometry.
 - [ ] Given the built binary, when `tmux-tools rebalance --help` runs, then it exits 0, and
       `tmux-tools --help` lists `rebalance`, observable at the CLI.
-- [ ] Given a marked, owned window on the private server whose pane heights differ by more than one
-      row (made ragged by a raw `tmux split-window`), when `rebalance` targets it, then it exits 0 and
-      the window's pane heights are within one row of each other, observable via `tmux list-panes`.
+- [ ] Given a marked, owned window on the private server made ragged by a raw `tmux split-window`,
+      when `rebalance` targets it, then it exits 0 and the window is retiled, observable via
+      `tmux list-panes`.
 - [ ] Given that same scenario, the reported `window_id`, `min_pane_cols` and `min_pane_rows` (json)
       equal the window id and the smallest pane width and height that `tmux list-panes` reports after
       the call; `concise` carries the same four fields; `raw` stdout is exactly the window id.
-- [ ] Given a window without `@tt-tiled` that holds an owned pane, when `rebalance` targets it, then it
-      exits non-zero and every pane's geometry is unchanged; in the same test, a marked owned window is
-      rebalanced and is retiled. Observable via exit code and `tmux list-panes`.
-- [ ] Given a marked window in which no pane is owned for the invoking cwd, when `rebalance` targets
-      it, then it exits non-zero and every pane's geometry is unchanged; in the same test, a marked
-      owned window is rebalanced and is retiled.
+- [ ] Given a ragged window without `@tt-tiled` that holds an owned pane, when `rebalance` targets
+      it, then it exits non-zero and every pane's geometry is unchanged; in the same test, a ragged,
+      marked, owned window is rebalanced and is retiled. Observable via exit code and `tmux list-panes`.
+- [ ] Given a ragged, marked window in which no pane is owned for the invoking cwd, when `rebalance`
+      targets it, then it exits non-zero and every pane's geometry is unchanged; in the same test, a
+      ragged, marked, owned window is rebalanced and is retiled.
 - [ ] Given the two refusals above, their stderr diagnostics differ, and each names its guard (layout
       intent / `@tt-tiled`, ownership).
 - [ ] Given a marked, owned window holding a `tt-fake-tui` agent pane whose surface floor (fixture
@@ -86,7 +85,8 @@ retiles an existing window.
 - [ ] Given the CLI runs outside tmux (`TMUX` unset) with no `--target`, `--session` or `--window`,
       when `rebalance` runs, then it exits non-zero and no tmux session exists afterwards that did not
       exist before (in particular no `tmux-tools` session), observable via `tmux list-sessions` on the
-      private server.
+      private server; in the same test, outside tmux, `rebalance --session <S>` on a marked, owned,
+      ragged window exits 0 and the window is retiled.
 - [ ] Given this change, `sed -n '/^## Verb Summary/,/^## [^V]/p' README.md | grep -c '`rebalance`'`,
       `grep -c rebalance SKILL.md`, and
       `git -C /Users/Shared/Data/work/Programming/ai/claude show agent/auto-tile-layout:user/skills/tmux-tools/SKILL.md | grep -c rebalance`
@@ -100,8 +100,9 @@ is absent. `cargo test --workspace --features test-fixtures` passes against an i
 (PRD-260801-0656-01 § How to run the suite). A failure that survives isolation and that this change
 did not introduce is reported, not fixed. Release step: the installed `SKILL.md` edit is committed on
 branch `agent/auto-tile-layout` in the claude-settings repository
-(`/Users/Shared/Data/work/Programming/ai/claude`) and merged only after the tiled binary that includes
-`rebalance` is installed.
+(`/Users/Shared/Data/work/Programming/ai/claude`) and pushed to its lane; this issue closes on that
+branch commit. The control Mac lands that branch once, after the whole auto-tile epic's binary is
+installed.
 
 **Out of scope:**
 - Moving panes out of an over-full window, or killing exited-agent panes to reclaim geometry.
@@ -116,3 +117,4 @@ branch `agent/auto-tile-layout` in the claude-settings repository
 ## Triage Notes
 
 - 2026-11-02: reminted to agent-brief.v3 after dispatch readiness; prior gate rounds in Git history.
+- 2026-11-02: mint-check repair applied.
