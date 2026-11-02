@@ -392,6 +392,12 @@ set. Without that step the new window would be invisible to every later overflow
 Freed capacity in the caller's own window needs no preference rule: that window is the split target
 and is always tried first.
 
+A refused `join-pane` while the new pane still exists is a rejected trial: the search continues to
+the next candidate or the fresh-window fallback. A failed `break-pane` while the new pane still exists
+leaves the pane in the window it is in, retiles that window, and reports it with exit 0 and
+`below_floor: true`; `relocated` is `true` only when that window is not the origin. Whether the new pane
+still exists is checked on the server (`list-panes -a`), never by matching tmux error text.
+
 The destination is reported, not selected.
 
 Relocating the new pane restores a window that *this spawn* pushed below the floor. It does not repair
@@ -507,10 +513,14 @@ Every field describes the window, never the individual pane, so a window whose e
 empty — no agent panes in it at all — still reports its measured minima, with `below_floor: false`.
 One rule for all cases, no per-pane exception and nothing conditionally omitted, with one exception:
 when the new pane no longer exists at any placement step after the split (registration, retile,
-marker, measurement), `launch` and `spawn-agent` exit 0, print the pane id, leave out `window_id`,
-`min_pane_cols`, `min_pane_rows` and `below_floor` in `concise` and `json`, and print one warning line
-on stderr. `name` reports the name chosen for the pane (`--name`, else the derived name), even when
-registration did not write it. Any other failure at those steps fails the verb.
+marker, measurement, and each relocation step: `join-pane`, candidate retile and measurement,
+`break-pane`, fallback tile and marker, origin retile), `launch` and `spawn-agent` exit 0, print the
+pane id, leave out `window_id`, `min_pane_cols`, `min_pane_rows` and `below_floor` in `concise` and
+`json`, and print one warning line on stderr. `name` reports the name chosen for the pane (`--name`,
+else the derived name), even when registration did not write it. `relocated` stays in the output: it is
+`true` only when a `join-pane` or `break-pane` of the new pane succeeded before the pane was gone, else
+`false`. Any other failure at those steps fails the verb, except a refused `join-pane` or a failed
+`break-pane` while the new pane still exists (see Placement and overflow).
 
 The reported names are deliberately distinct from the registry's `min_cols`/`min_rows`. Those are the
 floor an agent *requires*; these are the geometry a window *has*. Reusing one pair of identifiers for a
