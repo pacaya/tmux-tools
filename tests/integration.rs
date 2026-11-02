@@ -1,35 +1,27 @@
 //! End-to-end integration smoke tests for the tmux-tools binary.
 //!
-//! These tests shell out to the real `tmux` binary on the user's default
-//! server, so they:
-//!   - use uniquely-named panes (`shell-<pid>` / `codex-test-<pid>`) per run
-//!     so they only ever touch panes they created themselves
-//!   - clean up those panes via `tmux-tools kill` (and a best-effort tmux
-//!     `kill-pane` fallback) regardless of test outcome
+//! Every test that talks to tmux holds its own [`IsolatedTmuxServer`]: a private
+//! server on socket `-L tt-tests-<pid>-<n>`, started with `-f /dev/null` at a
+//! fixed 280x82, whose `TMUX_TMPDIR` is `<tmp>/tt-tests-<pid>-<n>`. All `tmux`
+//! and `tmux-tools` calls a test makes against a server go through it, so the
+//! suite never reaches the developer's tmux server or loads their tmux
+//! configuration. Dropping the value kills the server, which is the only
+//! cleanup a test needs.
 //!
-//! NOTE on `--session ttests-<pid>` from the spec: the current `launch`
-//! implementation hardcodes the managed-session name (see
-//! src/cmd/launch.rs:69-86 — it always targets `target::MANAGED_SESSION`)
-//! and ignores `args.common.session` for *creating* panes. To run these
-//! tests without modifying production code, we drive every invocation with
-//! a unique `--name` instead and rely on name-based targeting. This is
-//! documented in the test report. If a future implementation honors
-//! `--session` in launch, the per-run isolation can be tightened by
-//! routing into a unique session.
+//! The CLI runs in one of two modes (see [`CliMode`]): inside tmux, with `TMUX`
+//! and `TMUX_PANE` naming the private server and a pane the harness owns, or
+//! outside tmux, with both removed.
 
 use std::io::Read;
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
 const BIN: &str = env!("CARGO_BIN_EXE_tmux-tools");
 
-/// Serializes the integration suite. Each test calls `tmux-tools launch ...`
-/// against the test runner's pane via `tmux split-window`; running multiple
-/// tests in parallel races on the shared tmux server (concurrent splits
-/// against the same pane hit tmux's size constraints and pane-id lookups
-/// see partially-registered panes). Hold this guard for the lifetime of a
+/// Serializes the integration suite. Hold this guard for the lifetime of a
 /// test to keep things deterministic under default `cargo test`.
 fn serial_guard() -> MutexGuard<'static, ()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -55,24 +47,7 @@ impl CmdOutput {
     }
 }
 
-fn run_bin(args: &[&str]) -> CmdOutput {
-    run_bin_with_timeout(args, Duration::from_secs(60))
-}
-
-fn run_bin_with_timeout(args: &[&str], timeout: Duration) -> CmdOutput {
-    let child = Command::new(BIN)
-        .args(args)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap_or_else(|e| panic!("failed to spawn {BIN} {args:?}: {e}"));
-
-    wait_for_child(child, &format!("{BIN} {args:?}"), timeout)
-}
-
-/// Wait for a spawned child, then collect its captured stdout/stderr. Shared by
-/// the plain and environment-injected runners so their timeout and panic
-/// behavior cannot drift.
+/// Wait for a spawned child, then collect its captured stdout/stderr.
 fn wait_for_child(mut child: std::process::Child, label: &str, timeout: Duration) -> CmdOutput {
     let started = Instant::now();
     loop {
@@ -105,51 +80,523 @@ fn wait_for_child(mut child: std::process::Child, label: &str, timeout: Duration
     }
 }
 
-fn run_tmux(args: &[&str]) -> CmdOutput {
-    let out = Command::new("tmux")
-        .args(args)
-        .output()
-        .unwrap_or_else(|e| panic!("failed to spawn tmux {args:?}: {e}"));
-    CmdOutput {
-        status: out.status.code().unwrap_or(-1),
-        stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
-    }
+/// Width and height of every harness server's first window.
+const SERVER_WIDTH: &str = "280";
+const SERVER_HEIGHT: &str = "82";
+
+/// The session every harness server starts with. Its single pane is the pane the
+/// harness owns: in inside-tmux mode the CLI runs with `TMUX_PANE` pointing at it.
+const HARNESS_SESSION: &str = "isolated-root";
+
+/// How the CLI under test sees tmux.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CliMode {
+    /// `TMUX` is the private server's socket triple and `TMUX_PANE` is the harness
+    /// pane, so the CLI takes its inside-tmux branch against the private server.
+    InsideTmux,
+    /// `TMUX` and `TMUX_PANE` are removed, so the CLI takes its outside-tmux branch.
+    /// A `tmux` wrapper on the CLI's `PATH` pins every tmux call to the private
+    /// server's `-L` label.
+    OutsideTmux,
 }
 
-/// Best-effort cleanup helper: kills tmux-tools panes by name on Drop.
-struct PaneGuard {
-    names: Vec<String>,
+/// Per-invocation additions to the environment the harness gives the CLI.
+#[derive(Default)]
+struct CliOptions<'a> {
+    /// `XDG_CONFIG_HOME`, to inject an agent registry.
+    xdg: Option<&'a std::path::Path>,
+    /// A directory prepended to `PATH`, to interpose a fake `tmux`.
+    path_prefix: Option<&'a std::path::Path>,
+    /// Wait limit for the CLI process (default 60s).
+    timeout: Option<Duration>,
+    /// Inside-tmux mode only: remove `TMUX_PANE` and point `TMUX` at this session
+    /// of the private server, for a test whose subject is resolution without
+    /// `TMUX_PANE`.
+    caller_session_without_pane: Option<&'a str>,
+    /// The CLI's working directory (default: the test process's own).
+    cwd: Option<&'a std::path::Path>,
+    /// Inside-tmux mode only: point `TMUX_PANE` at this pane of the private server
+    /// and `TMUX` at its session, for a test whose calling pane is not the harness
+    /// pane.
+    caller_pane: Option<&'a str>,
 }
 
-impl PaneGuard {
-    fn new() -> Self {
-        Self { names: Vec::new() }
-    }
+/// Per-process counter for `tt-tests-<pid>-<n>` server labels.
+static NEXT_SERVER: AtomicUsize = AtomicUsize::new(0);
 
-    fn track(&mut self, name: &str) {
-        self.names.push(name.to_owned());
-    }
+/// A test-owned, config-isolated tmux server. Every integration test that talks to
+/// tmux holds exactly one, and every `tmux` or CLI call the test makes against a
+/// server goes through it.
+///
+/// - The server runs on its own socket, `-L tt-tests-<pid>-<n>`, started with
+///   `-f /dev/null` (no user configuration) and a first window of 280x82.
+/// - Its `TMUX_TMPDIR` is `<tmp>/tt-tests-<pid>-<n>` (`<tmp>` is `/tmp`, or the OS
+///   temp dir when `/tmp` is absent), and every tmux and CLI call runs with it.
+/// - Direct `tmux` calls run with `TMUX` and `TMUX_PANE` removed and the explicit
+///   label; CLI calls get the environment of the server's [`CliMode`].
+/// - `Drop` kills the server and removes its `TMUX_TMPDIR` only once the server no
+///   longer answers `has-session`. A `<tmp>/tt-tests-*` directory left after a run
+///   therefore names a server that may have leaked (socket label and `TMUX_TMPDIR`).
+///
+/// The struct is built before the first fallible step, so a failed startup still
+/// tears the server and directory down. It never touches the default or current
+/// server.
+struct IsolatedTmuxServer {
+    label: String,
+    tmpdir: std::path::PathBuf,
+    bin_dir: std::path::PathBuf,
+    mode: CliMode,
+    socket_path: String,
+    server_pid: String,
+    session_id: String,
+    pane: String,
 }
 
-impl Drop for PaneGuard {
-    fn drop(&mut self) {
-        for name in &self.names {
-            // Try via tmux-tools first (also clears the registry entries).
-            let _ = run_bin(&["kill", "--target", name]);
-            // Fallback: if a pane is still around with that registered name,
-            // brute-force find and kill it directly via tmux.
-            if let Some(pane) = pane_id_by_name(name) {
-                let _ = run_tmux(&["kill-pane", "-t", &pane]);
-            }
+#[cfg_attr(not(feature = "test-fixtures"), allow(dead_code))]
+impl IsolatedTmuxServer {
+    /// A private server whose CLI calls run inside tmux: `TMUX` names this server
+    /// and `TMUX_PANE` the harness pane.
+    fn start_inside() -> Self {
+        Self::start(CliMode::InsideTmux)
+    }
+
+    /// A private server whose CLI calls run outside tmux: `TMUX` and `TMUX_PANE` are
+    /// removed and a `PATH` wrapper pins tmux to this server.
+    fn start_outside() -> Self {
+        Self::start(CliMode::OutsideTmux)
+    }
+
+    fn start(mode: CliMode) -> Self {
+        let n = NEXT_SERVER.fetch_add(1, Ordering::SeqCst);
+        let label = format!("tt-tests-{}-{n}", std::process::id());
+        // A short base keeps the derived unix socket path under the OS limit (macOS's
+        // per-user temp dir plus `tmux-<uid>/<label>` can exceed it).
+        let base = std::path::Path::new("/tmp");
+        let base = if base.is_dir() {
+            base.to_path_buf()
+        } else {
+            std::env::temp_dir()
+        };
+        let tmpdir = base.join(&label);
+        let bin_dir = tmpdir.join("bin");
+
+        // Build the guard *before* the first fallible operation: if creating the temp
+        // dir or starting the server fails, `Drop` still kills the endpoint and removes
+        // the temp dir.
+        let mut server = Self {
+            label,
+            tmpdir,
+            bin_dir,
+            mode,
+            socket_path: String::new(),
+            server_pid: String::new(),
+            session_id: String::new(),
+            pane: String::new(),
+        };
+        std::fs::create_dir_all(&server.tmpdir).unwrap();
+        if mode == CliMode::OutsideTmux {
+            server.install_wrapper();
+        }
+        server.start_server();
+        server.read_context();
+        server
+    }
+
+    fn start_server(&self) {
+        let started = self.tmux(&[
+            "-f",
+            "/dev/null",
+            "new-session",
+            "-d",
+            "-s",
+            HARNESS_SESSION,
+            "-x",
+            SERVER_WIDTH,
+            "-y",
+            SERVER_HEIGHT,
+            "sleep",
+            "86400",
+        ]);
+        started.assert_success("start isolated tmux server");
+    }
+
+    fn read_context(&mut self) {
+        let target = format!("={HARNESS_SESSION}:");
+        let out = self.tmux(&[
+            "display-message",
+            "-p",
+            "-t",
+            &target,
+            "#{socket_path}\t#{pid}\t#{session_id}\t#{pane_id}",
+        ]);
+        out.assert_success("read isolated server context");
+        let fields: Vec<&str> = out.stdout.trim_end().split('\t').collect();
+        assert_eq!(
+            fields.len(),
+            4,
+            "unexpected server context: {:?}",
+            out.stdout
+        );
+        self.socket_path = fields[0].to_owned();
+        self.server_pid = fields[1].to_owned();
+        self.session_id = fields[2].trim_start_matches('$').to_owned();
+        self.pane = fields[3].to_owned();
+    }
+
+    /// The `-L` socket label, `tt-tests-<pid>-<n>`.
+    fn label(&self) -> &str {
+        &self.label
+    }
+
+    /// The server's `TMUX_TMPDIR`, `<tmp>/tt-tests-<pid>-<n>`.
+    fn tmpdir(&self) -> &std::path::Path {
+        &self.tmpdir
+    }
+
+    /// The server process id.
+    fn server_pid(&self) -> &str {
+        &self.server_pid
+    }
+
+    /// The pane the harness owns; the CLI's `TMUX_PANE` in inside-tmux mode.
+    fn pane(&self) -> &str {
+        &self.pane
+    }
+
+    /// The `TMUX` value naming this server and the harness session.
+    fn tmux_env(&self) -> String {
+        format!(
+            "{},{},{}",
+            self.socket_path, self.server_pid, self.session_id
+        )
+    }
+
+    /// The `TMUX` value naming this server and `session` (a session or pane target).
+    fn tmux_env_for_session(&self, session: &str) -> String {
+        let out = self.tmux(&["display-message", "-p", "-t", session, "#{session_id}"]);
+        out.assert_success("query session id");
+        format!(
+            "{},{},{}",
+            self.socket_path,
+            self.server_pid,
+            out.stdout.trim().trim_start_matches('$')
+        )
+    }
+
+    /// A `tmux` wrapper on the CLI's `PATH` that pins every call to this endpoint, so the
+    /// CLI under test uses the same explicit `-L` label as setup and teardown.
+    fn install_wrapper(&self) {
+        self.write_wrapper(None);
+    }
+
+    /// Rewrite the wrapper to inject a caller `TMUX`/`TMUX_PANE` context into every tmux
+    /// subprocess (the CLI itself keeps them removed). This reproduces the inside-tmux
+    /// caller environment for the session-creation path without making the CLI take the
+    /// inside-tmux branch.
+    fn install_wrapper_with_context(&self, tmux: &str, tmux_pane: &str) {
+        self.write_wrapper(Some((tmux, tmux_pane)));
+    }
+
+    fn write_wrapper(&self, context: Option<(&str, &str)>) {
+        let wrapper = match context {
+            Some((tmux, tmux_pane)) => format!(
+                "#!/bin/sh\nTMUX='{tmux}' TMUX_PANE='{tmux_pane}' exec '{}' -L '{}' \"$@\"\n",
+                real_tmux_path(),
+                self.label
+            ),
+            None => format!(
+                "#!/bin/sh\nexec '{}' -L '{}' \"$@\"\n",
+                real_tmux_path(),
+                self.label
+            ),
+        };
+        self.install_wrapper_script(&wrapper);
+    }
+
+    /// Replace the wrapper with an arbitrary script, for a test that needs to inject a
+    /// specific tmux failure while still pinning to this endpoint. Outside-tmux mode
+    /// only: inside-tmux mode puts no wrapper on the CLI's `PATH`.
+    fn install_wrapper_script(&self, script: &str) {
+        use std::os::unix::fs::PermissionsExt;
+
+        assert_eq!(
+            self.mode,
+            CliMode::OutsideTmux,
+            "the PATH tmux wrapper exists only in outside-tmux mode"
+        );
+        std::fs::create_dir_all(&self.bin_dir).unwrap();
+        let path = self.bin_dir.join("tmux");
+        std::fs::write(&path, script).unwrap();
+        let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&path, permissions).unwrap();
+    }
+
+    /// A `tmux` command addressed to this server by label, with its `TMUX_TMPDIR` and
+    /// the ambient `TMUX`/`TMUX_PANE` removed.
+    fn tmux_command(&self, args: &[&str]) -> Command {
+        let mut command = Command::new("tmux");
+        command
+            .args(["-L", &self.label])
+            .args(args)
+            .env_remove("TMUX")
+            .env_remove("TMUX_PANE")
+            .env("TMUX_TMPDIR", &self.tmpdir);
+        command
+    }
+
+    /// Run one tmux command against this server.
+    fn tmux(&self, args: &[&str]) -> CmdOutput {
+        let out = self
+            .tmux_command(args)
+            .output()
+            .unwrap_or_else(|e| panic!("failed to spawn tmux {args:?}: {e}"));
+        CmdOutput {
+            status: out.status.code().unwrap_or(-1),
+            stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
         }
     }
+
+    /// `program` with the environment the harness gives the CLI: this server's
+    /// `TMUX_TMPDIR`, and `TMUX`/`TMUX_PANE` set (inside-tmux mode) or removed
+    /// (outside-tmux mode, with the pinning wrapper first on `PATH`).
+    fn command_with_cli_env(&self, program: &str, options: &CliOptions<'_>) -> Command {
+        let mut path_dirs: Vec<String> = Vec::new();
+        if let Some(prefix) = options.path_prefix {
+            path_dirs.push(prefix.display().to_string());
+        }
+        let mut command = Command::new(program);
+        command.env("TMUX_TMPDIR", &self.tmpdir);
+        match self.mode {
+            CliMode::InsideTmux => match (options.caller_session_without_pane, options.caller_pane)
+            {
+                (Some(_), Some(_)) => {
+                    panic!("caller_session_without_pane and caller_pane are exclusive")
+                }
+                (Some(session), None) => {
+                    command
+                        .env("TMUX", self.tmux_env_for_session(session))
+                        .env_remove("TMUX_PANE");
+                }
+                (None, Some(pane)) => {
+                    command
+                        .env("TMUX", self.tmux_env_for_session(pane))
+                        .env("TMUX_PANE", pane);
+                }
+                (None, None) => {
+                    command
+                        .env("TMUX", self.tmux_env())
+                        .env("TMUX_PANE", &self.pane);
+                }
+            },
+            CliMode::OutsideTmux => {
+                assert!(
+                    options.caller_session_without_pane.is_none(),
+                    "resolution without TMUX_PANE needs inside-tmux mode"
+                );
+                assert!(
+                    options.caller_pane.is_none(),
+                    "a calling pane needs inside-tmux mode"
+                );
+                path_dirs.push(self.bin_dir.display().to_string());
+                command.env_remove("TMUX").env_remove("TMUX_PANE");
+            }
+        }
+        path_dirs.push(std::env::var("PATH").unwrap_or_default());
+        command.env("PATH", path_dirs.join(":"));
+        if let Some(xdg) = options.xdg {
+            command.env("XDG_CONFIG_HOME", xdg);
+        }
+        if let Some(cwd) = options.cwd {
+            command.current_dir(cwd);
+        }
+        command
+    }
+
+    /// Run `program` with the environment the harness gives the CLI.
+    fn run_with_cli_env(&self, program: &str, args: &[&str]) -> CmdOutput {
+        let out = self
+            .command_with_cli_env(program, &CliOptions::default())
+            .args(args)
+            .output()
+            .unwrap_or_else(|e| panic!("failed to spawn {program} {args:?}: {e}"));
+        CmdOutput {
+            status: out.status.code().unwrap_or(-1),
+            stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+        }
+    }
+
+    fn run_cli(&self, args: &[&str], options: CliOptions<'_>) -> CmdOutput {
+        let child = self
+            .command_with_cli_env(BIN, &options)
+            .args(args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap_or_else(|e| panic!("failed to spawn {BIN} {args:?}: {e}"));
+        wait_for_child(
+            child,
+            &format!("{BIN} {args:?}"),
+            options.timeout.unwrap_or(Duration::from_secs(60)),
+        )
+    }
+
+    fn cli(&self, args: &[&str]) -> CmdOutput {
+        self.run_cli(args, CliOptions::default())
+    }
+
+    fn cli_with_timeout(&self, args: &[&str], timeout: Duration) -> CmdOutput {
+        self.run_cli(
+            args,
+            CliOptions {
+                timeout: Some(timeout),
+                ..CliOptions::default()
+            },
+        )
+    }
+
+    /// Run the CLI against this server with an injected agent registry.
+    fn cli_env(&self, args: &[&str], xdg: &std::path::Path) -> CmdOutput {
+        self.run_cli(
+            args,
+            CliOptions {
+                xdg: Some(xdg),
+                ..CliOptions::default()
+            },
+        )
+    }
+
+    /// Run the CLI with `dir` prepended to `PATH`, so a test can interpose a fake
+    /// `tmux` on the command's tmux calls.
+    fn cli_env_path(
+        &self,
+        args: &[&str],
+        xdg: &std::path::Path,
+        dir: &std::path::Path,
+    ) -> CmdOutput {
+        self.run_cli(
+            args,
+            CliOptions {
+                xdg: Some(xdg),
+                path_prefix: Some(dir),
+                ..CliOptions::default()
+            },
+        )
+    }
+
+    /// Run the CLI without `TMUX_PANE`, with `TMUX` naming `session` of this server.
+    fn cli_without_pane(&self, args: &[&str], session: &str, timeout: Duration) -> CmdOutput {
+        self.run_cli(
+            args,
+            CliOptions {
+                timeout: Some(timeout),
+                caller_session_without_pane: Some(session),
+                ..CliOptions::default()
+            },
+        )
+    }
+
+    /// Run the CLI with `pane` as the calling pane: `TMUX_PANE` is `pane` and `TMUX`
+    /// names its session. `xdg`, when given, injects an agent registry.
+    fn cli_from_pane(&self, args: &[&str], pane: &str, xdg: Option<&std::path::Path>) -> CmdOutput {
+        self.run_cli(
+            args,
+            CliOptions {
+                xdg,
+                caller_pane: Some(pane),
+                ..CliOptions::default()
+            },
+        )
+    }
+
+    /// A core-library `TmuxInvocation` addressed to this server: `-L <label>`, with
+    /// this server's `TMUX_TMPDIR` and the ambient `TMUX`/`TMUX_PANE` removed, as
+    /// [`Self::tmux_command`] runs tmux.
+    fn core_invocation(&self) -> tmux_tools_core::TmuxInvocation {
+        tmux_tools_core::TmuxInvocation {
+            prefix: vec![
+                "env".to_owned(),
+                "-u".to_owned(),
+                "TMUX".to_owned(),
+                "-u".to_owned(),
+                "TMUX_PANE".to_owned(),
+                format!("TMUX_TMPDIR={}", self.tmpdir.display()),
+            ],
+            socket: Some(self.label.clone()),
+            tmux_bin: "tmux".to_owned(),
+        }
+    }
+
+    /// Whether the server still answers `has-session`.
+    fn answers(&self) -> bool {
+        self.tmux_command(&["has-session"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false)
+    }
+}
+
+/// Whether a process with this pid exists.
+fn process_exists(pid: &str) -> bool {
+    !pid.is_empty()
+        && Command::new("kill")
+            .args(["-0", pid])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false)
+}
+
+impl Drop for IsolatedTmuxServer {
+    fn drop(&mut self) {
+        let _ = self
+            .tmux_command(&["kill-server"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        // Remove the directory only once the server is gone, so a server that
+        // survives teardown keeps its `<tmp>/tt-tests-*` directory as a leak marker.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while self.answers() || process_exists(&self.server_pid) {
+            if Instant::now() > deadline {
+                eprintln!(
+                    "WARNING: tmux test server -L {} (pid {}) survived teardown; leaving \
+                     TMUX_TMPDIR {} in place",
+                    self.label,
+                    self.server_pid,
+                    self.tmpdir.display()
+                );
+                return;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        let _ = std::fs::remove_dir_all(&self.tmpdir);
+    }
+}
+
+/// The absolute path of the real tmux, so an interposed fake `tmux` can delegate
+/// every subcommand except the one under test.
+fn real_tmux_path() -> String {
+    let output = Command::new("sh")
+        .args(["-c", "command -v tmux"])
+        .output()
+        .expect("failed to resolve tmux");
+    assert!(output.status.success(), "tmux is not on PATH");
+    String::from_utf8(output.stdout)
+        .expect("tmux path is UTF-8")
+        .trim()
+        .to_owned()
 }
 
 /// Resolve a pane id by registered `@tt-name` using tmux directly. Returns
 /// `None` if no such pane exists.
-fn pane_id_by_name(name: &str) -> Option<String> {
-    let out = run_tmux(&["list-panes", "-a", "-F", "#{pane_id}\t#{@tt-name}"]);
+fn pane_id_by_name(server: &IsolatedTmuxServer, name: &str) -> Option<String> {
+    let out = server.tmux(&["list-panes", "-a", "-F", "#{pane_id}\t#{@tt-name}"]);
     if out.status != 0 {
         return None;
     }
@@ -166,11 +613,11 @@ fn pane_id_by_name(name: &str) -> Option<String> {
 /// Wait until a child shell prompt is settled enough to accept commands. We
 /// simply poll for the named pane to exist *and* render at least one line of
 /// output (typically the bash prompt).
-fn wait_for_pane_ready(name: &str, timeout: Duration) {
+fn wait_for_pane_ready(server: &IsolatedTmuxServer, name: &str, timeout: Duration) {
     let started = Instant::now();
     while started.elapsed() < timeout {
-        if let Some(pane) = pane_id_by_name(name) {
-            let cap = run_tmux(&["capture-pane", "-t", &pane, "-p"]);
+        if let Some(pane) = pane_id_by_name(server, name) {
+            let cap = server.tmux(&["capture-pane", "-t", &pane, "-p"]);
             if cap.status == 0 && !cap.stdout.trim().is_empty() {
                 return;
             }
@@ -178,6 +625,263 @@ fn wait_for_pane_ready(name: &str, timeout: Duration) {
         thread::sleep(Duration::from_millis(100));
     }
     panic!("pane {name} did not become ready within {timeout:?}");
+}
+
+// ---------------------------------------------------------------------------
+// The private-server harness itself.
+// ---------------------------------------------------------------------------
+
+/// `<tmp>` for harness servers: `/tmp`, or the OS temp dir when `/tmp` is absent.
+fn harness_tmp_base() -> std::path::PathBuf {
+    let tmp = std::path::Path::new("/tmp");
+    if tmp.is_dir() {
+        tmp.to_path_buf()
+    } else {
+        std::env::temp_dir()
+    }
+}
+
+/// Assert the server's label is `tt-tests-<pid>-<n>` and its `TMUX_TMPDIR` is
+/// `<tmp>/<label>`.
+fn assert_harness_naming(server: &IsolatedTmuxServer) {
+    let prefix = format!("tt-tests-{}-", std::process::id());
+    let n = server
+        .label()
+        .strip_prefix(&prefix)
+        .unwrap_or_else(|| panic!("label {:?} must start with {prefix:?}", server.label()));
+    assert!(
+        !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()),
+        "label {:?} must end in a per-process counter",
+        server.label()
+    );
+    assert_eq!(
+        server.tmpdir(),
+        harness_tmp_base().join(server.label()),
+        "TMUX_TMPDIR must be <tmp>/<label>"
+    );
+}
+
+/// Acceptance: in inside-tmux mode, `launch --name` creates a pane on the private
+/// `tt-tests-<pid>-<n>` server, listed there by `list-panes -a`.
+#[test]
+fn inside_mode_launch_creates_the_named_pane_on_the_private_server() {
+    let _serial = serial_guard();
+
+    if Command::new("tmux").arg("-V").output().is_err() {
+        eprintln!("SKIP: tmux not on PATH");
+        return;
+    }
+
+    let server = IsolatedTmuxServer::start_inside();
+    assert_harness_naming(&server);
+    let name = format!("harness-launch-{}", std::process::id());
+
+    let launched = server.cli(&[
+        "launch",
+        "--cmd",
+        "sleep 600",
+        "--name",
+        &name,
+        "--bare",
+        "--format",
+        "json",
+    ]);
+    launched.assert_success("launch in inside-tmux mode");
+    let pane = serde_json::from_str::<serde_json::Value>(launched.stdout.trim())
+        .expect("launch JSON should parse")
+        .get("pane_id")
+        .and_then(|value| value.as_str())
+        .expect("launch JSON should carry pane_id")
+        .to_owned();
+
+    let listed = server.tmux(&["list-panes", "-a", "-F", "#{pane_id}\t#{@tt-name}"]);
+    listed.assert_success("list-panes -a on the private server");
+    assert!(
+        listed
+            .stdout
+            .lines()
+            .any(|line| line == format!("{pane}\t{name}")),
+        "the launched pane {pane} named {name} must be listed on {}; got: {:?}",
+        server.label(),
+        listed.stdout
+    );
+}
+
+/// Acceptance: the environment the harness gives the CLI in inside-tmux mode
+/// addresses a server that loaded no tmux configuration.
+#[test]
+fn inside_mode_cli_environment_reaches_a_server_without_user_config() {
+    let _serial = serial_guard();
+
+    if Command::new("tmux").arg("-V").output().is_err() {
+        eprintln!("SKIP: tmux not on PATH");
+        return;
+    }
+
+    let server = IsolatedTmuxServer::start_inside();
+    let out = server.run_with_cli_env(
+        "tmux",
+        &["display-message", "-p", "#{config_files}\t#{socket_path}"],
+    );
+    out.assert_success("tmux display-message with the CLI environment");
+    let (config_files, socket_path) = out
+        .stdout
+        .trim_end()
+        .split_once('\t')
+        .expect("two tab-separated fields");
+    assert_eq!(config_files, "/dev/null", "no tmux configuration may load");
+    assert!(
+        socket_path.ends_with(&format!("/{}", server.label())),
+        "the CLI environment must address the private server; got socket {socket_path:?}"
+    );
+}
+
+/// The CLI-environment probe: `TMUX|TMUX_PANE|TMUX_TMPDIR`, `unset` when absent.
+const CLI_ENV_PROBE: [&str; 2] = [
+    "-c",
+    "printf '%s|%s|%s' \"${TMUX-unset}\" \"${TMUX_PANE-unset}\" \"${TMUX_TMPDIR-unset}\"",
+];
+
+/// The CLI in inside-tmux mode sees `TMUX` naming the private server (socket path,
+/// pid, harness session) and `TMUX_PANE` naming the harness pane, plus the server's
+/// `TMUX_TMPDIR`.
+#[test]
+fn inside_mode_cli_environment_names_the_private_server_and_harness_pane() {
+    let _serial = serial_guard();
+
+    if Command::new("tmux").arg("-V").output().is_err() {
+        eprintln!("SKIP: tmux not on PATH");
+        return;
+    }
+
+    let server = IsolatedTmuxServer::start_inside();
+    let context = server.tmux(&[
+        "display-message",
+        "-p",
+        "-t",
+        server.pane(),
+        "#{socket_path},#{pid},#{session_id}",
+    ]);
+    context.assert_success("query the harness pane's server context");
+    let expected_tmux = context.stdout.trim().replacen(",$", ",", 1);
+
+    let out = server.run_with_cli_env("sh", &CLI_ENV_PROBE);
+    out.assert_success("probe inside-tmux CLI environment");
+    assert_eq!(
+        out.stdout,
+        format!(
+            "{expected_tmux}|{}|{}",
+            server.pane(),
+            server.tmpdir().display()
+        ),
+        "inside-tmux mode must point TMUX and TMUX_PANE at the private server"
+    );
+}
+
+/// Outside-tmux mode is unchanged: the CLI sees neither `TMUX` nor `TMUX_PANE`,
+/// only the server's `TMUX_TMPDIR`.
+#[test]
+fn outside_mode_cli_environment_removes_tmux_and_tmux_pane() {
+    let _serial = serial_guard();
+
+    if Command::new("tmux").arg("-V").output().is_err() {
+        eprintln!("SKIP: tmux not on PATH");
+        return;
+    }
+
+    let server = IsolatedTmuxServer::start_outside();
+    let out = server.run_with_cli_env("sh", &CLI_ENV_PROBE);
+    out.assert_success("probe outside-tmux CLI environment");
+    assert_eq!(
+        out.stdout,
+        format!("unset|unset|{}", server.tmpdir().display()),
+        "outside-tmux mode must remove TMUX and TMUX_PANE"
+    );
+}
+
+/// Assert a new harness server's first window is 280x82.
+fn assert_first_window_is_280x82(server: &IsolatedTmuxServer) {
+    let windows = server.tmux(&[
+        "list-windows",
+        "-a",
+        "-F",
+        "#{window_width}x#{window_height}",
+    ]);
+    windows.assert_success("list windows of a new harness server");
+    assert_eq!(
+        windows.stdout.lines().next(),
+        Some("280x82"),
+        "first window of {} must be 280x82; got: {:?}",
+        server.label(),
+        windows.stdout
+    );
+}
+
+/// Acceptance: a new inside-tmux harness server's first window is 280x82.
+#[test]
+fn inside_mode_server_first_window_is_280x82() {
+    let _serial = serial_guard();
+
+    if Command::new("tmux").arg("-V").output().is_err() {
+        eprintln!("SKIP: tmux not on PATH");
+        return;
+    }
+
+    assert_first_window_is_280x82(&IsolatedTmuxServer::start_inside());
+}
+
+/// Acceptance: a new outside-tmux harness server's first window is 280x82.
+#[test]
+fn outside_mode_server_first_window_is_280x82() {
+    let _serial = serial_guard();
+
+    if Command::new("tmux").arg("-V").output().is_err() {
+        eprintln!("SKIP: tmux not on PATH");
+        return;
+    }
+
+    assert_first_window_is_280x82(&IsolatedTmuxServer::start_outside());
+}
+
+/// Acceptance: dropping the harness value kills its server process and removes its
+/// `<tmp>/tt-tests-<pid>-<n>` directory.
+#[test]
+fn harness_teardown_kills_the_server_and_removes_its_tmpdir() {
+    let _serial = serial_guard();
+
+    if Command::new("tmux").arg("-V").output().is_err() {
+        eprintln!("SKIP: tmux not on PATH");
+        return;
+    }
+
+    let server = IsolatedTmuxServer::start_inside();
+    assert_harness_naming(&server);
+    let tmpdir = server.tmpdir().to_path_buf();
+    assert!(tmpdir.is_dir(), "{} must exist", tmpdir.display());
+    server
+        .tmux(&["has-session"])
+        .assert_success("has-session against the private socket");
+    let pid = server.tmux(&["display-message", "-p", "#{pid}"]);
+    pid.assert_success("query server pid");
+    let pid = pid.stdout.trim().to_owned();
+    assert_eq!(
+        pid,
+        server.server_pid(),
+        "the harness must record the server pid"
+    );
+    assert!(process_exists(&pid), "server pid {pid} must be running");
+
+    drop(server);
+
+    assert!(
+        !process_exists(&pid),
+        "server pid {pid} must be gone after teardown"
+    );
+    assert!(
+        !tmpdir.exists(),
+        "{} must be removed after teardown",
+        tmpdir.display()
+    );
 }
 
 #[test]
@@ -190,13 +894,11 @@ fn full_smoke() {
         return;
     }
 
+    let server = IsolatedTmuxServer::start_inside();
+
     let pid = std::process::id();
     let shell_name = format!("shell-{pid}");
     let codex_name = format!("codex-test-{pid}");
-
-    let mut guard = PaneGuard::new();
-    guard.track(&shell_name);
-    guard.track(&codex_name);
 
     // Deferred failures (so all 8 cases run before we fail the test). We
     // capture per-case failure messages and panic at the end if any survived.
@@ -208,7 +910,7 @@ fn full_smoke() {
     // ever exited. Bash never exits during this test (we only send commands to
     // it), but `--bare` makes the intent explicit and removes a future
     // debugger's surprise.
-    let launched = run_bin(&[
+    let launched = server.cli(&[
         "launch",
         "--cmd",
         "bash --norc --noprofile",
@@ -232,7 +934,7 @@ fn full_smoke() {
     );
 
     // Verify @tt-name was set on the pane.
-    let tt_name = run_tmux(&["display-message", "-p", "-t", &pane_id, "#{@tt-name}"]);
+    let tt_name = server.tmux(&["display-message", "-p", "-t", &pane_id, "#{@tt-name}"]);
     tt_name.assert_success("display @tt-name after launch");
     assert_eq!(
         tt_name.stdout.trim(),
@@ -241,15 +943,15 @@ fn full_smoke() {
     );
 
     // Wait for bash to print its first prompt before sending input.
-    wait_for_pane_ready(&shell_name, Duration::from_secs(5));
+    wait_for_pane_ready(&server, &shell_name, Duration::from_secs(5));
 
     // ---- 2. send + capture -------------------------------------------------
-    let sent = run_bin(&["send", "--target", &shell_name, "echo hi", "--enter"]);
+    let sent = server.cli(&["send", "--target", &shell_name, "echo hi", "--enter"]);
     sent.assert_success("send echo hi");
 
     thread::sleep(Duration::from_millis(400));
 
-    let cap = run_bin(&[
+    let cap = server.cli(&[
         "capture",
         "--target",
         &shell_name,
@@ -266,7 +968,7 @@ fn full_smoke() {
     );
 
     // ---- 3. execute (success) ---------------------------------------------
-    let exec_ls = run_bin(&[
+    let exec_ls = server.cli(&[
         "execute",
         "--target",
         &shell_name,
@@ -301,7 +1003,7 @@ fn full_smoke() {
 
     // ---- 4. execute (non-zero exit) ---------------------------------------
     // Use `(exit 7)` so the wrapping subshell propagates exit 7 cleanly.
-    let exec_fail = run_bin(&[
+    let exec_fail = server.cli(&[
         "execute",
         "--target",
         &shell_name,
@@ -322,7 +1024,7 @@ fn full_smoke() {
     );
 
     // ---- 5. capture --lines 0 (regression) --------------------------------
-    let cap0 = run_bin(&[
+    let cap0 = server.cli(&[
         "capture",
         "--target",
         &shell_name,
@@ -361,7 +1063,7 @@ fn full_smoke() {
         .unwrap_or(false);
 
     if codex_available {
-        let spawn = run_bin_with_timeout(
+        let spawn = server.cli_with_timeout(
             &[
                 "spawn-agent",
                 "codex",
@@ -382,7 +1084,7 @@ fn full_smoke() {
             .and_then(|v| v.as_str())
             .expect("spawn-agent JSON must include pane_id")
             .to_owned();
-        let agent_tag = run_tmux(&["display-message", "-p", "-t", &codex_pane, "#{@tt-agent}"]);
+        let agent_tag = server.tmux(&["display-message", "-p", "-t", &codex_pane, "#{@tt-agent}"]);
         agent_tag.assert_success("display @tt-agent for codex pane");
         assert_eq!(
             agent_tag.stdout.trim(),
@@ -396,7 +1098,7 @@ fn full_smoke() {
         // crashes. `· Ready · Context` is codex's idle status line; with the
         // default `--ready-stable-seconds` debounce it must hold ~2s before
         // firing `until_matched`.
-        let _wait = run_bin_with_timeout(
+        let _wait = server.cli_with_timeout(
             &[
                 "wait-idle",
                 "--target",
@@ -416,7 +1118,7 @@ fn full_smoke() {
     }
 
     // ---- 7. list -----------------------------------------------------------
-    let list_out = run_bin(&["list", "--format", "json", "--all"]);
+    let list_out = server.cli(&["list", "--format", "json", "--all"]);
     list_out.assert_success("list --format json --all");
     let list_json: serde_json::Value =
         serde_json::from_str(list_out.stdout.trim()).expect("list JSON should parse");
@@ -433,13 +1135,13 @@ fn full_smoke() {
     );
 
     // ---- 8. kill -----------------------------------------------------------
-    let kill_out = run_bin(&["kill", "--target", &shell_name]);
+    let kill_out = server.cli(&["kill", "--target", &shell_name]);
     kill_out.assert_success("kill shell pane");
 
     // Allow tmux a moment to remove the pane.
     thread::sleep(Duration::from_millis(200));
 
-    let list_after = run_bin(&["list", "--format", "json", "--all"]);
+    let list_after = server.cli(&["list", "--format", "json", "--all"]);
     list_after.assert_success("list after kill");
     let list_after_json: serde_json::Value =
         serde_json::from_str(list_after.stdout.trim()).expect("post-kill list JSON should parse");
@@ -474,11 +1176,11 @@ fn wait_idle_timeout_concise_first_line_includes_idle_for() {
         return;
     }
 
-    let name = format!("wait-hint-line-{}", std::process::id());
-    let mut guard = PaneGuard::new();
-    guard.track(&name);
+    let server = IsolatedTmuxServer::start_inside();
 
-    let launched = run_bin(&[
+    let name = format!("wait-hint-line-{}", std::process::id());
+
+    let launched = server.cli(&[
         "launch",
         "--cmd",
         "bash --norc --noprofile",
@@ -487,33 +1189,35 @@ fn wait_idle_timeout_concise_first_line_includes_idle_for() {
         "--bare",
     ]);
     launched.assert_success("launch wait-idle hint pane");
-    wait_for_pane_ready(&name, Duration::from_secs(5));
+    wait_for_pane_ready(&server, &name, Duration::from_secs(5));
 
-    let changing_name = name.clone();
-    let change = thread::spawn(move || {
-        thread::sleep(Duration::from_millis(750));
-        let sent = run_bin(&[
-            "send",
+    let waited = thread::scope(|scope| {
+        let change = scope.spawn(|| {
+            thread::sleep(Duration::from_millis(750));
+            let sent = server.cli(&[
+                "send",
+                "--target",
+                &name,
+                "printf 'controlled-change-marker\\n'",
+                "--enter",
+            ]);
+            sent.assert_success("emit controlled output during wait-idle");
+        });
+
+        let waited = server.cli(&[
+            "wait-idle",
             "--target",
-            &changing_name,
-            "printf 'controlled-change-marker\\n'",
-            "--enter",
+            &name,
+            "--idle-seconds",
+            "60",
+            "--timeout",
+            "2",
         ]);
-        sent.assert_success("emit controlled output during wait-idle");
+        change
+            .join()
+            .expect("controlled pane update should complete");
+        waited
     });
-
-    let waited = run_bin(&[
-        "wait-idle",
-        "--target",
-        &name,
-        "--idle-seconds",
-        "60",
-        "--timeout",
-        "2",
-    ]);
-    change
-        .join()
-        .expect("controlled pane update should complete");
     waited.assert_success("wait-idle timeout");
 
     let first_line = waited.stdout.lines().next().unwrap_or_default();
@@ -548,11 +1252,11 @@ fn wait_idle_timeout_concise_includes_delimited_bottom_ten_non_blank_lines() {
         return;
     }
 
-    let name = format!("wait-hint-tail-{}", std::process::id());
-    let mut guard = PaneGuard::new();
-    guard.track(&name);
+    let server = IsolatedTmuxServer::start_inside();
 
-    let launched = run_bin(&[
+    let name = format!("wait-hint-tail-{}", std::process::id());
+
+    let launched = server.cli(&[
         "launch",
         "--cmd",
         "printf 'line-01\nline-02\n\nline-03\nline-04\nline-05\nline-06\nline-07\nline-08\nline-09\nline-10\nline-11\nline-12\n'; sleep 30",
@@ -561,9 +1265,9 @@ fn wait_idle_timeout_concise_includes_delimited_bottom_ten_non_blank_lines() {
         "--bare",
     ]);
     launched.assert_success("launch wait-idle tail pane");
-    wait_for_pane_ready(&name, Duration::from_secs(5));
+    wait_for_pane_ready(&server, &name, Duration::from_secs(5));
 
-    let waited = run_bin(&[
+    let waited = server.cli(&[
         "wait-idle",
         "--target",
         &name,
@@ -602,11 +1306,11 @@ fn wait_idle_hint_lines_positive_value_controls_timeout_tail_length() {
         return;
     }
 
-    let name = format!("wait-hint-three-{}", std::process::id());
-    let mut guard = PaneGuard::new();
-    guard.track(&name);
+    let server = IsolatedTmuxServer::start_inside();
 
-    let launched = run_bin(&[
+    let name = format!("wait-hint-three-{}", std::process::id());
+
+    let launched = server.cli(&[
         "launch",
         "--cmd",
         "printf 'line-01\nline-02\nline-03\nline-04\nline-05\n'; sleep 30",
@@ -615,9 +1319,9 @@ fn wait_idle_hint_lines_positive_value_controls_timeout_tail_length() {
         "--bare",
     ]);
     launched.assert_success("launch wait-idle custom tail pane");
-    wait_for_pane_ready(&name, Duration::from_secs(5));
+    wait_for_pane_ready(&server, &name, Duration::from_secs(5));
 
-    let waited = run_bin(&[
+    let waited = server.cli(&[
         "wait-idle",
         "--target",
         &name,
@@ -652,11 +1356,11 @@ fn wait_idle_hint_lines_zero_suppresses_timeout_tail() {
         return;
     }
 
-    let name = format!("wait-hint-off-{}", std::process::id());
-    let mut guard = PaneGuard::new();
-    guard.track(&name);
+    let server = IsolatedTmuxServer::start_inside();
 
-    let launched = run_bin(&[
+    let name = format!("wait-hint-off-{}", std::process::id());
+
+    let launched = server.cli(&[
         "launch",
         "--cmd",
         "printf 'pane output\n'; sleep 30",
@@ -665,9 +1369,9 @@ fn wait_idle_hint_lines_zero_suppresses_timeout_tail() {
         "--bare",
     ]);
     launched.assert_success("launch wait-idle no-tail pane");
-    wait_for_pane_ready(&name, Duration::from_secs(5));
+    wait_for_pane_ready(&server, &name, Duration::from_secs(5));
 
-    let waited = run_bin(&[
+    let waited = server.cli(&[
         "wait-idle",
         "--target",
         &name,
@@ -697,11 +1401,11 @@ fn wait_idle_timeout_json_includes_numeric_idle_for() {
         return;
     }
 
-    let name = format!("wait-hint-json-{}", std::process::id());
-    let mut guard = PaneGuard::new();
-    guard.track(&name);
+    let server = IsolatedTmuxServer::start_inside();
 
-    let launched = run_bin(&[
+    let name = format!("wait-hint-json-{}", std::process::id());
+
+    let launched = server.cli(&[
         "launch",
         "--cmd",
         "printf 'json pane output\n'; sleep 30",
@@ -710,9 +1414,9 @@ fn wait_idle_timeout_json_includes_numeric_idle_for() {
         "--bare",
     ]);
     launched.assert_success("launch wait-idle JSON pane");
-    wait_for_pane_ready(&name, Duration::from_secs(5));
+    wait_for_pane_ready(&server, &name, Duration::from_secs(5));
 
-    let waited = run_bin(&[
+    let waited = server.cli(&[
         "wait-idle",
         "--target",
         &name,
@@ -761,16 +1465,16 @@ fn launch_keeps_pane_alive_after_cmd_exit() {
         return;
     }
 
+    let server = IsolatedTmuxServer::start_inside();
+
     let pid = std::process::id();
     let name = format!("keepopen-{pid}");
-    let mut guard = PaneGuard::new();
-    guard.track(&name);
 
     // Command prints "hello" then exits non-zero. Without the keep-open wrap,
     // tmux would reap the pane and "hello" would be lost. `echo` (not `printf`)
     // puts it on its own line, so a keep-alive shell prompt that clears the
     // current line cannot overwrite it before the capture.
-    let launched = run_bin(&[
+    let launched = server.cli(&[
         "launch",
         "--cmd",
         "echo hello; exit 1",
@@ -781,12 +1485,12 @@ fn launch_keeps_pane_alive_after_cmd_exit() {
     ]);
     launched.assert_success("launch with default keep-open wrap");
 
-    wait_for_pane_ready(&name, Duration::from_secs(5));
+    wait_for_pane_ready(&server, &name, Duration::from_secs(5));
 
     // Give the wrap shell a moment to take over after `exit 1`.
     thread::sleep(Duration::from_millis(500));
 
-    let cap = run_bin(&[
+    let cap = server.cli(&[
         "capture", "--target", &name, "--lines", "20", "--format", "raw",
     ]);
     cap.assert_success("capture after wrapped cmd exit");
@@ -797,7 +1501,7 @@ fn launch_keeps_pane_alive_after_cmd_exit() {
     );
 
     assert!(
-        pane_id_by_name(&name).is_some(),
+        pane_id_by_name(&server, &name).is_some(),
         "pane should still be alive after the wrapped command exited"
     );
 }
@@ -815,12 +1519,12 @@ fn capture_lines_tails_visible_pane() {
         return;
     }
 
+    let server = IsolatedTmuxServer::start_inside();
+
     let pid = std::process::id();
     let name = format!("tail-{pid}");
-    let mut guard = PaneGuard::new();
-    guard.track(&name);
 
-    let launched = run_bin(&[
+    let launched = server.cli(&[
         "launch",
         "--cmd",
         "bash --norc --noprofile",
@@ -832,9 +1536,9 @@ fn capture_lines_tails_visible_pane() {
     ]);
     launched.assert_success("launch tail pane");
 
-    wait_for_pane_ready(&name, Duration::from_secs(5));
+    wait_for_pane_ready(&server, &name, Duration::from_secs(5));
 
-    let sent = run_bin(&[
+    let sent = server.cli(&[
         "send",
         "--target",
         &name,
@@ -845,7 +1549,7 @@ fn capture_lines_tails_visible_pane() {
 
     thread::sleep(Duration::from_millis(500));
 
-    let cap = run_bin(&[
+    let cap = server.cli(&[
         "capture", "--target", &name, "--lines", "5", "--format", "raw",
     ]);
     cap.assert_success("capture --lines 5 after 30-line burst");
@@ -881,8 +1585,8 @@ fn capture_lines_tails_visible_pane() {
 ///   1. creating a `harness` session whose pane id we pretend is the caller,
 ///   2. creating a `decoy` session afterward (so tmux considers it the
 ///      most-recently-active pane),
-///   3. invoking `tmux-tools launch` with `TMUX` and `TMUX_PANE` set to point
-///      at the harness pane,
+///   3. invoking `tmux-tools launch` with `TMUX` naming the harness session
+///      and `TMUX_PANE` unset,
 ///   4. asserting the new pane's `#{session_name}` is the harness session,
 ///      not the decoy.
 #[test]
@@ -894,35 +1598,18 @@ fn launch_targets_calling_pane_not_most_recent_client() {
         return;
     }
 
+    let server = IsolatedTmuxServer::start_inside();
+
     let pid = std::process::id();
     let harness_session = format!("tt-harness-{pid}");
     let decoy_session = format!("tt-decoy-{pid}");
     let name = format!("calling-{pid}");
 
-    struct SessionGuard(String);
-    impl Drop for SessionGuard {
-        fn drop(&mut self) {
-            let _ = Command::new("tmux")
-                .args(["kill-session", "-t", &self.0])
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status();
-        }
-    }
-    let _harness_guard = SessionGuard(harness_session.clone());
-    let _decoy_guard = SessionGuard(decoy_session.clone());
-    let mut pane_guard = PaneGuard::new();
-    pane_guard.track(&name);
-
-    // Best-effort cleanup of any lingering sessions from a previous run with
-    // the same pid (highly unlikely but cheap).
-    let _ = run_tmux(&["kill-session", "-t", &harness_session]);
-    let _ = run_tmux(&["kill-session", "-t", &decoy_session]);
-
     // 1. Create the harness session first, then capture its pane id.
-    run_tmux(&["new-session", "-d", "-s", &harness_session])
+    server
+        .tmux(&["new-session", "-d", "-s", &harness_session])
         .assert_success("create harness session");
-    let harness_pane = run_tmux(&[
+    let harness_pane = server.tmux(&[
         "display-message",
         "-p",
         "-t",
@@ -940,83 +1627,28 @@ fn launch_targets_calling_pane_not_most_recent_client() {
     //    most-recently-active session on the server. With TMUX_PANE absent
     //    (next step) and no `-t`, `tmux split-window` would land here —
     //    that's the bug.
-    run_tmux(&["new-session", "-d", "-s", &decoy_session]).assert_success("create decoy session");
+    server
+        .tmux(&["new-session", "-d", "-s", &decoy_session])
+        .assert_success("create decoy session");
 
-    // 3. Build a TMUX env var pointing at the *harness* session, but
-    //    deliberately leave TMUX_PANE *unset*. Format:
-    //    "<socket>,<server_pid>,<session_id_numeric>". This is the most
-    //    realistic reproduction of the user-reported bug: TMUX is set
-    //    correctly to the caller's session but TMUX_PANE was lost somewhere
-    //    in process spawning (e.g. when a long-lived agent inherits TMUX
-    //    from a wrapper). Without our fix, tmux's implicit "current pane"
-    //    falls back to most-recently-active across the whole server — i.e.
-    //    the decoy.
-    let socket_q = run_tmux(&["display-message", "-p", "#{socket_path}"]);
-    socket_q.assert_success("query socket_path");
-    let socket = socket_q.stdout.trim().to_owned();
-    let server_pid_q = run_tmux(&["display-message", "-p", "#{pid}"]);
-    server_pid_q.assert_success("query server pid");
-    let server_pid = server_pid_q.stdout.trim().to_owned();
-    let harness_session_id_q = run_tmux(&[
-        "display-message",
-        "-p",
-        "-t",
-        &harness_session,
-        "#{session_id}",
-    ]);
-    harness_session_id_q.assert_success("query harness session_id");
-    let harness_session_id_num = harness_session_id_q
-        .stdout
-        .trim()
-        .trim_start_matches('$')
-        .to_owned();
-    let tmux_env = format!("{socket},{server_pid},{harness_session_id_num}");
-
-    // Avoid using `harness_pane_id` directly via TMUX_PANE: we want this
-    // test to simulate the case where TMUX_PANE is missing. Suppress the
-    // unused-binding warning explicitly.
-    let _ = &harness_pane_id;
-
-    // Invoke `tmux-tools launch` with TMUX set but TMUX_PANE explicitly
-    // *unset*. The fix must still resolve the calling session via TMUX and
-    // pass `-t` so the split lands in the harness, not in the decoy.
-    let mut child = Command::new(BIN)
-        .args([
+    // 3. Invoke `tmux-tools launch` with `TMUX` naming the *harness* session of
+    //    the private server ("<socket>,<server_pid>,<session_id_numeric>") but
+    //    `TMUX_PANE` deliberately *unset*. This is the most realistic
+    //    reproduction of the user-reported bug: TMUX is set correctly to the
+    //    caller's session but TMUX_PANE was lost somewhere in process spawning
+    //    (e.g. when a long-lived agent inherits TMUX from a wrapper). Without
+    //    our fix, tmux's implicit "current pane" falls back to
+    //    most-recently-active across the whole server — i.e. the decoy. The fix
+    //    must still resolve the calling session via TMUX and pass `-t` so the
+    //    split lands in the harness, not in the decoy.
+    let launched = server.cli_without_pane(
+        &[
             "launch", "--cmd", "sleep 30", "--name", &name, "--bare", "--format", "json",
-        ])
-        .env("TMUX", &tmux_env)
-        .env_remove("TMUX_PANE")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap_or_else(|e| panic!("failed to spawn {BIN} launch: {e}"));
-
-    let started = Instant::now();
-    let timeout = Duration::from_secs(15);
-    let (status, stdout, stderr) = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                let mut stdout = String::new();
-                let mut stderr = String::new();
-                if let Some(mut s) = child.stdout.take() {
-                    let _ = s.read_to_string(&mut stdout);
-                }
-                if let Some(mut s) = child.stderr.take() {
-                    let _ = s.read_to_string(&mut stderr);
-                }
-                break (status.code().unwrap_or(-1), stdout, stderr);
-            }
-            Ok(None) => {
-                if started.elapsed() > timeout {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    panic!("tmux-tools launch timed out after {timeout:?}");
-                }
-                thread::sleep(Duration::from_millis(50));
-            }
-            Err(e) => panic!("error waiting for tmux-tools launch: {e}"),
-        }
-    };
+        ],
+        &harness_session,
+        Duration::from_secs(15),
+    );
+    let (status, stdout, stderr) = (launched.status, launched.stdout, launched.stderr);
 
     assert_eq!(
         status, 0,
@@ -1031,7 +1663,7 @@ fn launch_targets_calling_pane_not_most_recent_client() {
         .to_owned();
 
     // 4. The new pane must live in the harness session, not the decoy.
-    let session_q = run_tmux(&["display-message", "-p", "-t", &new_pane, "#{session_name}"]);
+    let session_q = server.tmux(&["display-message", "-p", "-t", &new_pane, "#{session_name}"]);
     session_q.assert_success("query session_name for new pane");
     let actual_session = session_q.stdout.trim();
     assert_eq!(
@@ -1039,6 +1671,369 @@ fn launch_targets_calling_pane_not_most_recent_client() {
         "new pane should land in harness session ({harness_session}), not {actual_session} \
          (decoy was {decoy_session}) — regression for $TMUX_PANE-based targeting"
     );
+}
+
+// ---------------------------------------------------------------------------
+// ISSUE-260801-1310-03 — new-window placement lands in the destination session.
+//
+// `--split window` (from the calling pane, or with `--target <pane>`) and
+// `--session`/`--window` without `--target` create a new window in the
+// destination session for every session name, including tmux's numeric ones.
+// ---------------------------------------------------------------------------
+
+/// Create a detached session `name` on the private server and return its pane id.
+fn new_session_pane(server: &IsolatedTmuxServer, name: &str) -> String {
+    let out = server.tmux(&[
+        "new-session",
+        "-d",
+        "-s",
+        name,
+        "-P",
+        "-F",
+        "#{pane_id}",
+        "sleep",
+        "86400",
+    ]);
+    out.assert_success(&format!("create session {name}"));
+    let pane = out.stdout.trim().to_owned();
+    assert!(pane.starts_with('%'), "pane id must look like %N: {pane:?}");
+    pane
+}
+
+/// One tmux format of `target` on the private server.
+fn tmux_format(server: &IsolatedTmuxServer, target: &str, format: &str) -> String {
+    let out = server.tmux(&["display-message", "-p", "-t", target, format]);
+    out.assert_success(&format!("display {format} for {target}"));
+    out.stdout.trim().to_owned()
+}
+
+/// The window indexes of the session whose exact name is `session`.
+fn window_indexes(server: &IsolatedTmuxServer, session: &str) -> Vec<String> {
+    let target = format!("={session}");
+    let out = server.tmux(&["list-windows", "-t", &target, "-F", "#{window_index}"]);
+    out.assert_success(&format!("list windows of {session}"));
+    out.stdout.lines().map(str::to_owned).collect()
+}
+
+/// Every pane id on the private server.
+fn all_pane_ids(server: &IsolatedTmuxServer) -> Vec<String> {
+    let out = server.tmux(&["list-panes", "-a", "-F", "#{pane_id}"]);
+    out.assert_success("list all panes");
+    out.stdout.lines().map(str::to_owned).collect()
+}
+
+/// The `pane_id` of a successful `--format json` launch.
+fn launched_pane_id(out: &CmdOutput, ctx: &str) -> String {
+    out.assert_success(ctx);
+    serde_json::from_str::<serde_json::Value>(out.stdout.trim())
+        .unwrap_or_else(|e| panic!("{ctx}: JSON should parse ({e}): {:?}", out.stdout))
+        .get("pane_id")
+        .and_then(|value| value.as_str())
+        .unwrap_or_else(|| panic!("{ctx}: JSON should carry pane_id: {:?}", out.stdout))
+        .to_owned()
+}
+
+/// `launch --cmd 'sleep 600' --name <name> --format json` plus `extra`.
+fn launch_args<'a>(name: &'a str, extra: &[&'a str]) -> Vec<&'a str> {
+    let mut args = vec![
+        "launch",
+        "--cmd",
+        "sleep 600",
+        "--name",
+        name,
+        "--format",
+        "json",
+    ];
+    args.extend_from_slice(extra);
+    args
+}
+
+/// Acceptance: from inside tmux, `--split window` with no target creates a new window
+/// in the calling pane's (non-numeric) session.
+#[test]
+fn split_window_from_calling_pane_lands_in_callers_session() {
+    let _serial = serial_guard();
+
+    if Command::new("tmux").arg("-V").output().is_err() {
+        eprintln!("SKIP: tmux not on PATH");
+        return;
+    }
+
+    let server = IsolatedTmuxServer::start_inside();
+    let name = format!("split-window-caller-{}", std::process::id());
+
+    let launched = server.cli(&launch_args(&name, &["--split", "window"]));
+    let pane = launched_pane_id(&launched, "launch --split window from the calling pane");
+
+    assert_ne!(
+        tmux_format(&server, &pane, "#{window_id}"),
+        tmux_format(&server, server.pane(), "#{window_id}"),
+        "--split window must create a new window, not split the calling pane's"
+    );
+    assert_eq!(
+        tmux_format(&server, &pane, "#{session_id}"),
+        tmux_format(&server, server.pane(), "#{session_id}"),
+        "the new window must be in the calling pane's session"
+    );
+}
+
+/// Acceptance: a calling pane in a numeric-named session (`0`, which already has
+/// window `0`) gets its new window in that session.
+#[test]
+fn split_window_from_calling_pane_in_numeric_session_lands_in_callers_session() {
+    let _serial = serial_guard();
+
+    if Command::new("tmux").arg("-V").output().is_err() {
+        eprintln!("SKIP: tmux not on PATH");
+        return;
+    }
+
+    let server = IsolatedTmuxServer::start_inside();
+    let calling = new_session_pane(&server, "0");
+    assert_eq!(
+        window_indexes(&server, "0"),
+        ["0"],
+        "session 0 must have window 0"
+    );
+    let name = format!("split-window-numeric-caller-{}", std::process::id());
+
+    let launched =
+        server.cli_from_pane(&launch_args(&name, &["--split", "window"]), &calling, None);
+    let pane = launched_pane_id(&launched, "launch --split window from a pane in session 0");
+
+    assert_ne!(
+        tmux_format(&server, &pane, "#{window_id}"),
+        tmux_format(&server, &calling, "#{window_id}"),
+        "--split window must create a new window, not split the calling pane's"
+    );
+    assert_eq!(
+        tmux_format(&server, &pane, "#{session_id}"),
+        tmux_format(&server, &calling, "#{session_id}"),
+        "the new window must be in the calling pane's session 0"
+    );
+}
+
+/// Acceptance: `--target <pane> --split window` with the target in session `0` (which
+/// has window `0`) and the caller elsewhere lands in the target pane's session.
+#[test]
+fn split_window_with_target_in_numeric_session_lands_in_targets_session() {
+    let _serial = serial_guard();
+
+    if Command::new("tmux").arg("-V").output().is_err() {
+        eprintln!("SKIP: tmux not on PATH");
+        return;
+    }
+
+    let server = IsolatedTmuxServer::start_inside();
+    let target = new_session_pane(&server, "0");
+    assert_eq!(
+        window_indexes(&server, "0"),
+        ["0"],
+        "session 0 must have window 0"
+    );
+    assert_ne!(
+        tmux_format(&server, server.pane(), "#{session_id}"),
+        tmux_format(&server, &target, "#{session_id}"),
+        "the caller must not be in the target's session"
+    );
+    let name = format!("split-window-numeric-target-{}", std::process::id());
+
+    let launched = server.cli(&launch_args(
+        &name,
+        &["--target", &target, "--split", "window"],
+    ));
+    let pane = launched_pane_id(&launched, "launch --target <pane in 0> --split window");
+
+    assert_eq!(
+        tmux_format(&server, &pane, "#{session_id}"),
+        tmux_format(&server, &target, "#{session_id}"),
+        "the new window must be in the target pane's session 0"
+    );
+}
+
+/// Acceptance: `--target <pane> --split window` with the target in a non-numeric
+/// session lands in the target pane's session.
+#[test]
+fn split_window_with_target_in_named_session_lands_in_targets_session() {
+    let _serial = serial_guard();
+
+    if Command::new("tmux").arg("-V").output().is_err() {
+        eprintln!("SKIP: tmux not on PATH");
+        return;
+    }
+
+    let server = IsolatedTmuxServer::start_inside();
+    let pid = std::process::id();
+    let target = new_session_pane(&server, &format!("tt-target-{pid}"));
+    let name = format!("split-window-named-target-{pid}");
+
+    let launched = server.cli(&launch_args(
+        &name,
+        &["--target", &target, "--split", "window"],
+    ));
+    let pane = launched_pane_id(
+        &launched,
+        "launch --target <named-session pane> --split window",
+    );
+
+    assert_eq!(
+        tmux_format(&server, &pane, "#{session_id}"),
+        tmux_format(&server, &target, "#{session_id}"),
+        "the new window must be in the target pane's session"
+    );
+}
+
+/// Acceptance: `--session 0 --split window` with no `--target`, where session `0`
+/// already has window `0`, lands in session `0`.
+#[test]
+fn split_window_with_numeric_session_scope_lands_in_scoped_session() {
+    let _serial = serial_guard();
+
+    if Command::new("tmux").arg("-V").output().is_err() {
+        eprintln!("SKIP: tmux not on PATH");
+        return;
+    }
+
+    let server = IsolatedTmuxServer::start_inside();
+    let scoped = new_session_pane(&server, "0");
+    assert_eq!(
+        window_indexes(&server, "0"),
+        ["0"],
+        "session 0 must have window 0"
+    );
+    let name = format!("split-window-numeric-scope-{}", std::process::id());
+
+    let launched = server.cli(&launch_args(
+        &name,
+        &["--session", "0", "--split", "window"],
+    ));
+    let pane = launched_pane_id(&launched, "launch --session 0 --split window");
+
+    assert_eq!(
+        tmux_format(&server, &pane, "#{session_id}"),
+        tmux_format(&server, &scoped, "#{session_id}"),
+        "the new window must be in session 0"
+    );
+}
+
+/// Acceptance: `--session 0` with no `--split` and no `--target` (a new-window
+/// placement) adds exactly one window to session `0`, which already has window `0`.
+#[test]
+fn numeric_session_scope_without_split_adds_one_window_to_scoped_session() {
+    let _serial = serial_guard();
+
+    if Command::new("tmux").arg("-V").output().is_err() {
+        eprintln!("SKIP: tmux not on PATH");
+        return;
+    }
+
+    let server = IsolatedTmuxServer::start_inside();
+    let scoped = new_session_pane(&server, "0");
+    assert_eq!(
+        window_indexes(&server, "0"),
+        ["0"],
+        "session 0 must have window 0"
+    );
+    let name = format!("numeric-scope-no-split-{}", std::process::id());
+
+    let launched = server.cli(&launch_args(&name, &["--session", "0"]));
+    let pane = launched_pane_id(&launched, "launch --session 0");
+
+    assert_eq!(
+        window_indexes(&server, "0").len(),
+        2,
+        "session 0 must gain exactly one window"
+    );
+    assert_eq!(
+        tmux_format(&server, &pane, "#{session_id}"),
+        tmux_format(&server, &scoped, "#{session_id}"),
+        "the new window must be in session 0"
+    );
+}
+
+/// Acceptance: `--session 0 --window 1 --split window` with no `--target`, where
+/// session `0` has windows `0` and `1`, lands in session `0`.
+#[test]
+fn split_window_with_numeric_session_and_window_scope_lands_in_scoped_session() {
+    let _serial = serial_guard();
+
+    if Command::new("tmux").arg("-V").output().is_err() {
+        eprintln!("SKIP: tmux not on PATH");
+        return;
+    }
+
+    let server = IsolatedTmuxServer::start_inside();
+    let scoped = new_session_pane(&server, "0");
+    server
+        .tmux(&["new-window", "-d", "-t", "=0:1", "sleep", "86400"])
+        .assert_success("create window 1 in session 0");
+    assert_eq!(
+        window_indexes(&server, "0"),
+        ["0", "1"],
+        "session 0 must have windows 0 and 1"
+    );
+    let name = format!("split-window-numeric-window-scope-{}", std::process::id());
+
+    let launched = server.cli(&launch_args(
+        &name,
+        &["--session", "0", "--window", "1", "--split", "window"],
+    ));
+    let pane = launched_pane_id(&launched, "launch --session 0 --window 1 --split window");
+
+    assert_eq!(
+        tmux_format(&server, &pane, "#{session_id}"),
+        tmux_format(&server, &scoped, "#{session_id}"),
+        "the new window must be in session 0"
+    );
+}
+
+/// Required change: when the destination session cannot be resolved, a new-window
+/// placement exits non-zero, creates no pane, and names the failing operation rather
+/// than passing through tmux's `can't specify pane here`.
+#[test]
+fn new_window_placement_with_unresolvable_session_fails_without_a_pane() {
+    let _serial = serial_guard();
+
+    if Command::new("tmux").arg("-V").output().is_err() {
+        eprintln!("SKIP: tmux not on PATH");
+        return;
+    }
+
+    let server = IsolatedTmuxServer::start_inside();
+    let pid = std::process::id();
+    let missing = format!("tt-missing-{pid}");
+    let before = all_pane_ids(&server);
+
+    for (case, extra) in [
+        (
+            "split-window",
+            vec!["--session", missing.as_str(), "--split", "window"],
+        ),
+        ("no-split", vec!["--session", missing.as_str()]),
+    ] {
+        let name = format!("unresolvable-{case}-{pid}");
+        let out = server.cli(&launch_args(&name, &extra));
+        assert_ne!(
+            out.status, 0,
+            "{case}: an unresolvable destination session must fail; stdout: {:?}",
+            out.stdout
+        );
+        assert!(
+            out.stderr.contains("new-window placement failed"),
+            "{case}: the error must name the failing operation; stderr: {:?}",
+            out.stderr
+        );
+        assert!(
+            !out.stderr.contains("can't specify pane here"),
+            "{case}: the error must not be the tmux passthrough; stderr: {:?}",
+            out.stderr
+        );
+        assert_eq!(
+            all_pane_ids(&server),
+            before,
+            "{case}: a failed placement must create no pane"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1055,24 +2050,24 @@ const FAKE_TUI_BIN: &str = env!("CARGO_BIN_EXE_tt-fake-tui");
 /// Launch `tt-fake-tui` in a uniquely-named bare pane and wait until it
 /// renders its ready banner.
 #[cfg(feature = "test-fixtures")]
-fn launch_fake_tui(name: &str) {
-    launch_fake_tui_with(name, &[]);
+fn launch_fake_tui(server: &IsolatedTmuxServer, name: &str) {
+    launch_fake_tui_with(server, name, &[]);
 }
 
 /// Launch `tt-fake-tui` with extra fixture arguments (`--report`, `--no-bracketed-paste`,
 /// `--ready`, ...) in a uniquely-named bare pane and wait until it renders.
 #[cfg(feature = "test-fixtures")]
-fn launch_fake_tui_with(name: &str, extra_args: &[&str]) {
+fn launch_fake_tui_with(server: &IsolatedTmuxServer, name: &str, extra_args: &[&str]) {
     let mut cmd = shell_quote(FAKE_TUI_BIN);
     for arg in extra_args {
         cmd.push(' ');
         cmd.push_str(&shell_quote(arg));
     }
-    let launched = run_bin(&[
+    let launched = server.cli(&[
         "launch", "--cmd", &cmd, "--name", name, "--bare", "--format", "json",
     ]);
     launched.assert_success("launch tt-fake-tui");
-    wait_for_pane_ready(name, Duration::from_secs(5));
+    wait_for_pane_ready(server, name, Duration::from_secs(5));
 }
 
 /// Single-quote a value for the shell command `launch --cmd` runs.
@@ -1083,19 +2078,24 @@ fn shell_quote(value: &str) -> String {
 
 /// Drive the fixture's stdin control channel (`alt` / `normal` / `quit`).
 #[cfg(feature = "test-fixtures")]
-fn fake_tui_command(name: &str, command: &str) {
-    let sent = run_bin(&["send", "--target", name, command, "--literal", "--enter"]);
+fn fake_tui_command(server: &IsolatedTmuxServer, name: &str, command: &str) {
+    let sent = server.cli(&["send", "--target", name, command, "--literal", "--enter"]);
     sent.assert_success("send tt-fake-tui command");
 }
 
 /// Poll until the named pane's live `alternate_on` matches `expected`.
 #[cfg(feature = "test-fixtures")]
-fn wait_for_alternate_on(name: &str, expected: bool, timeout: Duration) {
+fn wait_for_alternate_on(
+    server: &IsolatedTmuxServer,
+    name: &str,
+    expected: bool,
+    timeout: Duration,
+) {
     let expected_flag = if expected { "1" } else { "0" };
     let started = Instant::now();
     while started.elapsed() < timeout {
-        if let Some(pane) = pane_id_by_name(name) {
-            let out = run_tmux(&["display-message", "-p", "-t", &pane, "#{alternate_on}"]);
+        if let Some(pane) = pane_id_by_name(server, name) {
+            let out = server.tmux(&["display-message", "-p", "-t", &pane, "#{alternate_on}"]);
             if out.status == 0 && out.stdout.trim() == expected_flag {
                 return;
             }
@@ -1108,11 +2108,11 @@ fn wait_for_alternate_on(name: &str, expected: bool, timeout: Duration) {
 /// Poll the visible pane until it contains `needle`. Used to wait out the
 /// fixture's post-switch report so later captures race nothing.
 #[cfg(feature = "test-fixtures")]
-fn wait_for_pane_text(name: &str, needle: &str, timeout: Duration) {
+fn wait_for_pane_text(server: &IsolatedTmuxServer, name: &str, needle: &str, timeout: Duration) {
     let started = Instant::now();
     while started.elapsed() < timeout {
-        if let Some(pane) = pane_id_by_name(name) {
-            let cap = run_tmux(&["capture-pane", "-t", &pane, "-p"]);
+        if let Some(pane) = pane_id_by_name(server, name) {
+            let cap = server.tmux(&["capture-pane", "-t", &pane, "-p"]);
             if cap.status == 0 && cap.stdout.contains(needle) {
                 return;
             }
@@ -1124,11 +2124,16 @@ fn wait_for_pane_text(name: &str, needle: &str, timeout: Duration) {
 
 /// Poll the visible pane until it no longer contains `needle`.
 #[cfg(feature = "test-fixtures")]
-fn wait_for_pane_text_absent(name: &str, needle: &str, timeout: Duration) {
+fn wait_for_pane_text_absent(
+    server: &IsolatedTmuxServer,
+    name: &str,
+    needle: &str,
+    timeout: Duration,
+) {
     let started = Instant::now();
     while started.elapsed() < timeout {
-        if let Some(pane) = pane_id_by_name(name) {
-            let cap = run_tmux(&["capture-pane", "-t", &pane, "-p"]);
+        if let Some(pane) = pane_id_by_name(server, name) {
+            let cap = server.tmux(&["capture-pane", "-t", &pane, "-p"]);
             if cap.status == 0 && !cap.stdout.contains(needle) {
                 return;
             }
@@ -1140,9 +2145,9 @@ fn wait_for_pane_text_absent(name: &str, needle: &str, timeout: Duration) {
 
 /// The current visible text of a registered pane.
 #[cfg(feature = "test-fixtures")]
-fn capture_pane_text(name: &str) -> String {
-    let pane = pane_id_by_name(name).expect("pane should exist");
-    let cap = run_tmux(&["capture-pane", "-t", &pane, "-p"]);
+fn capture_pane_text(server: &IsolatedTmuxServer, name: &str) -> String {
+    let pane = pane_id_by_name(server, name).expect("pane should exist");
+    let cap = server.tmux(&["capture-pane", "-t", &pane, "-p"]);
     cap.assert_success("capture pane");
     cap.stdout
 }
@@ -1150,15 +2155,15 @@ fn capture_pane_text(name: &str) -> String {
 /// Switch the fixture's live screen, then wait until both tmux's `alternate_on`
 /// and the fixture's rendered state reflect the switch.
 #[cfg(feature = "test-fixtures")]
-fn set_fake_tui_alternate(name: &str, on: bool) {
+fn set_fake_tui_alternate(server: &IsolatedTmuxServer, name: &str, on: bool) {
     let (command, expected_flag, rendered) = if on {
         ("alt", true, "tt-fake-tui: on the alternate screen")
     } else {
         ("normal", false, "tt-fake-tui: on the normal screen")
     };
-    fake_tui_command(name, command);
-    wait_for_alternate_on(name, expected_flag, Duration::from_secs(5));
-    wait_for_pane_text(name, rendered, Duration::from_secs(5));
+    fake_tui_command(server, name, command);
+    wait_for_alternate_on(server, name, expected_flag, Duration::from_secs(5));
+    wait_for_pane_text(server, name, rendered, Duration::from_secs(5));
 }
 
 /// The documented concise rendering of a raw capture: `capture-pane -p` emits
@@ -1179,12 +2184,17 @@ fn expected_concise(raw: &str) -> String {
 /// A fixture that enables bracketed paste flips this when tmux processes its
 /// `\x1b[?2004h`, which may trail the ready banner by one poll.
 #[cfg(feature = "test-fixtures")]
-fn wait_for_bracket_paste_flag(name: &str, expected: bool, timeout: Duration) {
+fn wait_for_bracket_paste_flag(
+    server: &IsolatedTmuxServer,
+    name: &str,
+    expected: bool,
+    timeout: Duration,
+) {
     let expected_flag = if expected { "1" } else { "0" };
     let started = Instant::now();
     while started.elapsed() < timeout {
-        if let Some(pane) = pane_id_by_name(name) {
-            let out = run_tmux(&[
+        if let Some(pane) = pane_id_by_name(server, name) {
+            let out = server.tmux(&[
                 "display-message",
                 "-p",
                 "-t",
@@ -1268,8 +2278,8 @@ where
 
 /// Assert tmux shows no buffer carrying the prompt transport's name.
 #[cfg(feature = "test-fixtures")]
-fn assert_no_prompt_buffer() {
-    let out = run_tmux(&["list-buffers"]);
+fn assert_no_prompt_buffer(server: &IsolatedTmuxServer) {
+    let out = server.tmux(&["list-buffers"]);
     assert_eq!(
         out.status, 0,
         "tmux list-buffers failed: stdout={:?} stderr={:?}",
@@ -1296,21 +2306,6 @@ fn large_multiline_prompt() -> String {
     }
     text.push_str("PROMPT-END");
     text
-}
-
-/// The absolute path of the real tmux, so an interposed fake `tmux` can delegate
-/// every subcommand except the one under test.
-#[cfg(feature = "test-fixtures")]
-fn real_tmux_path() -> String {
-    let output = Command::new("sh")
-        .args(["-c", "command -v tmux"])
-        .output()
-        .expect("failed to resolve tmux");
-    assert!(output.status.success(), "tmux is not on PATH");
-    String::from_utf8(output.stdout)
-        .expect("tmux path is UTF-8")
-        .trim()
-        .to_owned()
 }
 
 /// A fake `tmux` that fails one subcommand and delegates everything else to the
@@ -1392,20 +2387,20 @@ fn capture_all_on_alternate_screen_keeps_stdout_and_warns_on_stderr() {
         return;
     }
 
+    let server = IsolatedTmuxServer::start_inside();
+
     let name = format!("capture-alt-{}", std::process::id());
-    let mut guard = PaneGuard::new();
-    guard.track(&name);
 
-    launch_fake_tui(&name);
-    set_fake_tui_alternate(&name, true);
+    launch_fake_tui(&server, &name);
+    set_fake_tui_alternate(&server, &name, true);
 
-    let pane = pane_id_by_name(&name).expect("fixture pane should exist");
+    let pane = pane_id_by_name(&server, &name).expect("fixture pane should exist");
     // Independent oracle: tmux's own full-history capture is exactly what
     // `capture --all --format raw` printed before this change.
-    let expected_raw = run_tmux(&["capture-pane", "-p", "-S", "-", "-t", &pane]);
+    let expected_raw = server.tmux(&["capture-pane", "-p", "-S", "-", "-t", &pane]);
     expected_raw.assert_success("tmux capture-pane -p -S -");
 
-    let raw = run_bin(&["capture", "--target", &name, "--all", "--format", "raw"]);
+    let raw = server.cli(&["capture", "--target", &name, "--all", "--format", "raw"]);
     raw.assert_success("capture --all raw");
     assert_eq!(
         raw.stdout, expected_raw.stdout,
@@ -1423,7 +2418,7 @@ fn capture_all_on_alternate_screen_keeps_stdout_and_warns_on_stderr() {
         raw.stdout
     );
 
-    let concise = run_bin(&["capture", "--target", &name, "--all", "--format", "concise"]);
+    let concise = server.cli(&["capture", "--target", &name, "--all", "--format", "concise"]);
     concise.assert_success("capture --all concise");
     assert_eq!(
         concise.stdout,
@@ -1454,14 +2449,14 @@ fn capture_all_on_alternate_screen_reports_scrollback_unavailable_in_json() {
         return;
     }
 
+    let server = IsolatedTmuxServer::start_inside();
+
     let name = format!("capture-alt-json-{}", std::process::id());
-    let mut guard = PaneGuard::new();
-    guard.track(&name);
 
-    launch_fake_tui(&name);
-    set_fake_tui_alternate(&name, true);
+    launch_fake_tui(&server, &name);
+    set_fake_tui_alternate(&server, &name, true);
 
-    let out = run_bin(&["capture", "--target", &name, "--all", "--format", "json"]);
+    let out = server.cli(&["capture", "--target", &name, "--all", "--format", "json"]);
     out.assert_success("capture --all json on alternate screen");
     let payload: serde_json::Value =
         serde_json::from_str(out.stdout.trim()).expect("capture JSON should parse");
@@ -1500,18 +2495,18 @@ fn capture_all_tracks_live_alternate_screen_state() {
         return;
     }
 
-    let name = format!("capture-alt-live-{}", std::process::id());
-    let mut guard = PaneGuard::new();
-    guard.track(&name);
+    let server = IsolatedTmuxServer::start_inside();
 
-    launch_fake_tui(&name);
+    let name = format!("capture-alt-live-{}", std::process::id());
+
+    launch_fake_tui(&server, &name);
 
     // Each observation runs the human format (whose notice is on stderr) and
     // the JSON format (whose fact is the `scrollback_available` field).
     let observe = |ctx: &str| -> (String, serde_json::Value) {
-        let human = run_bin(&["capture", "--target", &name, "--all"]);
+        let human = server.cli(&["capture", "--target", &name, "--all"]);
         human.assert_success(ctx);
-        let json = run_bin(&["capture", "--target", &name, "--all", "--format", "json"]);
+        let json = server.cli(&["capture", "--target", &name, "--all", "--format", "json"]);
         json.assert_success(ctx);
         assert!(
             json.stderr.is_empty(),
@@ -1533,7 +2528,7 @@ fn capture_all_tracks_live_alternate_screen_state() {
         "a normal-screen pane can supply scrollback; payload: {before}"
     );
 
-    set_fake_tui_alternate(&name, true);
+    set_fake_tui_alternate(&server, &name, true);
 
     let (entered_stderr, entered) = observe("capture --all after entering the alternate screen");
     assert!(
@@ -1548,7 +2543,7 @@ fn capture_all_tracks_live_alternate_screen_state() {
         "entering the alternate screen must flag scrollback unavailable; payload: {entered}"
     );
 
-    set_fake_tui_alternate(&name, false);
+    set_fake_tui_alternate(&server, &name, false);
 
     let (left_stderr, left) = observe("capture --all after leaving the alternate screen");
     assert!(
@@ -1574,14 +2569,14 @@ fn capture_lines_shortfall_stays_silent() {
         return;
     }
 
-    let name = format!("capture-lines-short-{}", std::process::id());
-    let mut guard = PaneGuard::new();
-    guard.track(&name);
+    let server = IsolatedTmuxServer::start_inside();
 
-    launch_fake_tui(&name);
+    let name = format!("capture-lines-short-{}", std::process::id());
+
+    launch_fake_tui(&server, &name);
 
     let requested = 200_u64;
-    let out = run_bin(&[
+    let out = server.cli(&[
         "capture",
         "--target",
         &name,
@@ -1619,9 +2614,9 @@ fn capture_lines_shortfall_stays_silent() {
 
     // Independent oracle: read the same pane's content directly from tmux
     // rather than trusting the response's own `output`/`lines` pair.
-    let pane = pane_id_by_name(&name).expect("fixture pane should exist");
+    let pane = pane_id_by_name(&server, &name).expect("fixture pane should exist");
     let range = format!("-{requested}");
-    let oracle = run_tmux(&["capture-pane", "-t", &pane, "-p", "-S", &range, "-E", "-"]);
+    let oracle = server.tmux(&["capture-pane", "-t", &pane, "-p", "-S", &range, "-E", "-"]);
     oracle.assert_success("tmux capture-pane -p -S -200 -E -");
     let oracle_lines = oracle.stdout.trim_end().lines().count() as u64;
     assert!(
@@ -1639,7 +2634,7 @@ fn capture_lines_shortfall_stays_silent() {
         out.stdout
     );
 
-    let raw = run_bin(&[
+    let raw = server.cli(&[
         "capture",
         "--target",
         &name,
@@ -1667,12 +2662,14 @@ fn launch_bare_pane_closes_when_cmd_exits() {
         return;
     }
 
+    let server = IsolatedTmuxServer::start_inside();
+
     let pid = std::process::id();
     let name = format!("bare-{pid}");
 
     // `sleep 0.3` keeps the pane alive long enough for `launch` to register
     // `@tt-name` before tmux reaps it.
-    let launched = run_bin(&[
+    let launched = server.cli(&[
         "launch",
         "--cmd",
         "sleep 0.3",
@@ -1686,14 +2683,12 @@ fn launch_bare_pane_closes_when_cmd_exits() {
 
     let deadline = Instant::now() + Duration::from_secs(3);
     while Instant::now() < deadline {
-        if pane_id_by_name(&name).is_none() {
+        if pane_id_by_name(&server, &name).is_none() {
             return;
         }
         thread::sleep(Duration::from_millis(100));
     }
 
-    // Best-effort cleanup if the pane unexpectedly outlived the sleep.
-    let _ = run_bin(&["kill", "--target", &name]);
     panic!(
         "bare pane {name} should have closed after the command exited; \
          it was still listed after 3s"
@@ -1753,51 +2748,21 @@ impl Drop for AgentsConfig {
 }
 
 #[cfg(feature = "test-fixtures")]
-fn run_bin_env(args: &[&str], xdg: &std::path::Path) -> CmdOutput {
-    run_bin_env_with_timeout(args, xdg, Duration::from_secs(60))
-}
-
-#[cfg(feature = "test-fixtures")]
-fn run_bin_env_with_timeout(args: &[&str], xdg: &std::path::Path, timeout: Duration) -> CmdOutput {
-    let child = Command::new(BIN)
-        .args(args)
-        .env("XDG_CONFIG_HOME", xdg)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap_or_else(|e| panic!("failed to spawn {BIN} {args:?}: {e}"));
-
-    wait_for_child(child, &format!("{BIN} {args:?}"), timeout)
-}
-
-/// Run the CLI with `dir` prepended to `PATH`, so a test can interpose a fake
-/// `tmux` on the command's tmux calls.
-#[cfg(feature = "test-fixtures")]
-fn run_bin_env_path(args: &[&str], xdg: &std::path::Path, dir: &std::path::Path) -> CmdOutput {
-    let path = std::env::var("PATH").unwrap_or_default();
-    let child = Command::new(BIN)
-        .args(args)
-        .env("XDG_CONFIG_HOME", xdg)
-        .env("PATH", format!("{}:{path}", dir.display()))
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap_or_else(|e| panic!("failed to spawn {BIN} {args:?}: {e}"));
-
-    wait_for_child(child, &format!("{BIN} {args:?}"), Duration::from_secs(60))
-}
-
-#[cfg(feature = "test-fixtures")]
-fn pane_option(name: &str, key: &str) -> String {
-    let pane = pane_id_by_name(name).expect("pane should exist");
-    let out = run_tmux(&["display-message", "-p", "-t", &pane, &format!("#{{{key}}}")]);
+fn pane_option(server: &IsolatedTmuxServer, name: &str, key: &str) -> String {
+    let pane = pane_id_by_name(server, name).expect("pane should exist");
+    let out = server.tmux(&["display-message", "-p", "-t", &pane, &format!("#{{{key}}}")]);
     out.assert_success("display pane option");
     out.stdout.trim().to_owned()
 }
 
 /// Wait with the injected registry and return `(reason, final_capture)`.
 #[cfg(feature = "test-fixtures")]
-fn wait_idle_json(name: &str, xdg: &std::path::Path, extra: &[&str]) -> (String, String) {
+fn wait_idle_json(
+    server: &IsolatedTmuxServer,
+    name: &str,
+    xdg: &std::path::Path,
+    extra: &[&str],
+) -> (String, String) {
     let mut args = vec![
         "wait-idle",
         "--target",
@@ -1808,7 +2773,7 @@ fn wait_idle_json(name: &str, xdg: &std::path::Path, extra: &[&str]) -> (String,
         "10",
     ];
     args.extend_from_slice(extra);
-    let out = run_bin_env(&args, xdg);
+    let out = server.cli_env(&args, xdg);
     out.assert_success("wait-idle");
     let payload: serde_json::Value =
         serde_json::from_str(out.stdout.trim()).expect("wait-idle JSON should parse");
@@ -1866,14 +2831,14 @@ fn spawn_agent_no_surface_settles_on_default_not_pre_surface() {
         return;
     }
 
+    let server = IsolatedTmuxServer::start_inside();
+
     let config = AgentsConfig::new();
     config.write_agents_toml(&surface_agent_toml());
 
     let name = format!("surface-default-{}", std::process::id());
-    let mut guard = PaneGuard::new();
-    guard.track(&name);
 
-    let spawn = run_bin_env(
+    let spawn = server.cli_env(
         &[
             "spawn-agent",
             "surfagent",
@@ -1886,10 +2851,15 @@ fn spawn_agent_no_surface_settles_on_default_not_pre_surface() {
         config.xdg(),
     );
     spawn.assert_success("spawn-agent surfagent on default surface");
-    assert_eq!(pane_option(&name, "@tt-surface"), "flat");
-    wait_for_pane_ready(&name, Duration::from_secs(5));
+    assert_eq!(pane_option(&server, &name, "@tt-surface"), "flat");
+    wait_for_pane_ready(&server, &name, Duration::from_secs(5));
 
-    let (reason, capture) = wait_idle_json(&name, config.xdg(), &["--ready-stable-seconds", "0"]);
+    let (reason, capture) = wait_idle_json(
+        &server,
+        &name,
+        config.xdg(),
+        &["--ready-stable-seconds", "0"],
+    );
     assert_eq!(
         reason, "ready_matched",
         "the default surface's ready footer must match; capture: {capture:?}"
@@ -1916,6 +2886,8 @@ fn spawn_agent_falls_back_to_pre_surface_when_flat_default_is_not_validated() {
         eprintln!("SKIP: tmux not on PATH");
         return;
     }
+
+    let server = IsolatedTmuxServer::start_inside();
 
     let config = AgentsConfig::new();
     config.write_agents_toml(&format!(
@@ -1960,15 +2932,13 @@ args = []
         fake = FAKE_TUI_BIN
     ));
 
-    let mut guard = PaneGuard::new();
     for (agent, marker, missing) in [
         ("unstamped", "UNSTAMPED", "validated_version"),
         ("nobusy", "NOBUSY", "busy_regex"),
     ] {
         let name = format!("surface-fallback-{agent}-{}", std::process::id());
-        guard.track(&name);
 
-        let spawn = run_bin_env(
+        let spawn = server.cli_env(
             &[
                 "spawn-agent",
                 agent,
@@ -1984,7 +2954,7 @@ args = []
         );
         spawn.assert_success("spawn-agent on an unvalidated flat default");
         assert_eq!(
-            pane_option(&name, "@tt-surface"),
+            pane_option(&server, &name, "@tt-surface"),
             "rich",
             "{agent}: an unvalidated flat default must fall back to the pre-surface rendering"
         );
@@ -2001,9 +2971,13 @@ args = []
             spawn.stderr
         );
 
-        wait_for_pane_ready(&name, Duration::from_secs(5));
-        let (reason, capture) =
-            wait_idle_json(&name, config.xdg(), &["--ready-stable-seconds", "0"]);
+        wait_for_pane_ready(&server, &name, Duration::from_secs(5));
+        let (reason, capture) = wait_idle_json(
+            &server,
+            &name,
+            config.xdg(),
+            &["--ready-stable-seconds", "0"],
+        );
         assert_eq!(
             reason, "ready_matched",
             "{agent}: the pre-surface rendering's own pattern must match; capture: {capture:?}"
@@ -2029,17 +3003,16 @@ fn spawn_agent_records_surface_and_marks_caller_args_unvalidated() {
         return;
     }
 
+    let server = IsolatedTmuxServer::start_inside();
+
     let config = AgentsConfig::new();
     config.write_agents_toml(&surface_agent_toml());
 
     // A named surface that supplies its own launch arguments is still validated.
     let named = format!("surface-named-{}", std::process::id());
     let caller = format!("surface-caller-{}", std::process::id());
-    let mut guard = PaneGuard::new();
-    guard.track(&named);
-    guard.track(&caller);
 
-    let spawn = run_bin_env(
+    let spawn = server.cli_env(
         &[
             "spawn-agent",
             "surfagent",
@@ -2054,15 +3027,15 @@ fn spawn_agent_records_surface_and_marks_caller_args_unvalidated() {
         config.xdg(),
     );
     spawn.assert_success("spawn-agent with --surface rich");
-    assert_eq!(pane_option(&named, "@tt-surface"), "rich");
+    assert_eq!(pane_option(&server, &named, "@tt-surface"), "rich");
     assert_eq!(
-        pane_option(&named, "@tt-surface-unvalidated"),
+        pane_option(&server, &named, "@tt-surface-unvalidated"),
         "",
         "surface-supplied arguments must not set the unvalidated mark"
     );
 
     // Caller-supplied trailing arguments mark the pane surface-unvalidated.
-    let spawn = run_bin_env(
+    let spawn = server.cli_env(
         &[
             "spawn-agent",
             "surfagent",
@@ -2077,9 +3050,9 @@ fn spawn_agent_records_surface_and_marks_caller_args_unvalidated() {
         config.xdg(),
     );
     spawn.assert_success("spawn-agent with trailing caller arguments");
-    assert_eq!(pane_option(&caller, "@tt-surface"), "flat");
+    assert_eq!(pane_option(&server, &caller, "@tt-surface"), "flat");
     assert_eq!(
-        pane_option(&caller, "@tt-surface-unvalidated"),
+        pane_option(&server, &caller, "@tt-surface-unvalidated"),
         "1",
         "caller-supplied arguments must mark the pane surface-unvalidated"
     );
@@ -2095,16 +3068,16 @@ fn pane_without_surface_record_resolves_to_pre_surface_rendering() {
         return;
     }
 
+    let server = IsolatedTmuxServer::start_inside();
+
     let config = AgentsConfig::new();
     config.write_agents_toml(&surface_agent_toml());
 
     let name = format!("surface-absent-{}", std::process::id());
-    let mut guard = PaneGuard::new();
-    guard.track(&name);
 
     // Launch on the pre-surface rendering, then strip the record: only a pane created
     // before surfaces existed looks like this.
-    let spawn = run_bin_env(
+    let spawn = server.cli_env(
         &[
             "spawn-agent",
             "surfagent",
@@ -2119,11 +3092,16 @@ fn pane_without_surface_record_resolves_to_pre_surface_rendering() {
         config.xdg(),
     );
     spawn.assert_success("spawn-agent on rich surface");
-    let pane = pane_id_by_name(&name).expect("spawned pane should exist");
-    let unset = run_tmux(&["set-option", "-p", "-u", "-t", &pane, "@tt-surface"]);
+    let pane = pane_id_by_name(&server, &name).expect("spawned pane should exist");
+    let unset = server.tmux(&["set-option", "-p", "-u", "-t", &pane, "@tt-surface"]);
     unset.assert_success("unset @tt-surface");
 
-    let (reason, capture) = wait_idle_json(&name, config.xdg(), &["--ready-stable-seconds", "0"]);
+    let (reason, capture) = wait_idle_json(
+        &server,
+        &name,
+        config.xdg(),
+        &["--ready-stable-seconds", "0"],
+    );
     assert_eq!(
         reason, "ready_matched",
         "an absent record must resolve to the pre-surface rendering; capture: {capture:?}"
@@ -2147,6 +3125,8 @@ fn pre_surface_agents_toml_binds_readiness_to_pre_surface_after_flat_promotion()
         eprintln!("SKIP: tmux not on PATH");
         return;
     }
+
+    let server = IsolatedTmuxServer::start_inside();
 
     let config = AgentsConfig::new();
     // A promoted custom agent: its validated `flat` surface is the default, its
@@ -2194,13 +3174,10 @@ args = []
 
     let flat = format!("promoted-flat-{}", std::process::id());
     let rich = format!("pre-surface-rich-{}", std::process::id());
-    let mut guard = PaneGuard::new();
-    guard.track(&flat);
-    guard.track(&rich);
 
     // No surface named: the promoted flat default is recorded, and its shipped pattern
     // — not the agent-level override — governs its readiness.
-    let spawn = run_bin_env(
+    let spawn = server.cli_env(
         &[
             "spawn-agent",
             "bindingagent",
@@ -2215,13 +3192,18 @@ args = []
         config.xdg(),
     );
     spawn.assert_success("spawn-agent bindingagent (promoted flat default)");
-    assert_eq!(pane_option(&flat, "@tt-surface"), "flat");
+    assert_eq!(pane_option(&server, &flat, "@tt-surface"), "flat");
     assert!(
         !spawn.stderr.contains("warning:"),
         "a validated default must not warn; stderr: {:?}",
         spawn.stderr
     );
-    let (reason, capture) = wait_idle_json(&flat, config.xdg(), &["--ready-stable-seconds", "0"]);
+    let (reason, capture) = wait_idle_json(
+        &server,
+        &flat,
+        config.xdg(),
+        &["--ready-stable-seconds", "0"],
+    );
     assert_eq!(
         reason, "ready_matched",
         "the promoted flat surface must keep its shipped pattern; capture: {capture:?}"
@@ -2233,7 +3215,7 @@ args = []
 
     // The pre-surface rendering is still reachable and the agent-level override
     // governs it.
-    let spawn = run_bin_env(
+    let spawn = server.cli_env(
         &[
             "spawn-agent",
             "bindingagent",
@@ -2250,8 +3232,13 @@ args = []
         config.xdg(),
     );
     spawn.assert_success("spawn-agent bindingagent --surface rich");
-    assert_eq!(pane_option(&rich, "@tt-surface"), "rich");
-    let (reason, capture) = wait_idle_json(&rich, config.xdg(), &["--ready-stable-seconds", "0"]);
+    assert_eq!(pane_option(&server, &rich, "@tt-surface"), "rich");
+    let (reason, capture) = wait_idle_json(
+        &server,
+        &rich,
+        config.xdg(),
+        &["--ready-stable-seconds", "0"],
+    );
     assert_eq!(
         reason, "ready_matched",
         "the pre-surface override must govern the pre-surface rendering; capture: {capture:?}"
@@ -2272,6 +3259,8 @@ fn pre_surface_custom_agent_without_surfaces_loads_and_governs_readiness() {
         return;
     }
 
+    let server = IsolatedTmuxServer::start_inside();
+
     let config = AgentsConfig::new();
     config.write_agents_toml(&format!(
         r#"
@@ -2287,10 +3276,8 @@ args = []
     ));
 
     let name = format!("precustom-{}", std::process::id());
-    let mut guard = PaneGuard::new();
-    guard.track(&name);
 
-    let spawn = run_bin_env(
+    let spawn = server.cli_env(
         &[
             "spawn-agent",
             "precustom",
@@ -2303,8 +3290,13 @@ args = []
         config.xdg(),
     );
     spawn.assert_success("spawn-agent precustom");
-    assert_eq!(pane_option(&name, "@tt-surface"), "default");
-    let (reason, capture) = wait_idle_json(&name, config.xdg(), &["--ready-stable-seconds", "0"]);
+    assert_eq!(pane_option(&server, &name, "@tt-surface"), "default");
+    let (reason, capture) = wait_idle_json(
+        &server,
+        &name,
+        config.xdg(),
+        &["--ready-stable-seconds", "0"],
+    );
     assert_eq!(
         reason, "ready_matched",
         "a synthesized surface must carry the agent-level readiness fields; capture: {capture:?}"
@@ -2320,6 +3312,8 @@ fn agents_toml_unvalidated_default_surface_warns_and_records_pre_surface() {
         eprintln!("SKIP: tmux not on PATH");
         return;
     }
+
+    let server = IsolatedTmuxServer::start_inside();
 
     let config = AgentsConfig::new();
     // Naming built-in claude's flat surface as the default fails P2's promotion bar —
@@ -2338,10 +3332,8 @@ args = []
     ));
 
     let name = format!("builtin-default-{}", std::process::id());
-    let mut guard = PaneGuard::new();
-    guard.track(&name);
 
-    let spawn = run_bin_env(
+    let spawn = server.cli_env(
         &[
             "spawn-agent",
             "claude",
@@ -2357,7 +3349,7 @@ args = []
     );
     spawn.assert_success("spawn-agent claude with an overridden default");
     assert_eq!(
-        pane_option(&name, "@tt-surface"),
+        pane_option(&server, &name, "@tt-surface"),
         "rich",
         "an unvalidated declared default must fall back to the pre-surface rendering"
     );
@@ -2392,15 +3384,15 @@ fn builtin_claude_no_surface_records_rich_pre_surface() {
         return;
     }
 
+    let server = IsolatedTmuxServer::start_inside();
+
     let config = AgentsConfig::new();
     // Only the binary is overridden; the built-in surfaces and default are unchanged.
     config.write_agents_toml(&format!("[claude]\nbinary = \"{FAKE_TUI_BIN}\"\n"));
 
     let name = format!("builtin-claude-rich-{}", std::process::id());
-    let mut guard = PaneGuard::new();
-    guard.track(&name);
 
-    let spawn = run_bin_env(
+    let spawn = server.cli_env(
         &[
             "spawn-agent",
             "claude",
@@ -2416,7 +3408,7 @@ fn builtin_claude_no_surface_records_rich_pre_surface() {
     );
     spawn.assert_success("spawn-agent claude with no surface named");
     assert_eq!(
-        pane_option(&name, "@tt-surface"),
+        pane_option(&server, &name, "@tt-surface"),
         "rich",
         "an unpromoted flat surface must not become claude's default"
     );
@@ -2424,6 +3416,64 @@ fn builtin_claude_no_surface_records_rich_pre_surface() {
         !spawn.stderr.contains("warning:"),
         "the shipped default needs no warning; stderr: {:?}",
         spawn.stderr
+    );
+}
+
+/// ISSUE-260801-1310-03 acceptance: `spawn-agent --split window` from a calling pane
+/// in a numeric-named session (`0`, which already has window `0`) creates the agent's
+/// window in that session and records `@tt-agent`. Uses `tt-fake-tui` as the agent
+/// binary, so no vendor agent is needed.
+#[cfg(feature = "test-fixtures")]
+#[test]
+fn spawn_agent_split_window_from_numeric_session_lands_in_callers_session() {
+    let _serial = serial_guard();
+
+    if Command::new("tmux").arg("-V").output().is_err() {
+        eprintln!("SKIP: tmux not on PATH");
+        return;
+    }
+
+    let server = IsolatedTmuxServer::start_inside();
+    let calling = new_session_pane(&server, "0");
+    assert_eq!(
+        window_indexes(&server, "0"),
+        ["0"],
+        "session 0 must have window 0"
+    );
+
+    let config = AgentsConfig::new();
+    config.write_agents_toml(&format!("[claude]\nbinary = \"{FAKE_TUI_BIN}\"\n"));
+    let name = format!("spawn-split-window-numeric-{}", std::process::id());
+
+    let spawn = server.cli_from_pane(
+        &[
+            "spawn-agent",
+            "claude",
+            "--split",
+            "window",
+            "--bare",
+            "--name",
+            &name,
+            "--format",
+            "json",
+        ],
+        &calling,
+        Some(config.xdg()),
+    );
+    let pane = launched_pane_id(
+        &spawn,
+        "spawn-agent --split window from a pane in session 0",
+    );
+
+    assert_eq!(
+        tmux_format(&server, &pane, "#{session_id}"),
+        tmux_format(&server, &calling, "#{session_id}"),
+        "the agent's window must be in the calling pane's session 0"
+    );
+    assert_eq!(
+        tmux_format(&server, &pane, "#{@tt-agent}"),
+        "claude",
+        "the created pane must carry @tt-agent"
     );
 }
 
@@ -2436,6 +3486,8 @@ fn wait_idle_falls_back_to_idle_detection_without_patterns() {
         eprintln!("SKIP: tmux not on PATH");
         return;
     }
+
+    let server = IsolatedTmuxServer::start_inside();
 
     let config = AgentsConfig::new();
     config.write_agents_toml(&format!(
@@ -2454,11 +3506,8 @@ args = []
 
     let agent_pane = format!("nopattern-{}", std::process::id());
     let launch_pane = format!("nopattern-launch-{}", std::process::id());
-    let mut guard = PaneGuard::new();
-    guard.track(&agent_pane);
-    guard.track(&launch_pane);
 
-    let spawn = run_bin_env(
+    let spawn = server.cli_env(
         &[
             "spawn-agent",
             "nopattern",
@@ -2471,8 +3520,8 @@ args = []
         config.xdg(),
     );
     spawn.assert_success("spawn-agent nopattern");
-    wait_for_pane_ready(&agent_pane, Duration::from_secs(5));
-    let (reason, _) = wait_idle_json(&agent_pane, config.xdg(), &["--idle-seconds", "1"]);
+    wait_for_pane_ready(&server, &agent_pane, Duration::from_secs(5));
+    let (reason, _) = wait_idle_json(&server, &agent_pane, config.xdg(), &["--idle-seconds", "1"]);
     assert_eq!(
         reason, "idle",
         "a surface that supplies no patterns falls back to idle detection"
@@ -2480,10 +3529,15 @@ args = []
 
     // A `launch` pane has no agent and therefore no surface: idle detection as well.
     let quoted = format!("'{}'", FAKE_TUI_BIN.replace('\'', "'\\''"));
-    let launched = run_bin(&["launch", "--cmd", &quoted, "--name", &launch_pane, "--bare"]);
+    let launched = server.cli(&["launch", "--cmd", &quoted, "--name", &launch_pane, "--bare"]);
     launched.assert_success("launch fixture");
-    wait_for_pane_ready(&launch_pane, Duration::from_secs(5));
-    let (reason, _) = wait_idle_json(&launch_pane, config.xdg(), &["--idle-seconds", "1"]);
+    wait_for_pane_ready(&server, &launch_pane, Duration::from_secs(5));
+    let (reason, _) = wait_idle_json(
+        &server,
+        &launch_pane,
+        config.xdg(),
+        &["--idle-seconds", "1"],
+    );
     assert_eq!(
         reason, "idle",
         "a launch pane with no surface falls back to idle detection"
@@ -2499,6 +3553,8 @@ fn builtin_single_surface_reads_resolved_readiness_fields() {
         eprintln!("SKIP: tmux not on PATH");
         return;
     }
+
+    let server = IsolatedTmuxServer::start_inside();
 
     let config = AgentsConfig::new();
     // The built-in cursor surface is replaced with fixture-renderable patterns so the
@@ -2519,10 +3575,8 @@ args = []
     ));
 
     let name = format!("builtin-cursor-{}", std::process::id());
-    let mut guard = PaneGuard::new();
-    guard.track(&name);
 
-    let spawn = run_bin_env(
+    let spawn = server.cli_env(
         &[
             "spawn-agent",
             "cursor",
@@ -2535,8 +3589,13 @@ args = []
         config.xdg(),
     );
     spawn.assert_success("spawn-agent cursor");
-    assert_eq!(pane_option(&name, "@tt-surface"), "default");
-    let (reason, _) = wait_idle_json(&name, config.xdg(), &["--ready-stable-seconds", "0"]);
+    assert_eq!(pane_option(&server, &name, "@tt-surface"), "default");
+    let (reason, _) = wait_idle_json(
+        &server,
+        &name,
+        config.xdg(),
+        &["--ready-stable-seconds", "0"],
+    );
     assert_eq!(
         reason, "ready_matched",
         "cursor's single surface must carry the resolved readiness fields"
@@ -2643,16 +3702,16 @@ fn spawn_agent_rejects_malformed_resume_identifier_without_a_pane() {
         return;
     }
 
+    let server = IsolatedTmuxServer::start_inside();
+
     let config = AgentsConfig::new();
     let log = config.xdg().join("argv.log");
     let stub = write_argv_stub(&config, &log);
     config.write_agents_toml(&format!("[claude]\nbinary = \"{}\"\n", stub.display()));
 
     let name = format!("resume-bad-{}", std::process::id());
-    let mut guard = PaneGuard::new();
-    guard.track(&name);
 
-    let spawn = run_bin_env(
+    let spawn = server.cli_env(
         &[
             "spawn-agent",
             "claude",
@@ -2682,7 +3741,7 @@ fn spawn_agent_rejects_malformed_resume_identifier_without_a_pane() {
         spawn.stderr
     );
     assert!(
-        pane_id_by_name(&name).is_none(),
+        pane_id_by_name(&server, &name).is_none(),
         "a malformed identifier must create no pane"
     );
     assert!(
@@ -2701,6 +3760,8 @@ fn spawn_agent_maps_resume_through_surface_syntax_without_unvalidated_mark() {
         return;
     }
 
+    let server = IsolatedTmuxServer::start_inside();
+
     let config = AgentsConfig::new();
     let log = config.xdg().join("argv.log");
     let stub = write_argv_stub(&config, &log);
@@ -2708,10 +3769,8 @@ fn spawn_agent_maps_resume_through_surface_syntax_without_unvalidated_mark() {
 
     let uuid = "0123abcd-4567-89ab-cdef-0123456789ab";
     let name = format!("resume-good-{}", std::process::id());
-    let mut guard = PaneGuard::new();
-    guard.track(&name);
 
-    let spawn = run_bin_env(
+    let spawn = server.cli_env(
         &[
             "spawn-agent",
             "claude",
@@ -2735,9 +3794,9 @@ fn spawn_agent_maps_resume_through_surface_syntax_without_unvalidated_mark() {
         Some(uuid),
         "the launch command must carry the surface's resume syntax; argv: {args:?}"
     );
-    assert_eq!(pane_option(&name, "@tt-surface"), "rich");
+    assert_eq!(pane_option(&server, &name, "@tt-surface"), "rich");
     assert_eq!(
-        pane_option(&name, "@tt-surface-unvalidated"),
+        pane_option(&server, &name, "@tt-surface-unvalidated"),
         "",
         "the surface-supplied resume argument must not mark the pane surface-unvalidated"
     );
@@ -2753,6 +3812,8 @@ fn spawn_agent_maps_resume_through_a_subcommand_syntax() {
         return;
     }
 
+    let server = IsolatedTmuxServer::start_inside();
+
     let config = AgentsConfig::new();
     let log = config.xdg().join("argv.log");
     let stub = write_argv_stub(&config, &log);
@@ -2760,10 +3821,8 @@ fn spawn_agent_maps_resume_through_a_subcommand_syntax() {
 
     let uuid = "0123abcd-4567-89ab-cdef-0123456789ab";
     let name = format!("resume-codex-{}", std::process::id());
-    let mut guard = PaneGuard::new();
-    guard.track(&name);
 
-    let spawn = run_bin_env(
+    let spawn = server.cli_env(
         &[
             "spawn-agent",
             "codex",
@@ -2786,7 +3845,7 @@ fn spawn_agent_maps_resume_through_a_subcommand_syntax() {
         "the launch command must carry codex's positional resume syntax; argv: {args:?}"
     );
     assert_eq!(
-        pane_option(&name, "@tt-surface-unvalidated"),
+        pane_option(&server, &name, "@tt-surface-unvalidated"),
         "",
         "the surface-supplied resume argument must not mark the pane surface-unvalidated"
     );
@@ -2801,6 +3860,8 @@ fn spawn_agent_rejects_resume_when_the_resolved_surface_declares_none() {
         eprintln!("SKIP: tmux not on PATH");
         return;
     }
+
+    let server = IsolatedTmuxServer::start_inside();
 
     let config = AgentsConfig::new();
     let log = config.xdg().join("argv.log");
@@ -2820,10 +3881,8 @@ args = []
     ));
 
     let name = format!("resume-none-{}", std::process::id());
-    let mut guard = PaneGuard::new();
-    guard.track(&name);
 
-    let spawn = run_bin_env(
+    let spawn = server.cli_env(
         &[
             "spawn-agent",
             "noresume",
@@ -2852,7 +3911,7 @@ args = []
         spawn.stderr
     );
     assert!(
-        pane_id_by_name(&name).is_none(),
+        pane_id_by_name(&server, &name).is_none(),
         "an unsupported resume must create no pane"
     );
     assert!(
@@ -2871,6 +3930,8 @@ fn readme_dsh_rich_surface_rejects_identifier_outside_its_settled_shape() {
         return;
     }
 
+    let server = IsolatedTmuxServer::start_inside();
+
     let config = AgentsConfig::new();
     config.write_agents_toml(&readme_dsh_surfaces_toml());
 
@@ -2886,14 +3947,12 @@ fn readme_dsh_rich_surface_rejects_identifier_outside_its_settled_shape() {
     );
 
     let name = format!("resume-dsh-{}", std::process::id());
-    let mut guard = PaneGuard::new();
-    guard.track(&name);
 
     // `dshline-<uuid>` is the flat surface's shape, not the rich surface's; the rich
     // surface is selected explicitly (the README promotes the flat surface to default).
     // It must fail before any pane exists, so no live `dsh` binary is needed.
     let flat_shaped = "dshline-0123abcd-4567-89ab-cdef-0123456789ab";
-    let spawn = run_bin_env_path(
+    let spawn = server.cli_env_path(
         &[
             "spawn-agent",
             "dsh",
@@ -2925,7 +3984,7 @@ fn readme_dsh_rich_surface_rejects_identifier_outside_its_settled_shape() {
         spawn.stderr
     );
     assert!(
-        pane_id_by_name(&name).is_none(),
+        pane_id_by_name(&server, &name).is_none(),
         "no pane may be created when the identifier does not match the shape"
     );
     assert!(
@@ -2944,13 +4003,20 @@ fn readme_dsh_surfaces_accept_their_settled_resume_shapes() {
         return;
     }
 
+    let server = IsolatedTmuxServer::start_inside();
+
     // A stub stands in for the real binary so the README-declared shapes can be
     // exercised end to end without a live `dsh`.
-    for (surface, id) in [
+    // Each case keeps its pane until the server is torn down, so each needs its own
+    // name.
+    for (case, (surface, id)) in [
         ("rich", "session-0123abcd-4567-89ab-cdef-0123456789ab"),
         ("rich", "0123abcd-4567-89ab-cdef-0123456789ab"),
         ("flat", "dshline-0123abcd-4567-89ab-cdef-0123456789ab"),
-    ] {
+    ]
+    .into_iter()
+    .enumerate()
+    {
         let config = AgentsConfig::new();
         let log = config.xdg().join("argv.log");
         let stub = write_argv_stub(&config, &log);
@@ -2960,11 +4026,9 @@ fn readme_dsh_surfaces_accept_their_settled_resume_shapes() {
         );
         config.write_agents_toml(&toml);
 
-        let name = format!("resume-dsh-ok-{surface}-{}", std::process::id());
-        let mut guard = PaneGuard::new();
-        guard.track(&name);
+        let name = format!("resume-dsh-ok-{surface}-{case}-{}", std::process::id());
 
-        let spawn = run_bin_env(
+        let spawn = server.cli_env(
             &[
                 "spawn-agent",
                 "dsh",
@@ -3008,6 +4072,8 @@ fn pattern_surface_without_ready_footer_settles_by_idle_detection() {
         return;
     }
 
+    let server = IsolatedTmuxServer::start_inside();
+
     let config = AgentsConfig::new();
     // The surface declares a pattern, but the fixture never renders a matching footer.
     // The classifier returns `unknown`, so idle detection must still complete the wait.
@@ -3027,10 +4093,8 @@ args = []
     ));
 
     let name = format!("pattern-idle-{}", std::process::id());
-    let mut guard = PaneGuard::new();
-    guard.track(&name);
 
-    let spawn = run_bin_env(
+    let spawn = server.cli_env(
         &[
             "spawn-agent",
             "patternidle",
@@ -3043,9 +4107,9 @@ args = []
         config.xdg(),
     );
     spawn.assert_success("spawn-agent patternidle");
-    wait_for_pane_ready(&name, Duration::from_secs(5));
+    wait_for_pane_ready(&server, &name, Duration::from_secs(5));
 
-    let (reason, capture) = wait_idle_json(&name, config.xdg(), &["--idle-seconds", "1"]);
+    let (reason, capture) = wait_idle_json(&server, &name, config.xdg(), &["--idle-seconds", "1"]);
     assert_eq!(
         reason, "idle",
         "a pattern-bearing surface whose ready footer never matches must fall back to idle \
@@ -3062,6 +4126,8 @@ fn busy_only_surface_settles_by_idle_detection_once_busy_footer_gone() {
         eprintln!("SKIP: tmux not on PATH");
         return;
     }
+
+    let server = IsolatedTmuxServer::start_inside();
 
     let config = AgentsConfig::new();
     config.write_agents_toml(&format!(
@@ -3080,10 +4146,8 @@ args = []
     ));
 
     let name = format!("busy-only-{}", std::process::id());
-    let mut guard = PaneGuard::new();
-    guard.track(&name);
 
-    let spawn = run_bin_env(
+    let spawn = server.cli_env(
         &[
             "spawn-agent",
             "busyonly",
@@ -3096,16 +4160,16 @@ args = []
         config.xdg(),
     );
     spawn.assert_success("spawn-agent busyonly");
-    wait_for_pane_ready(&name, Duration::from_secs(5));
+    wait_for_pane_ready(&server, &name, Duration::from_secs(5));
 
     // Show the busy footer, then clear it: the fixture redraws a single footer row, so a
     // state report removes the active busy footer.
-    fake_tui_command(&name, "busy");
-    wait_for_pane_text(&name, "busy: BUSY-ONLY", Duration::from_secs(5));
-    fake_tui_command(&name, "normal");
-    wait_for_pane_text_absent(&name, "busy: BUSY-ONLY", Duration::from_secs(5));
+    fake_tui_command(&server, &name, "busy");
+    wait_for_pane_text(&server, &name, "busy: BUSY-ONLY", Duration::from_secs(5));
+    fake_tui_command(&server, &name, "normal");
+    wait_for_pane_text_absent(&server, &name, "busy: BUSY-ONLY", Duration::from_secs(5));
 
-    let (reason, capture) = wait_idle_json(&name, config.xdg(), &["--idle-seconds", "1"]);
+    let (reason, capture) = wait_idle_json(&server, &name, config.xdg(), &["--idle-seconds", "1"]);
     assert_eq!(
         reason, "idle",
         "a busy-only surface with no busy footer on screen classifies unknown and must settle \
@@ -3127,6 +4191,8 @@ fn static_busy_footer_does_not_settle_as_idle() {
         return;
     }
 
+    let server = IsolatedTmuxServer::start_inside();
+
     let config = AgentsConfig::new();
     config.write_agents_toml(&format!(
         r#"
@@ -3144,10 +4210,8 @@ args = []
     ));
 
     let name = format!("busy-static-{}", std::process::id());
-    let mut guard = PaneGuard::new();
-    guard.track(&name);
 
-    let spawn = run_bin_env(
+    let spawn = server.cli_env(
         &[
             "spawn-agent",
             "busystatic",
@@ -3160,13 +4224,13 @@ args = []
         config.xdg(),
     );
     spawn.assert_success("spawn-agent busystatic");
-    wait_for_pane_ready(&name, Duration::from_secs(5));
+    wait_for_pane_ready(&server, &name, Duration::from_secs(5));
 
-    fake_tui_command(&name, "busy");
-    wait_for_pane_text(&name, "busy: STATIC-BUSY", Duration::from_secs(5));
+    fake_tui_command(&server, &name, "busy");
+    wait_for_pane_text(&server, &name, "busy: STATIC-BUSY", Duration::from_secs(5));
 
     // `wait_idle_json` pins `--timeout 10`, so build the shorter-timeout invocation here.
-    let out = run_bin_env(
+    let out = server.cli_env(
         &[
             "wait-idle",
             "--target",
@@ -3209,17 +4273,17 @@ fn stale_recorded_surface_resolves_to_no_surface() {
         return;
     }
 
+    let server = IsolatedTmuxServer::start_inside();
+
     let config = AgentsConfig::new();
     config.write_agents_toml(&surface_agent_toml());
 
     let name = format!("surface-stale-{}", std::process::id());
-    let mut guard = PaneGuard::new();
-    guard.track(&name);
 
     // Launch on the rich rendering, whose ready footer is on screen, then point the record at
     // a surface the registry does not have. The record must not be reinterpreted as the
     // pre-surface rendering (which would apply the rich patterns).
-    let spawn = run_bin_env(
+    let spawn = server.cli_env(
         &[
             "spawn-agent",
             "surfagent",
@@ -3234,12 +4298,12 @@ fn stale_recorded_surface_resolves_to_no_surface() {
         config.xdg(),
     );
     spawn.assert_success("spawn-agent surfagent on rich surface");
-    wait_for_pane_ready(&name, Duration::from_secs(5));
-    let pane = pane_id_by_name(&name).expect("spawned pane should exist");
-    let stale = run_tmux(&["set-option", "-p", "-t", &pane, "@tt-surface", "gone"]);
+    wait_for_pane_ready(&server, &name, Duration::from_secs(5));
+    let pane = pane_id_by_name(&server, &name).expect("spawned pane should exist");
+    let stale = server.tmux(&["set-option", "-p", "-t", &pane, "@tt-surface", "gone"]);
     stale.assert_success("point @tt-surface at a missing surface");
 
-    let (reason, capture) = wait_idle_json(&name, config.xdg(), &["--idle-seconds", "1"]);
+    let (reason, capture) = wait_idle_json(&server, &name, config.xdg(), &["--idle-seconds", "1"]);
     assert_eq!(
         reason, "idle",
         "a record naming an unknown surface must resolve to no surface and use idle detection, \
@@ -3265,6 +4329,8 @@ fn prompt_invalid_surface_regex_sends_nothing() {
         return;
     }
 
+    let server = IsolatedTmuxServer::start_inside();
+
     let config = AgentsConfig::new();
     config.write_agents_toml(&format!(
         r#"
@@ -3282,10 +4348,8 @@ args = []
     ));
 
     let name = format!("prompt-badregex-{}", std::process::id());
-    let mut guard = PaneGuard::new();
-    guard.track(&name);
 
-    let spawn = run_bin_env(
+    let spawn = server.cli_env(
         &[
             "spawn-agent",
             "badsurf",
@@ -3298,18 +4362,18 @@ args = []
         config.xdg(),
     );
     spawn.assert_success("spawn-agent badsurf");
-    wait_for_pane_ready(&name, Duration::from_secs(5));
+    wait_for_pane_ready(&server, &name, Duration::from_secs(5));
 
     // The surface's `busy_regex` is invalid. `prompt` must fail while resolving patterns,
     // before it sends the text, so a retry cannot submit the prompt twice.
     let text = "SHOULD-NOT-BE-SENT";
-    let out = run_bin_env(&["prompt", "--target", &name, text], config.xdg());
+    let out = server.cli_env(&["prompt", "--target", &name, text], config.xdg());
     assert_ne!(
         out.status, 0,
         "prompt with an invalid surface regex must fail; stdout: {}\nstderr: {}",
         out.stdout, out.stderr
     );
-    let capture = capture_pane_text(&name);
+    let capture = capture_pane_text(&server, &name);
     assert!(
         !capture.contains(text),
         "prompt must not deliver text when surface patterns fail to compile; capture: {capture:?}"
@@ -3331,6 +4395,8 @@ fn fake_tui_redraws_single_footer_through_ready_busy_ready() {
         return;
     }
 
+    let server = IsolatedTmuxServer::start_inside();
+
     let config = AgentsConfig::new();
     config.write_agents_toml(&format!(
         r#"
@@ -3349,10 +4415,8 @@ args = []
     ));
 
     let name = format!("both-footer-{}", std::process::id());
-    let mut guard = PaneGuard::new();
-    guard.track(&name);
 
-    let spawn = run_bin_env(
+    let spawn = server.cli_env(
         &[
             "spawn-agent",
             "bothfoot",
@@ -3365,28 +4429,33 @@ args = []
         config.xdg(),
     );
     spawn.assert_success("spawn-agent bothfoot");
-    wait_for_pane_ready(&name, Duration::from_secs(5));
-    wait_for_pane_text(&name, "ready: BOTH-READY", Duration::from_secs(5));
+    wait_for_pane_ready(&server, &name, Duration::from_secs(5));
+    wait_for_pane_text(&server, &name, "ready: BOTH-READY", Duration::from_secs(5));
 
-    fake_tui_command(&name, "busy");
-    wait_for_pane_text(&name, "busy: BOTH-BUSY", Duration::from_secs(5));
-    let busy_capture = capture_pane_text(&name);
+    fake_tui_command(&server, &name, "busy");
+    wait_for_pane_text(&server, &name, "busy: BOTH-BUSY", Duration::from_secs(5));
+    let busy_capture = capture_pane_text(&server, &name);
     assert!(
         !busy_capture.contains("ready: BOTH-READY"),
         "the busy footer must replace the ready footer, not append below it; capture: \
          {busy_capture:?}"
     );
 
-    fake_tui_command(&name, "ready");
-    wait_for_pane_text(&name, "ready: BOTH-READY", Duration::from_secs(5));
-    let ready_capture = capture_pane_text(&name);
+    fake_tui_command(&server, &name, "ready");
+    wait_for_pane_text(&server, &name, "ready: BOTH-READY", Duration::from_secs(5));
+    let ready_capture = capture_pane_text(&server, &name);
     assert!(
         !ready_capture.contains("busy: BOTH-BUSY"),
         "the ready footer must replace the busy footer, not append below it; capture: \
          {ready_capture:?}"
     );
 
-    let (reason, capture) = wait_idle_json(&name, config.xdg(), &["--ready-stable-seconds", "0"]);
+    let (reason, capture) = wait_idle_json(
+        &server,
+        &name,
+        config.xdg(),
+        &["--ready-stable-seconds", "0"],
+    );
     assert_eq!(
         reason, "ready_matched",
         "after ready→busy→ready the pane must classify idle on the ready footer; capture: \
@@ -3409,6 +4478,8 @@ fn builtin_codex_settles_by_idle_detection() {
         return;
     }
 
+    let server = IsolatedTmuxServer::start_inside();
+
     let config = AgentsConfig::new();
     // Only the launched binary is swapped; codex's built-in surface ships no readiness
     // patterns, so idle detection is the only completion signal.
@@ -3421,10 +4492,8 @@ binary = "{fake}"
     ));
 
     let name = format!("builtin-codex-{}", std::process::id());
-    let mut guard = PaneGuard::new();
-    guard.track(&name);
 
-    let spawn = run_bin_env(
+    let spawn = server.cli_env(
         &[
             "spawn-agent",
             "codex",
@@ -3437,10 +4506,10 @@ binary = "{fake}"
         config.xdg(),
     );
     spawn.assert_success("spawn-agent codex");
-    assert_eq!(pane_option(&name, "@tt-surface"), "default");
-    wait_for_pane_ready(&name, Duration::from_secs(5));
+    assert_eq!(pane_option(&server, &name, "@tt-surface"), "default");
+    wait_for_pane_ready(&server, &name, Duration::from_secs(5));
 
-    let (reason, capture) = wait_idle_json(&name, config.xdg(), &["--idle-seconds", "1"]);
+    let (reason, capture) = wait_idle_json(&server, &name, config.xdg(), &["--idle-seconds", "1"]);
     assert_eq!(
         reason, "idle",
         "codex ships no readiness patterns and must settle by idle detection; capture: {capture:?}"
@@ -3456,6 +4525,8 @@ fn builtin_cursor_shipped_ready_regex_matches_fixture_footer() {
         eprintln!("SKIP: tmux not on PATH");
         return;
     }
+
+    let server = IsolatedTmuxServer::start_inside();
 
     let config = AgentsConfig::new();
     // Only the binary is swapped: cursor's shipped ready_regex keys off its input-prompt
@@ -3473,10 +4544,8 @@ binary = "{stub}"
     ));
 
     let name = format!("builtin-cursor-shipped-{}", std::process::id());
-    let mut guard = PaneGuard::new();
-    guard.track(&name);
 
-    let spawn = run_bin_env(
+    let spawn = server.cli_env(
         &[
             "spawn-agent",
             "cursor",
@@ -3489,10 +4558,15 @@ binary = "{stub}"
         config.xdg(),
     );
     spawn.assert_success("spawn-agent cursor");
-    assert_eq!(pane_option(&name, "@tt-surface"), "default");
-    wait_for_pane_ready(&name, Duration::from_secs(5));
+    assert_eq!(pane_option(&server, &name, "@tt-surface"), "default");
+    wait_for_pane_ready(&server, &name, Duration::from_secs(5));
 
-    let (reason, capture) = wait_idle_json(&name, config.xdg(), &["--ready-stable-seconds", "0"]);
+    let (reason, capture) = wait_idle_json(
+        &server,
+        &name,
+        config.xdg(),
+        &["--ready-stable-seconds", "0"],
+    );
     assert_eq!(
         reason, "ready_matched",
         "cursor's shipped ready_regex must match the fixture footer; capture: {capture:?}"
@@ -3509,6 +4583,8 @@ fn builtin_agy_shipped_ready_regex_matches_fixture_footer() {
         return;
     }
 
+    let server = IsolatedTmuxServer::start_inside();
+
     let config = AgentsConfig::new();
     // Only the binary is swapped: agy's shipped ready_regex keys off its bottom-line footer.
     let agy_stub = config.write_executable(
@@ -3524,10 +4600,8 @@ binary = "{stub}"
     ));
 
     let name = format!("builtin-agy-{}", std::process::id());
-    let mut guard = PaneGuard::new();
-    guard.track(&name);
 
-    let spawn = run_bin_env(
+    let spawn = server.cli_env(
         &[
             "spawn-agent",
             "agy",
@@ -3540,10 +4614,15 @@ binary = "{stub}"
         config.xdg(),
     );
     spawn.assert_success("spawn-agent agy");
-    assert_eq!(pane_option(&name, "@tt-surface"), "default");
-    wait_for_pane_ready(&name, Duration::from_secs(5));
+    assert_eq!(pane_option(&server, &name, "@tt-surface"), "default");
+    wait_for_pane_ready(&server, &name, Duration::from_secs(5));
 
-    let (reason, capture) = wait_idle_json(&name, config.xdg(), &["--ready-stable-seconds", "0"]);
+    let (reason, capture) = wait_idle_json(
+        &server,
+        &name,
+        config.xdg(),
+        &["--ready-stable-seconds", "0"],
+    );
     assert_eq!(
         reason, "ready_matched",
         "agy's shipped ready_regex must match the fixture footer; capture: {capture:?}"
@@ -3559,6 +4638,8 @@ fn builtin_cursor_quiet_pane_falls_back_to_idle() {
         eprintln!("SKIP: tmux not on PATH");
         return;
     }
+
+    let server = IsolatedTmuxServer::start_inside();
 
     let config = AgentsConfig::new();
     // cursor's shipped ready_regex never matches this quiet pane, so the classifier returns
@@ -3576,10 +4657,8 @@ binary = "{stub}"
     ));
 
     let name = format!("builtin-cursor-quiet-{}", std::process::id());
-    let mut guard = PaneGuard::new();
-    guard.track(&name);
 
-    let spawn = run_bin_env(
+    let spawn = server.cli_env(
         &[
             "spawn-agent",
             "cursor",
@@ -3592,9 +4671,9 @@ binary = "{stub}"
         config.xdg(),
     );
     spawn.assert_success("spawn-agent cursor");
-    wait_for_pane_ready(&name, Duration::from_secs(5));
+    wait_for_pane_ready(&server, &name, Duration::from_secs(5));
 
-    let (reason, capture) = wait_idle_json(&name, config.xdg(), &["--idle-seconds", "1"]);
+    let (reason, capture) = wait_idle_json(&server, &name, config.xdg(), &["--idle-seconds", "1"]);
     assert_eq!(
         reason, "idle",
         "a quiet pane whose shipped ready_regex does not match must fall back to idle detection; \
@@ -3621,14 +4700,14 @@ fn prompt_bracketed_paste_delivers_one_submission_and_reports_guaranteed() {
         return;
     }
 
+    let server = IsolatedTmuxServer::start_inside();
+
     let config = AgentsConfig::new();
     let report = config.xdg().join("bracketed-report.bin");
     let name = format!("prompt-bracketed-{}", std::process::id());
-    let mut guard = PaneGuard::new();
-    guard.track(&name);
 
-    launch_fake_tui_with(&name, &["--report", report.to_str().unwrap()]);
-    wait_for_bracket_paste_flag(&name, true, Duration::from_secs(5));
+    launch_fake_tui_with(&server, &name, &["--report", report.to_str().unwrap()]);
+    wait_for_bracket_paste_flag(&server, &name, true, Duration::from_secs(5));
 
     let payload = large_multiline_prompt();
     assert!(
@@ -3639,7 +4718,7 @@ fn prompt_bracketed_paste_delivers_one_submission_and_reports_guaranteed() {
 
     // JSON reports the structured outcome; the fixture's report is the oracle for
     // the text, never the pane's rendered bytes (tmux renders pastes itself).
-    let json_out = run_bin_env(
+    let json_out = server.cli_env(
         &[
             "prompt",
             "--target",
@@ -3686,10 +4765,10 @@ fn prompt_bracketed_paste_delivers_one_submission_and_reports_guaranteed() {
         "the fixture's reported submission must match what was sent"
     );
 
-    assert_no_prompt_buffer();
+    assert_no_prompt_buffer(&server);
 
     // Raw and concise carry the guarantee on stderr, where they have no field.
-    let concise = run_bin_env(
+    let concise = server.cli_env(
         &[
             "prompt",
             "--target",
@@ -3713,7 +4792,7 @@ fn prompt_bracketed_paste_delivers_one_submission_and_reports_guaranteed() {
         concise.stderr
     );
 
-    let raw = run_bin_env(
+    let raw = server.cli_env(
         &[
             "prompt",
             "--target",
@@ -3743,7 +4822,7 @@ fn prompt_bracketed_paste_delivers_one_submission_and_reports_guaranteed() {
             .count()
             == 3
     });
-    assert_no_prompt_buffer();
+    assert_no_prompt_buffer(&server);
 }
 
 #[cfg(feature = "test-fixtures")]
@@ -3756,21 +4835,21 @@ fn prompt_transport_failure_after_load_buffer_leaves_no_prompt_buffer() {
         return;
     }
 
+    let server = IsolatedTmuxServer::start_inside();
+
     let config = AgentsConfig::new();
     let report = config.xdg().join("transport-report.bin");
     let name = format!("prompt-transport-failure-{}", std::process::id());
-    let mut guard = PaneGuard::new();
-    guard.track(&name);
 
-    launch_fake_tui_with(&name, &["--report", report.to_str().unwrap()]);
-    wait_for_bracket_paste_flag(&name, true, Duration::from_secs(5));
+    launch_fake_tui_with(&server, &name, &["--report", report.to_str().unwrap()]);
+    wait_for_bracket_paste_flag(&server, &name, true, Duration::from_secs(5));
 
     // Interpose a fake `tmux` that fails `paste-buffer`; `load-buffer` and the
     // buffer cleanup still reach the real server.
     config.write_executable("tmux", &tmux_wrapper_failing("paste-buffer"));
 
     let text = "transport failure payload\nsecond line\n";
-    let out = run_bin_env_path(
+    let out = server.cli_env_path(
         &[
             "prompt",
             "--target",
@@ -3803,7 +4882,7 @@ fn prompt_transport_failure_after_load_buffer_leaves_no_prompt_buffer() {
         !events.iter().any(|event| event.kind == "submission"),
         "paste-buffer failed, so no submission should have reached the fixture; events: {events:?}"
     );
-    assert_no_prompt_buffer();
+    assert_no_prompt_buffer(&server);
 }
 
 #[cfg(feature = "test-fixtures")]
@@ -3815,6 +4894,8 @@ fn prompt_refuses_multiline_when_live_flag_clear_but_surface_declares_capability
         eprintln!("SKIP: tmux not on PATH");
         return;
     }
+
+    let server = IsolatedTmuxServer::start_inside();
 
     let config = AgentsConfig::new();
     let report = config.xdg().join("refusal-report.bin");
@@ -3835,10 +4916,8 @@ args = []
     ));
 
     let name = format!("prompt-refusal-{}", std::process::id());
-    let mut guard = PaneGuard::new();
-    guard.track(&name);
 
-    let spawn = run_bin_env(
+    let spawn = server.cli_env(
         &[
             "spawn-agent",
             "refuser",
@@ -3851,14 +4930,14 @@ args = []
         config.xdg(),
     );
     spawn.assert_success("spawn-agent refuser");
-    assert_eq!(pane_option(&name, "@tt-surface"), "default");
-    wait_for_pane_ready(&name, Duration::from_secs(5));
-    wait_for_bracket_paste_flag(&name, false, Duration::from_secs(5));
+    assert_eq!(pane_option(&server, &name, "@tt-surface"), "default");
+    wait_for_pane_ready(&server, &name, Duration::from_secs(5));
+    wait_for_bracket_paste_flag(&server, &name, false, Duration::from_secs(5));
 
     let text = "first line\nsecond line\nthird line";
 
     // JSON reports the refusal field; the command still exits non-zero.
-    let json_out = run_bin_env(
+    let json_out = server.cli_env(
         &[
             "prompt",
             "--target",
@@ -3891,7 +4970,7 @@ args = []
     );
 
     for format in ["concise", "raw"] {
-        let out = run_bin_env(
+        let out = server.cli_env(
             &[
                 "prompt",
                 "--target",
@@ -3916,7 +4995,7 @@ args = []
         read_report(&report).is_empty(),
         "a refusal must not deliver anything to the fixture"
     );
-    assert_no_prompt_buffer();
+    assert_no_prompt_buffer(&server);
 }
 
 #[cfg(feature = "test-fixtures")]
@@ -3929,21 +5008,22 @@ fn prompt_without_surface_and_no_bracketed_paste_delivers_and_reports_unavailabl
         return;
     }
 
+    let server = IsolatedTmuxServer::start_inside();
+
     let config = AgentsConfig::new();
     let report = config.xdg().join("unavailable-report.bin");
     let name = format!("prompt-unavailable-{}", std::process::id());
-    let mut guard = PaneGuard::new();
-    guard.track(&name);
 
     launch_fake_tui_with(
+        &server,
         &name,
         &["--no-bracketed-paste", "--report", report.to_str().unwrap()],
     );
-    wait_for_bracket_paste_flag(&name, false, Duration::from_secs(5));
+    wait_for_bracket_paste_flag(&server, &name, false, Duration::from_secs(5));
 
     let text = "alpha line one\nbeta line two\ngamma line three";
 
-    let json_out = run_bin_env(
+    let json_out = server.cli_env(
         &[
             "prompt",
             "--target",
@@ -3991,7 +5071,7 @@ fn prompt_without_surface_and_no_bracketed_paste_delivers_and_reports_unavailabl
     }
 
     for format in ["concise", "raw"] {
-        let out = run_bin_env(
+        let out = server.cli_env(
             &[
                 "prompt",
                 "--target",
@@ -4014,7 +5094,7 @@ fn prompt_without_surface_and_no_bracketed_paste_delivers_and_reports_unavailabl
         );
     }
 
-    assert_no_prompt_buffer();
+    assert_no_prompt_buffer(&server);
 }
 
 #[cfg(feature = "test-fixtures")]
@@ -4027,18 +5107,18 @@ fn prompt_empty_text_still_submits_with_enter_and_leaves_no_buffer() {
         return;
     }
 
+    let server = IsolatedTmuxServer::start_inside();
+
     let config = AgentsConfig::new();
     let report = config.xdg().join("empty-report.bin");
     let name = format!("prompt-empty-{}", std::process::id());
-    let mut guard = PaneGuard::new();
-    guard.track(&name);
 
-    launch_fake_tui_with(&name, &["--report", report.to_str().unwrap()]);
-    wait_for_bracket_paste_flag(&name, true, Duration::from_secs(5));
+    launch_fake_tui_with(&server, &name, &["--report", report.to_str().unwrap()]);
+    wait_for_bracket_paste_flag(&server, &name, true, Duration::from_secs(5));
 
     // Empty text has no buffer to load; it must still submit with Enter and
     // report the live outcome instead of failing in paste-buffer.
-    let out = run_bin_env(
+    let out = server.cli_env(
         &[
             "prompt",
             "--target",
@@ -4071,13 +5151,13 @@ fn prompt_empty_text_still_submits_with_enter_and_leaves_no_buffer() {
 
     // The fixture observes the Enter even though the composer was empty; nothing
     // is composed, so the report carries no submission.
-    wait_for_pane_text(&name, "tt-fake-tui: enter", Duration::from_secs(5));
+    wait_for_pane_text(&server, &name, "tt-fake-tui: enter", Duration::from_secs(5));
     assert!(
         read_report(&report).is_empty(),
         "an empty prompt must not create a submission record"
     );
 
-    assert_no_prompt_buffer();
+    assert_no_prompt_buffer(&server);
 }
 
 #[cfg(feature = "test-fixtures")]
@@ -4089,6 +5169,8 @@ fn prompt_refuses_when_flag_clears_between_load_and_paste() {
         eprintln!("SKIP: tmux not on PATH");
         return;
     }
+
+    let server = IsolatedTmuxServer::start_inside();
 
     let config = AgentsConfig::new();
     let report = config.xdg().join("flip-report.bin");
@@ -4109,10 +5191,8 @@ args = []
     ));
 
     let name = format!("prompt-flip-{}", std::process::id());
-    let mut guard = PaneGuard::new();
-    guard.track(&name);
 
-    let spawn = run_bin_env(
+    let spawn = server.cli_env(
         &[
             "spawn-agent",
             "flipper",
@@ -4125,18 +5205,18 @@ args = []
         config.xdg(),
     );
     spawn.assert_success("spawn-agent flipper");
-    assert_eq!(pane_option(&name, "@tt-surface"), "default");
-    wait_for_pane_ready(&name, Duration::from_secs(5));
-    wait_for_bracket_paste_flag(&name, true, Duration::from_secs(5));
+    assert_eq!(pane_option(&server, &name, "@tt-surface"), "default");
+    wait_for_pane_ready(&server, &name, Duration::from_secs(5));
+    wait_for_bracket_paste_flag(&server, &name, true, Duration::from_secs(5));
 
-    let pane = pane_id_by_name(&name).expect("fixture pane should exist");
+    let pane = pane_id_by_name(&server, &name).expect("fixture pane should exist");
     config.write_executable("tmux", &tmux_wrapper_flipping_bracket_paste(&pane));
 
     // The pre-load read sees the flag set, so the prompt loads. The interposed
     // wrapper clears the flag during `load-buffer`; the read immediately before
     // pasting must now refuse and discard the loaded buffer.
     let text = "first line\nsecond line\n";
-    let out = run_bin_env_path(
+    let out = server.cli_env_path(
         &[
             "prompt",
             "--target",
@@ -4174,7 +5254,7 @@ args = []
         read_report(&report).is_empty(),
         "a refusal before pasting must deliver nothing to the fixture"
     );
-    assert_no_prompt_buffer();
+    assert_no_prompt_buffer(&server);
 }
 
 #[cfg(feature = "test-fixtures")]
@@ -4187,14 +5267,14 @@ fn prompt_post_load_flag_read_failure_leaves_no_prompt_buffer() {
         return;
     }
 
+    let server = IsolatedTmuxServer::start_inside();
+
     let config = AgentsConfig::new();
     let report = config.xdg().join("flag-read-report.bin");
     let name = format!("prompt-flag-read-failure-{}", std::process::id());
-    let mut guard = PaneGuard::new();
-    guard.track(&name);
 
-    launch_fake_tui_with(&name, &["--report", report.to_str().unwrap()]);
-    wait_for_bracket_paste_flag(&name, true, Duration::from_secs(5));
+    launch_fake_tui_with(&server, &name, &["--report", report.to_str().unwrap()]);
+    wait_for_bracket_paste_flag(&server, &name, true, Duration::from_secs(5));
 
     // Make only the `display-message` that follows `load-buffer` fail, so the
     // already-loaded buffer must be cleaned up on the error path.
@@ -4202,7 +5282,7 @@ fn prompt_post_load_flag_read_failure_leaves_no_prompt_buffer() {
     config.write_executable("tmux", &tmux_wrapper_failing_post_load_flag_read(&state));
 
     let text = "post-load read failure payload\nsecond line\n";
-    let out = run_bin_env_path(
+    let out = server.cli_env_path(
         &[
             "prompt",
             "--target",
@@ -4234,7 +5314,7 @@ fn prompt_post_load_flag_read_failure_leaves_no_prompt_buffer() {
         !events.iter().any(|event| event.kind == "submission"),
         "no paste should have reached the fixture; events: {events:?}"
     );
-    assert_no_prompt_buffer();
+    assert_no_prompt_buffer(&server);
 }
 
 // ---------------------------------------------------------------------------
@@ -4261,9 +5341,15 @@ fn prompt_json_args<'a>(name: &'a str, text: &'a str, extra: &'a [&'a str]) -> V
 
 /// Run `prompt` with the injected registry and return the parsed JSON payload.
 #[cfg(feature = "test-fixtures")]
-fn prompt_json(name: &str, text: &str, xdg: &std::path::Path, extra: &[&str]) -> serde_json::Value {
+fn prompt_json(
+    server: &IsolatedTmuxServer,
+    name: &str,
+    text: &str,
+    xdg: &std::path::Path,
+    extra: &[&str],
+) -> serde_json::Value {
     let args = prompt_json_args(name, text, extra);
-    let out = run_bin_env(&args, xdg);
+    let out = server.cli_env(&args, xdg);
     out.assert_success("prompt json");
     serde_json::from_str(out.stdout.trim()).expect("prompt JSON should parse")
 }
@@ -4272,6 +5358,7 @@ fn prompt_json(name: &str, text: &str, xdg: &std::path::Path, extra: &[&str]) ->
 /// rewrite the P7 probe.
 #[cfg(feature = "test-fixtures")]
 fn prompt_json_path(
+    server: &IsolatedTmuxServer,
     name: &str,
     text: &str,
     xdg: &std::path::Path,
@@ -4279,7 +5366,7 @@ fn prompt_json_path(
     dir: &std::path::Path,
 ) -> serde_json::Value {
     let args = prompt_json_args(name, text, extra);
-    let out = run_bin_env_path(&args, xdg, dir);
+    let out = server.cli_env_path(&args, xdg, dir);
     out.assert_success("prompt json");
     serde_json::from_str(out.stdout.trim()).expect("prompt JSON should parse")
 }
@@ -4287,8 +5374,14 @@ fn prompt_json_path(
 /// Run `prompt` at a chosen format, returning the raw command output so a test can
 /// inspect the stderr dimension notices.
 #[cfg(feature = "test-fixtures")]
-fn prompt_at_format(name: &str, text: &str, format: &str, xdg: &std::path::Path) -> CmdOutput {
-    run_bin_env(
+fn prompt_at_format(
+    server: &IsolatedTmuxServer,
+    name: &str,
+    text: &str,
+    format: &str,
+    xdg: &std::path::Path,
+) -> CmdOutput {
+    server.cli_env(
         &[
             "prompt",
             "--target",
@@ -4309,13 +5402,14 @@ fn prompt_at_format(name: &str, text: &str, format: &str, xdg: &std::path::Path)
 /// can rewrite the P7 probe.
 #[cfg(feature = "test-fixtures")]
 fn prompt_at_format_path(
+    server: &IsolatedTmuxServer,
     name: &str,
     text: &str,
     format: &str,
     xdg: &std::path::Path,
     dir: &std::path::Path,
 ) -> CmdOutput {
-    run_bin_env_path(
+    server.cli_env_path(
         &[
             "prompt",
             "--target",
@@ -4371,6 +5465,7 @@ args = []
 /// Spawn the `turn` observation agent bare and wait for its ready footer.
 #[cfg(feature = "test-fixtures")]
 fn spawn_turn_agent(
+    server: &IsolatedTmuxServer,
     name: &str,
     config: &AgentsConfig,
     report: &std::path::Path,
@@ -4381,19 +5476,20 @@ fn spawn_turn_agent(
     } else {
         &[]
     };
-    spawn_turn_agent_with(name, config, report, extra);
+    spawn_turn_agent_with(server, name, config, report, extra);
 }
 
 /// Spawn the `turn` observation agent bare with extra fixture flags.
 #[cfg(feature = "test-fixtures")]
 fn spawn_turn_agent_with(
+    server: &IsolatedTmuxServer,
     name: &str,
     config: &AgentsConfig,
     report: &std::path::Path,
     extra: &[&str],
 ) {
     config.write_agents_toml(&observation_agents_toml(report, extra));
-    let spawn = run_bin_env(
+    let spawn = server.cli_env(
         &[
             "spawn-agent",
             "turn",
@@ -4406,7 +5502,7 @@ fn spawn_turn_agent_with(
         config.xdg(),
     );
     spawn.assert_success("spawn-agent turn");
-    wait_for_pane_text(name, "ready: TURN-READY", Duration::from_secs(5));
+    wait_for_pane_text(server, name, "ready: TURN-READY", Duration::from_secs(5));
 }
 
 /// A registry with one `gate` agent whose readiness patterns the caller controls, so a
@@ -4446,18 +5542,18 @@ enum ProbeCounter<'a> {
 }
 
 /// A fake `tmux` that rewrites the P7 probe's `#{history_collected}` field while
-/// preserving the real `cursor_y` and `alternate_on`, so both eviction paths are
+/// preserving the real `cursor_y`, `alternate_on` and `pane_width`, so both eviction paths are
 /// exercised regardless of whether the host tmux provides the counter.
 #[cfg(feature = "test-fixtures")]
 fn tmux_wrapper_probe(counter: ProbeCounter<'_>) -> String {
     let real = real_tmux_path();
     let probe_body = match counter {
-        ProbeCounter::Absent => "printf '%s\\n' \"950 1000 $3 $4\"\n".to_owned(),
-        ProbeCounter::AbsentBelowFloor => "printf '%s\\n' \"100 1000 $3 $4\"\n".to_owned(),
-        ProbeCounter::Constant(value) => format!("printf '%s\\n' \"$1 $2 $3 $4 {value}\"\n"),
+        ProbeCounter::Absent => "printf '%s\\n' \"950 1000 $3 $4 $5\"\n".to_owned(),
+        ProbeCounter::AbsentBelowFloor => "printf '%s\\n' \"100 1000 $3 $4 $5\"\n".to_owned(),
+        ProbeCounter::Constant(value) => format!("printf '%s\\n' \"$1 $2 $3 $4 $5 {value}\"\n"),
         ProbeCounter::Increment(state) => format!(
             "n=0\n[ -f '{state}' ] && n=$(cat '{state}')\nn=$((n+1))\nprintf '%s' \"$n\" > \
-             '{state}'\nprintf '%s\\n' \"$1 $2 $3 $4 $n\"\n",
+             '{state}'\nprintf '%s\\n' \"$1 $2 $3 $4 $5 $n\"\n",
             state = state.display(),
         ),
     };
@@ -4468,7 +5564,7 @@ fn tmux_wrapper_probe(counter: ProbeCounter<'_>) -> String {
          case \"$5\" in\n\
          *'#{{history_collected}}'*)\n\
          base=$(\"$REAL\" \"$1\" \"$2\" \"$3\" \"$4\" '#{{history_size}} #{{history_limit}} \
-         #{{cursor_y}} #{{alternate_on}}')\n\
+         #{{cursor_y}} #{{alternate_on}} #{{pane_width}}')\n\
          set -- $base\n\
          {probe_body}\
          exit 0 ;;\n\
@@ -4478,195 +5574,6 @@ fn tmux_wrapper_probe(counter: ProbeCounter<'_>) -> String {
         real = real,
         probe_body = probe_body,
     )
-}
-
-/// A test-owned, config-isolated tmux server. Every command runs with `TMUX` and
-/// `TMUX_PANE` removed and `TMUX_TMPDIR` pointed at a test-owned temp dir; the server
-/// starts with `-f /dev/null`, and teardown kills only that server via its explicit
-/// `-L` label and removes the temp dir. The label (and therefore the endpoint) is fixed
-/// before the server starts, and the temp dir exists before the first fallible step, so
-/// a failed startup still tears both down. It never touches the default or current server.
-#[cfg(feature = "test-fixtures")]
-struct IsolatedTmuxServer {
-    tmpdir: std::path::PathBuf,
-    label: String,
-    bin_dir: std::path::PathBuf,
-}
-
-#[cfg(feature = "test-fixtures")]
-impl IsolatedTmuxServer {
-    fn start() -> Self {
-        let suffix = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos() as u64;
-        // Use a short base so the derived unix socket path stays under the OS limit
-        // (macOS's per-user temp dir plus `tmux-<uid>/<label>` can exceed it).
-        let base = std::path::Path::new("/tmp");
-        let base = if base.is_dir() {
-            base.to_path_buf()
-        } else {
-            std::env::temp_dir()
-        };
-        let tmpdir = base.join(format!("tt-iso-{:x}-{:x}", std::process::id(), suffix));
-        let label = format!("iso{suffix:x}");
-        let bin_dir = tmpdir.join("bin");
-
-        // Build the guard *before* the first fallible operation: if creating the temp
-        // dir or starting the server fails, `Drop` still kills the endpoint and removes
-        // the temp dir.
-        let server = Self {
-            tmpdir,
-            label,
-            bin_dir,
-        };
-        server.install_wrapper();
-        server.start_server();
-        server
-    }
-
-    /// A `tmux` wrapper on the CLI's `PATH` that pins every call to this endpoint, so the
-    /// CLI under test uses the same explicit `-L` label as setup and teardown.
-    fn install_wrapper(&self) {
-        self.write_wrapper(None);
-    }
-
-    /// Rewrite the wrapper to inject a caller `TMUX`/`TMUX_PANE` context into every tmux
-    /// subprocess (the CLI itself keeps them removed). This reproduces the inside-tmux
-    /// caller environment for the session-creation path without making the CLI take the
-    /// inside-tmux branch.
-    fn install_wrapper_with_context(&self, tmux: &str, tmux_pane: &str) {
-        self.write_wrapper(Some((tmux, tmux_pane)));
-    }
-
-    fn write_wrapper(&self, context: Option<(&str, &str)>) {
-        let wrapper = match context {
-            Some((tmux, tmux_pane)) => format!(
-                "#!/bin/sh\nTMUX='{tmux}' TMUX_PANE='{tmux_pane}' exec '{}' -L '{}' \"$@\"\n",
-                real_tmux_path(),
-                self.label
-            ),
-            None => format!(
-                "#!/bin/sh\nexec '{}' -L '{}' \"$@\"\n",
-                real_tmux_path(),
-                self.label
-            ),
-        };
-        self.install_wrapper_script(&wrapper);
-    }
-
-    /// Replace the wrapper with an arbitrary script, for a test that needs to inject a
-    /// specific tmux failure while still pinning to this endpoint.
-    fn install_wrapper_script(&self, script: &str) {
-        use std::os::unix::fs::PermissionsExt;
-
-        std::fs::create_dir_all(&self.bin_dir).unwrap();
-        let path = self.bin_dir.join("tmux");
-        std::fs::write(&path, script).unwrap();
-        let mut permissions = std::fs::metadata(&path).unwrap().permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&path, permissions).unwrap();
-    }
-
-    fn start_server(&self) {
-        let started = self.tmux(&[
-            "-f",
-            "/dev/null",
-            "new-session",
-            "-d",
-            "-s",
-            "isolated-root",
-            "sleep",
-            "600",
-        ]);
-        started.assert_success("start isolated tmux server");
-    }
-
-    fn tmux(&self, args: &[&str]) -> CmdOutput {
-        isolated_tmux(&self.tmpdir, &self.label, args)
-    }
-
-    fn cli(&self, args: &[&str]) -> CmdOutput {
-        self.run_cli(args, None)
-    }
-
-    /// Run the CLI against this server with an injected agent registry.
-    fn cli_env(&self, args: &[&str], xdg: &std::path::Path) -> CmdOutput {
-        self.run_cli(args, Some(xdg))
-    }
-
-    fn run_cli(&self, args: &[&str], xdg: Option<&std::path::Path>) -> CmdOutput {
-        let path = format!(
-            "{}:{}",
-            self.bin_dir.display(),
-            std::env::var("PATH").unwrap_or_default()
-        );
-        let mut command = Command::new(BIN);
-        command
-            .args(args)
-            .env("PATH", path)
-            .env_remove("TMUX")
-            .env_remove("TMUX_PANE")
-            .env("TMUX_TMPDIR", &self.tmpdir)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        if let Some(xdg) = xdg {
-            command.env("XDG_CONFIG_HOME", xdg);
-        }
-        let child = command
-            .spawn()
-            .unwrap_or_else(|e| panic!("failed to spawn {BIN} {args:?}: {e}"));
-        wait_for_child(child, &format!("{BIN} {args:?}"), Duration::from_secs(30))
-    }
-}
-
-#[cfg(feature = "test-fixtures")]
-impl Drop for IsolatedTmuxServer {
-    fn drop(&mut self) {
-        let _ = Command::new("tmux")
-            .args(["-L", &self.label, "kill-server"])
-            .env_remove("TMUX")
-            .env_remove("TMUX_PANE")
-            .env("TMUX_TMPDIR", &self.tmpdir)
-            .output();
-        let _ = std::fs::remove_dir_all(&self.tmpdir);
-    }
-}
-
-/// Run one tmux command against a test-owned `TMUX_TMPDIR` and explicit label, with the
-/// ambient tmux environment removed.
-#[cfg(feature = "test-fixtures")]
-fn isolated_tmux(tmpdir: &std::path::Path, label: &str, args: &[&str]) -> CmdOutput {
-    let out = Command::new("tmux")
-        .args(["-L", label])
-        .args(args)
-        .env_remove("TMUX")
-        .env_remove("TMUX_PANE")
-        .env("TMUX_TMPDIR", tmpdir)
-        .output()
-        .unwrap_or_else(|e| panic!("failed to spawn tmux {args:?}: {e}"));
-    CmdOutput {
-        status: out.status.code().unwrap_or(-1),
-        stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
-    }
-}
-
-/// Resolve a registered pane id on an isolated server.
-#[cfg(feature = "test-fixtures")]
-fn isolated_pane_by_name(server: &IsolatedTmuxServer, name: &str) -> Option<String> {
-    let out = server.tmux(&["list-panes", "-a", "-F", "#{pane_id}\t#{@tt-name}"]);
-    if out.status != 0 {
-        return None;
-    }
-    for line in out.stdout.lines() {
-        if let Some((pane, tt_name)) = line.split_once('\t') {
-            if tt_name == name {
-                return Some(pane.to_owned());
-            }
-        }
-    }
-    None
 }
 
 /// Poll an isolated server's pane until its history contains `needle`.
@@ -4679,7 +5586,7 @@ fn wait_for_isolated_pane_text(
 ) {
     let started = Instant::now();
     while started.elapsed() < timeout {
-        if let Some(pane) = isolated_pane_by_name(server, name) {
+        if let Some(pane) = pane_id_by_name(server, name) {
             let cap = server.tmux(&["capture-pane", "-p", "-S", "-", "-t", &pane]);
             if cap.status == 0 && cap.stdout.contains(needle) {
                 return;
@@ -4704,16 +5611,16 @@ fn prompt_returns_the_fixture_response_and_echo_for_a_wide_multiline_prompt() {
         return;
     }
 
+    let server = IsolatedTmuxServer::start_inside();
+
     let config = AgentsConfig::new();
     let name = format!("p7-wide-{}", std::process::id());
-    let mut guard = PaneGuard::new();
-    guard.track(&name);
 
-    launch_fake_tui_with(&name, &["--ready", "WIDE-READY", "--echo-submit"]);
-    wait_for_bracket_paste_flag(&name, true, Duration::from_secs(5));
+    launch_fake_tui_with(&server, &name, &["--ready", "WIDE-READY", "--echo-submit"]);
+    wait_for_bracket_paste_flag(&server, &name, true, Duration::from_secs(5));
 
     let payload = large_multiline_prompt();
-    let out = prompt_at_format(&name, &payload, "raw", config.xdg());
+    let out = prompt_at_format(&server, &name, &payload, "raw", config.xdg());
     out.assert_success("prompt wide multiline raw");
 
     assert!(
@@ -4740,19 +5647,24 @@ fn prompt_excludes_unchanged_output_above_the_submission_point() {
         return;
     }
 
+    let server = IsolatedTmuxServer::start_inside();
+
     let config = AgentsConfig::new();
     let name = format!("p7-preexisting-{}", std::process::id());
-    let mut guard = PaneGuard::new();
-    guard.track(&name);
 
-    launch_fake_tui_with(&name, &["--ready", "PRE-READY", "--echo-submit"]);
-    wait_for_bracket_paste_flag(&name, true, Duration::from_secs(5));
+    launch_fake_tui_with(&server, &name, &["--ready", "PRE-READY", "--echo-submit"]);
+    wait_for_bracket_paste_flag(&server, &name, true, Duration::from_secs(5));
 
     // Fill the pane with history above the submission point; line 1 is far above it.
-    fake_tui_command(&name, "lines 60");
-    wait_for_pane_text(&name, "tt-fake-tui: line 60", Duration::from_secs(5));
+    fake_tui_command(&server, &name, "lines 60");
+    wait_for_pane_text(
+        &server,
+        &name,
+        "tt-fake-tui: line 60",
+        Duration::from_secs(5),
+    );
 
-    let out = prompt_at_format(&name, "DISTINCT-PROMPT-ECHO", "raw", config.xdg());
+    let out = prompt_at_format(&server, &name, "DISTINCT-PROMPT-ECHO", "raw", config.xdg());
     out.assert_success("prompt pre-existing raw");
 
     assert!(
@@ -4785,18 +5697,27 @@ fn prompt_keeps_an_echo_redrawn_above_the_submission_point() {
         return;
     }
 
+    let server = IsolatedTmuxServer::start_inside();
+
     let config = AgentsConfig::new();
     let name = format!("p7-redraw-{}", std::process::id());
-    let mut guard = PaneGuard::new();
-    guard.track(&name);
 
     // The ready footer is the composer row, directly above the cursor mark. Echoing
     // through it redraws the row that the pre-submission capture saw.
-    launch_fake_tui_with(&name, &["--ready", "REDRAW-READY", "--echo-submit"]);
-    wait_for_bracket_paste_flag(&name, true, Duration::from_secs(5));
-    wait_for_pane_text(&name, "ready: REDRAW-READY", Duration::from_secs(5));
+    launch_fake_tui_with(
+        &server,
+        &name,
+        &["--ready", "REDRAW-READY", "--echo-submit"],
+    );
+    wait_for_bracket_paste_flag(&server, &name, true, Duration::from_secs(5));
+    wait_for_pane_text(
+        &server,
+        &name,
+        "ready: REDRAW-READY",
+        Duration::from_secs(5),
+    );
 
-    let parsed = prompt_json(&name, "REDRAW-ECHO-CONTENT", config.xdg(), &[]);
+    let parsed = prompt_json(&server, &name, "REDRAW-ECHO-CONTENT", config.xdg(), &[]);
     let output = parsed["output_since_prompt"].as_str().unwrap_or_default();
     assert!(
         output.contains("REDRAW-ECHO-CONTENT"),
@@ -4820,16 +5741,20 @@ fn prompt_on_the_alternate_screen_still_contains_the_echo() {
         return;
     }
 
+    let server = IsolatedTmuxServer::start_inside();
+
     let config = AgentsConfig::new();
     let name = format!("p7-alt-echo-{}", std::process::id());
-    let mut guard = PaneGuard::new();
-    guard.track(&name);
 
-    launch_fake_tui_with(&name, &["--ready", "ALT-ECHO-READY", "--echo-submit"]);
-    wait_for_bracket_paste_flag(&name, true, Duration::from_secs(5));
-    set_fake_tui_alternate(&name, true);
+    launch_fake_tui_with(
+        &server,
+        &name,
+        &["--ready", "ALT-ECHO-READY", "--echo-submit"],
+    );
+    wait_for_bracket_paste_flag(&server, &name, true, Duration::from_secs(5));
+    set_fake_tui_alternate(&server, &name, true);
 
-    let out = prompt_at_format(&name, "ALT-SCREEN-ECHO", "raw", config.xdg());
+    let out = prompt_at_format(&server, &name, "ALT-SCREEN-ECHO", "raw", config.xdg());
     out.assert_success("prompt alternate echo raw");
     assert!(
         out.stdout.contains("ALT-SCREEN-ECHO"),
@@ -4855,16 +5780,17 @@ fn prompt_reports_incomplete_when_the_alternate_screen_is_left_before_settle() {
         return;
     }
 
+    let server = IsolatedTmuxServer::start_inside();
+
     let config = AgentsConfig::new();
     let name = format!("p7-alt-left-{}", std::process::id());
-    let mut guard = PaneGuard::new();
-    guard.track(&name);
 
-    launch_fake_tui_with(&name, &["--ready", "ALT-LEFT-READY", "--alt-turn"]);
+    launch_fake_tui_with(&server, &name, &["--ready", "ALT-LEFT-READY", "--alt-turn"]);
 
     // `--until` settles only after the fixture has left the alternate screen and printed
     // its normal-screen marker, so the alternate screen was observed only mid-wait.
     let parsed = prompt_json(
+        &server,
         &name,
         "alternate turn",
         config.xdg(),
@@ -4886,7 +5812,7 @@ fn prompt_reports_incomplete_when_the_alternate_screen_is_left_before_settle() {
     );
 
     for format in ["raw", "concise"] {
-        let out = run_bin_env(
+        let out = server.cli_env(
             &[
                 "prompt",
                 "--target",
@@ -4937,20 +5863,29 @@ fn prompt_excludes_pre_alternate_history_from_the_result() {
         return;
     }
 
+    let server = IsolatedTmuxServer::start_inside();
+
     let config = AgentsConfig::new();
     let name = format!("p7-pre-alt-{}", std::process::id());
-    let mut guard = PaneGuard::new();
-    guard.track(&name);
 
-    launch_fake_tui_with(&name, &["--ready", "PRE-ALT-READY", "--echo-submit"]);
-    wait_for_bracket_paste_flag(&name, true, Duration::from_secs(5));
+    launch_fake_tui_with(
+        &server,
+        &name,
+        &["--ready", "PRE-ALT-READY", "--echo-submit"],
+    );
+    wait_for_bracket_paste_flag(&server, &name, true, Duration::from_secs(5));
 
     // Build main-screen history that the alternate screen keeps but must not return.
-    fake_tui_command(&name, "lines 40");
-    wait_for_pane_text(&name, "tt-fake-tui: line 40", Duration::from_secs(5));
-    set_fake_tui_alternate(&name, true);
+    fake_tui_command(&server, &name, "lines 40");
+    wait_for_pane_text(
+        &server,
+        &name,
+        "tt-fake-tui: line 40",
+        Duration::from_secs(5),
+    );
+    set_fake_tui_alternate(&server, &name, true);
 
-    let out = prompt_at_format(&name, "PRE-ALT-ECHO", "raw", config.xdg());
+    let out = prompt_at_format(&server, &name, "PRE-ALT-ECHO", "raw", config.xdg());
     out.assert_success("prompt pre-alternate raw");
     assert!(
         out.stdout.contains("PRE-ALT-ECHO"),
@@ -4976,17 +5911,23 @@ fn prompt_observes_a_busy_footer_seen_only_during_delivery() {
         return;
     }
 
+    let server = IsolatedTmuxServer::start_inside();
+
     let config = AgentsConfig::new();
     let report = config.xdg().join("p7-busy-paste-report.bin");
     let name = format!("p7-busy-paste-{}", std::process::id());
-    let mut guard = PaneGuard::new();
-    guard.track(&name);
 
     // The busy footer is rendered as soon as the prompt is pasted and restored to ready
     // on submit, so only the Enter delivery's own frames see it.
-    spawn_turn_agent_with(&name, &config, &report, &["--busy-on-paste"]);
+    spawn_turn_agent_with(&server, &name, &config, &report, &["--busy-on-paste"]);
 
-    let parsed = prompt_json(&name, "briefly busy", config.xdg(), &["--timeout", "5"]);
+    let parsed = prompt_json(
+        &server,
+        &name,
+        "briefly busy",
+        config.xdg(),
+        &["--timeout", "5"],
+    );
     assert_eq!(
         parsed["turn_observed"].as_bool(),
         Some(true),
@@ -5011,15 +5952,15 @@ fn prompt_returns_output_before_the_busy_footer_and_reports_the_turn_observed() 
         return;
     }
 
+    let server = IsolatedTmuxServer::start_inside();
+
     let config = AgentsConfig::new();
     let report = config.xdg().join("p7-observed-report.bin");
     let name = format!("p7-observed-{}", std::process::id());
-    let mut guard = PaneGuard::new();
-    guard.track(&name);
 
-    spawn_turn_agent(&name, &config, &report, true);
+    spawn_turn_agent(&server, &name, &config, &report, true);
 
-    let out = run_bin_env(
+    let out = server.cli_env(
         &[
             "prompt",
             "--target",
@@ -5058,7 +5999,7 @@ fn prompt_returns_output_before_the_busy_footer_and_reports_the_turn_observed() 
 
     // Raw and concise state the observed polarity; the opposite notice must be absent.
     for format in ["raw", "concise"] {
-        let out = run_bin_env(
+        let out = server.cli_env(
             &[
                 "prompt",
                 "--target",
@@ -5110,15 +6051,16 @@ fn prompt_returns_the_same_output_and_reports_the_turn_unobserved_when_busy_is_s
         return;
     }
 
+    let server = IsolatedTmuxServer::start_inside();
+
     let config = AgentsConfig::new();
     let report = config.xdg().join("p7-unobserved-report.bin");
     let name = format!("p7-unobserved-{}", std::process::id());
-    let mut guard = PaneGuard::new();
-    guard.track(&name);
 
-    spawn_turn_agent(&name, &config, &report, false);
+    spawn_turn_agent(&server, &name, &config, &report, false);
 
     let parsed = prompt_json(
+        &server,
         &name,
         "unobserved payload",
         config.xdg(),
@@ -5142,7 +6084,7 @@ fn prompt_returns_the_same_output_and_reports_the_turn_unobserved_when_busy_is_s
 
     // Raw and concise state the unobserved polarity; the opposite notice must be absent.
     for format in ["raw", "concise"] {
-        let out = run_bin_env(
+        let out = server.cli_env(
             &[
                 "prompt",
                 "--target",
@@ -5185,13 +6127,13 @@ fn prompt_does_not_treat_neither_match_as_idle_with_patterns_present() {
         return;
     }
 
+    let server = IsolatedTmuxServer::start_inside();
+
     let config = AgentsConfig::new();
     config.write_agents_toml(&gating_agents_toml("^GATE-NEVER-READY$", "GATE-NEVER-BUSY"));
     let name = format!("p7-neither-{}", std::process::id());
-    let mut guard = PaneGuard::new();
-    guard.track(&name);
 
-    let spawn = run_bin_env(
+    let spawn = server.cli_env(
         &[
             "spawn-agent",
             "gate",
@@ -5204,9 +6146,15 @@ fn prompt_does_not_treat_neither_match_as_idle_with_patterns_present() {
         config.xdg(),
     );
     spawn.assert_success("spawn-agent gate");
-    wait_for_pane_text(&name, "ready: GATE-FOOTER", Duration::from_secs(5));
+    wait_for_pane_text(&server, &name, "ready: GATE-FOOTER", Duration::from_secs(5));
 
-    let parsed = prompt_json(&name, "neither match", config.xdg(), &["--timeout", "2"]);
+    let parsed = prompt_json(
+        &server,
+        &name,
+        "neither match",
+        config.xdg(),
+        &["--timeout", "2"],
+    );
     assert_ne!(
         parsed["reason"].as_str(),
         Some("idle"),
@@ -5226,13 +6174,13 @@ fn prompt_does_not_treat_both_match_as_idle_with_patterns_present() {
         return;
     }
 
+    let server = IsolatedTmuxServer::start_inside();
+
     let config = AgentsConfig::new();
     config.write_agents_toml(&gating_agents_toml("tt-fake-tui", "tt-fake-tui"));
     let name = format!("p7-both-{}", std::process::id());
-    let mut guard = PaneGuard::new();
-    guard.track(&name);
 
-    let spawn = run_bin_env(
+    let spawn = server.cli_env(
         &[
             "spawn-agent",
             "gate",
@@ -5245,9 +6193,15 @@ fn prompt_does_not_treat_both_match_as_idle_with_patterns_present() {
         config.xdg(),
     );
     spawn.assert_success("spawn-agent gate");
-    wait_for_pane_text(&name, "ready: GATE-FOOTER", Duration::from_secs(5));
+    wait_for_pane_text(&server, &name, "ready: GATE-FOOTER", Duration::from_secs(5));
 
-    let parsed = prompt_json(&name, "both match", config.xdg(), &["--timeout", "2"]);
+    let parsed = prompt_json(
+        &server,
+        &name,
+        "both match",
+        config.xdg(),
+        &["--timeout", "2"],
+    );
     assert_ne!(
         parsed["reason"].as_str(),
         Some("idle"),
@@ -5267,14 +6221,14 @@ fn prompt_reports_complete_when_output_fits_in_history() {
         return;
     }
 
+    let server = IsolatedTmuxServer::start_inside();
+
     let config = AgentsConfig::new();
     let name = format!("p7-complete-{}", std::process::id());
-    let mut guard = PaneGuard::new();
-    guard.track(&name);
 
-    launch_fake_tui_with(&name, &["--ready", "FITS-READY"]);
+    launch_fake_tui_with(&server, &name, &["--ready", "FITS-READY"]);
 
-    let parsed = prompt_json(&name, "output that fits", config.xdg(), &[]);
+    let parsed = prompt_json(&server, &name, "output that fits", config.xdg(), &[]);
     assert_eq!(
         parsed["complete"].as_bool(),
         Some(true),
@@ -5282,7 +6236,13 @@ fn prompt_reports_complete_when_output_fits_in_history() {
     );
 
     for format in ["raw", "concise"] {
-        let out = prompt_at_format(&name, "output that fits again", format, config.xdg());
+        let out = prompt_at_format(
+            &server,
+            &name,
+            "output that fits again",
+            format,
+            config.xdg(),
+        );
         out.assert_success(&format!("prompt complete {format}"));
         assert!(
             out.stderr
@@ -5309,15 +6269,15 @@ fn prompt_reports_incomplete_on_the_alternate_screen() {
         return;
     }
 
+    let server = IsolatedTmuxServer::start_inside();
+
     let config = AgentsConfig::new();
     let name = format!("p7-alt-incomplete-{}", std::process::id());
-    let mut guard = PaneGuard::new();
-    guard.track(&name);
 
-    launch_fake_tui_with(&name, &["--ready", "ALT-P7-READY"]);
-    set_fake_tui_alternate(&name, true);
+    launch_fake_tui_with(&server, &name, &["--ready", "ALT-P7-READY"]);
+    set_fake_tui_alternate(&server, &name, true);
 
-    let parsed = prompt_json(&name, "alternate prompt", config.xdg(), &[]);
+    let parsed = prompt_json(&server, &name, "alternate prompt", config.xdg(), &[]);
     assert_eq!(
         parsed["complete"].as_bool(),
         Some(false),
@@ -5325,7 +6285,13 @@ fn prompt_reports_incomplete_on_the_alternate_screen() {
     );
 
     for format in ["raw", "concise"] {
-        let out = prompt_at_format(&name, "alternate prompt again", format, config.xdg());
+        let out = prompt_at_format(
+            &server,
+            &name,
+            "alternate prompt again",
+            format,
+            config.xdg(),
+        );
         out.assert_success(&format!("prompt alternate {format}"));
         assert!(
             out.stderr
@@ -5358,16 +6324,23 @@ fn prompt_reports_incomplete_when_the_history_counter_increases() {
         return;
     }
 
+    let server = IsolatedTmuxServer::start_inside();
+
     let config = AgentsConfig::new();
     let state = config.xdg().join("p7-counter-state");
     config.write_executable("tmux", &tmux_wrapper_probe(ProbeCounter::Increment(&state)));
     let name = format!("p7-counter-{}", std::process::id());
-    let mut guard = PaneGuard::new();
-    guard.track(&name);
 
-    launch_fake_tui_with(&name, &["--ready", "COUNTER-READY"]);
+    launch_fake_tui_with(&server, &name, &["--ready", "COUNTER-READY"]);
 
-    let parsed = prompt_json_path(&name, "counter eviction", config.xdg(), &[], config.xdg());
+    let parsed = prompt_json_path(
+        &server,
+        &name,
+        "counter eviction",
+        config.xdg(),
+        &[],
+        config.xdg(),
+    );
     assert_eq!(
         parsed["complete"].as_bool(),
         Some(false),
@@ -5376,6 +6349,7 @@ fn prompt_reports_incomplete_when_the_history_counter_increases() {
 
     for format in ["raw", "concise"] {
         let out = prompt_at_format_path(
+            &server,
             &name,
             "counter eviction again",
             format,
@@ -5414,15 +6388,22 @@ fn prompt_reports_incomplete_at_the_ninety_percent_floor_without_the_counter() {
         return;
     }
 
+    let server = IsolatedTmuxServer::start_inside();
+
     let config = AgentsConfig::new();
     config.write_executable("tmux", &tmux_wrapper_probe(ProbeCounter::Absent));
     let name = format!("p7-floor-{}", std::process::id());
-    let mut guard = PaneGuard::new();
-    guard.track(&name);
 
-    launch_fake_tui_with(&name, &["--ready", "FLOOR-READY"]);
+    launch_fake_tui_with(&server, &name, &["--ready", "FLOOR-READY"]);
 
-    let parsed = prompt_json_path(&name, "floor eviction", config.xdg(), &[], config.xdg());
+    let parsed = prompt_json_path(
+        &server,
+        &name,
+        "floor eviction",
+        config.xdg(),
+        &[],
+        config.xdg(),
+    );
     assert_eq!(
         parsed["complete"].as_bool(),
         Some(false),
@@ -5431,6 +6412,7 @@ fn prompt_reports_incomplete_at_the_ninety_percent_floor_without_the_counter() {
 
     for format in ["raw", "concise"] {
         let out = prompt_at_format_path(
+            &server,
             &name,
             "floor eviction again",
             format,
@@ -5469,16 +6451,17 @@ fn prompt_reports_incomplete_when_alternate_and_evicted_together() {
         return;
     }
 
+    let server = IsolatedTmuxServer::start_inside();
+
     let config = AgentsConfig::new();
     config.write_executable("tmux", &tmux_wrapper_probe(ProbeCounter::Absent));
     let name = format!("p7-both-incomplete-{}", std::process::id());
-    let mut guard = PaneGuard::new();
-    guard.track(&name);
 
-    launch_fake_tui_with(&name, &["--ready", "BOTH-P7-READY"]);
-    set_fake_tui_alternate(&name, true);
+    launch_fake_tui_with(&server, &name, &["--ready", "BOTH-P7-READY"]);
+    set_fake_tui_alternate(&server, &name, true);
 
     let parsed = prompt_json_path(
+        &server,
         &name,
         "alternate and evicted",
         config.xdg(),
@@ -5493,6 +6476,7 @@ fn prompt_reports_incomplete_when_alternate_and_evicted_together() {
 
     for format in ["raw", "concise"] {
         let out = prompt_at_format_path(
+            &server,
             &name,
             "alternate and evicted again",
             format,
@@ -5531,15 +6515,22 @@ fn prompt_reports_complete_when_the_history_counter_is_unchanged() {
         return;
     }
 
+    let server = IsolatedTmuxServer::start_inside();
+
     let config = AgentsConfig::new();
     config.write_executable("tmux", &tmux_wrapper_probe(ProbeCounter::Constant(0)));
     let name = format!("p7-counter-clean-{}", std::process::id());
-    let mut guard = PaneGuard::new();
-    guard.track(&name);
 
-    launch_fake_tui_with(&name, &["--ready", "COUNTER-CLEAN-READY"]);
+    launch_fake_tui_with(&server, &name, &["--ready", "COUNTER-CLEAN-READY"]);
 
-    let parsed = prompt_json_path(&name, "counter unchanged", config.xdg(), &[], config.xdg());
+    let parsed = prompt_json_path(
+        &server,
+        &name,
+        "counter unchanged",
+        config.xdg(),
+        &[],
+        config.xdg(),
+    );
     assert_eq!(
         parsed["complete"].as_bool(),
         Some(true),
@@ -5548,6 +6539,7 @@ fn prompt_reports_complete_when_the_history_counter_is_unchanged() {
 
     for format in ["raw", "concise"] {
         let out = prompt_at_format_path(
+            &server,
             &name,
             "counter unchanged again",
             format,
@@ -5582,15 +6574,22 @@ fn prompt_reports_complete_below_the_floor_without_the_counter() {
         return;
     }
 
+    let server = IsolatedTmuxServer::start_inside();
+
     let config = AgentsConfig::new();
     config.write_executable("tmux", &tmux_wrapper_probe(ProbeCounter::AbsentBelowFloor));
     let name = format!("p7-below-floor-{}", std::process::id());
-    let mut guard = PaneGuard::new();
-    guard.track(&name);
 
-    launch_fake_tui_with(&name, &["--ready", "BELOW-FLOOR-READY"]);
+    launch_fake_tui_with(&server, &name, &["--ready", "BELOW-FLOOR-READY"]);
 
-    let parsed = prompt_json_path(&name, "below the floor", config.xdg(), &[], config.xdg());
+    let parsed = prompt_json_path(
+        &server,
+        &name,
+        "below the floor",
+        config.xdg(),
+        &[],
+        config.xdg(),
+    );
     assert_eq!(
         parsed["complete"].as_bool(),
         Some(true),
@@ -5599,6 +6598,7 @@ fn prompt_reports_complete_below_the_floor_without_the_counter() {
 
     for format in ["raw", "concise"] {
         let out = prompt_at_format_path(
+            &server,
             &name,
             "below the floor again",
             format,
@@ -5620,6 +6620,174 @@ fn prompt_reports_complete_below_the_floor_without_the_counter() {
     }
 }
 
+/// Run `prompt` at `format` against the named fixture with a settle window long enough to
+/// act in, call `during` once the fixture has reported the submission (so `prompt` has
+/// taken its mark and is still waiting for settle), then return the command output.
+#[cfg(feature = "test-fixtures")]
+fn prompt_across_settle(
+    server: &IsolatedTmuxServer,
+    name: &str,
+    text: &str,
+    format: &str,
+    xdg: &std::path::Path,
+    during: impl FnOnce(),
+) -> CmdOutput {
+    let submissions_before = capture_history_text(server, name)
+        .matches("tt-fake-tui: submission #")
+        .count();
+    let child = server
+        .command_with_cli_env(
+            BIN,
+            &CliOptions {
+                xdg: Some(xdg),
+                ..CliOptions::default()
+            },
+        )
+        .args([
+            "prompt",
+            "--target",
+            name,
+            text,
+            "--format",
+            format,
+            "--idle-seconds",
+            "3",
+            "--timeout",
+            "30",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn prompt");
+    let needle = format!("tt-fake-tui: submission #{}", submissions_before + 1);
+    wait_for_isolated_pane_text(server, name, &needle, Duration::from_secs(10));
+    during();
+    wait_for_child(
+        child,
+        &format!("prompt {format} across the settle window"),
+        Duration::from_secs(60),
+    )
+}
+
+/// The named pane's full history text on the private server.
+#[cfg(feature = "test-fixtures")]
+fn capture_history_text(server: &IsolatedTmuxServer, name: &str) -> String {
+    let pane = pane_id_by_name(server, name).expect("pane should exist");
+    let cap = server.tmux(&["capture-pane", "-p", "-S", "-", "-t", &pane]);
+    cap.assert_success("capture pane history");
+    cap.stdout
+}
+
+/// Narrow the pane by splitting a sibling beside it, as a retile would, and assert its
+/// width really changed.
+#[cfg(feature = "test-fixtures")]
+fn narrow_pane(server: &IsolatedTmuxServer, pane: &str) {
+    let before = tmux_format(server, pane, "#{pane_width}");
+    let split = server.tmux(&["split-window", "-h", "-d", "-t", pane, "sleep 600"]);
+    split.assert_success("split a sibling beside the fixture pane");
+    let after = tmux_format(server, pane, "#{pane_width}");
+    assert_ne!(
+        before, after,
+        "the split must change the fixture pane's width"
+    );
+}
+
+/// Acceptance: a main-screen fixture pane whose width changes while `prompt` waits for
+/// settle is reported incomplete, in JSON and on stderr for raw.
+#[cfg(feature = "test-fixtures")]
+#[test]
+fn prompt_reports_incomplete_when_the_pane_width_changes_before_settle() {
+    let _serial = serial_guard();
+
+    if Command::new("tmux").arg("-V").output().is_err() {
+        eprintln!("SKIP: tmux not on PATH");
+        return;
+    }
+
+    let server = IsolatedTmuxServer::start_inside();
+
+    let config = AgentsConfig::new();
+    let name = format!("p7-width-{}", std::process::id());
+
+    launch_fake_tui_with(&server, &name, &["--ready", "WIDTH-READY"]);
+    let pane = pane_id_by_name(&server, &name).expect("fixture pane should exist");
+    assert_eq!(
+        tmux_format(&server, &pane, "#{alternate_on}"),
+        "0",
+        "the fixture must be on the main screen"
+    );
+
+    let out = prompt_across_settle(&server, &name, "width change", "json", config.xdg(), || {
+        narrow_pane(&server, &pane)
+    });
+    out.assert_success("prompt json across a width change");
+    let parsed: serde_json::Value =
+        serde_json::from_str(out.stdout.trim()).expect("prompt JSON should parse");
+    assert_eq!(
+        parsed["complete"].as_bool(),
+        Some(false),
+        "a width change between mark and settle must report incomplete; payload: {parsed}"
+    );
+
+    let out = prompt_across_settle(
+        &server,
+        &name,
+        "width change again",
+        "raw",
+        config.xdg(),
+        || narrow_pane(&server, &pane),
+    );
+    out.assert_success("prompt raw across a width change");
+    assert!(
+        out.stderr
+            .contains("tmux-tools: prompt: completeness: incomplete:"),
+        "raw stderr must report incompleteness; got: {:?}",
+        out.stderr
+    );
+    assert!(
+        out.stderr.contains("width"),
+        "raw stderr must name the width change; got: {:?}",
+        out.stderr
+    );
+}
+
+/// Acceptance: the same fixture and exchange with the width unchanged is reported
+/// complete.
+#[cfg(feature = "test-fixtures")]
+#[test]
+fn prompt_reports_complete_when_the_pane_width_is_unchanged() {
+    let _serial = serial_guard();
+
+    if Command::new("tmux").arg("-V").output().is_err() {
+        eprintln!("SKIP: tmux not on PATH");
+        return;
+    }
+
+    let server = IsolatedTmuxServer::start_inside();
+
+    let config = AgentsConfig::new();
+    let name = format!("p7-width-same-{}", std::process::id());
+
+    launch_fake_tui_with(&server, &name, &["--ready", "WIDTH-READY"]);
+    let pane = pane_id_by_name(&server, &name).expect("fixture pane should exist");
+    let width = tmux_format(&server, &pane, "#{pane_width}");
+
+    let out = prompt_across_settle(&server, &name, "width change", "json", config.xdg(), || {});
+    out.assert_success("prompt json with the width unchanged");
+    assert_eq!(
+        tmux_format(&server, &pane, "#{pane_width}"),
+        width,
+        "the fixture pane's width must not change"
+    );
+    let parsed: serde_json::Value =
+        serde_json::from_str(out.stdout.trim()).expect("prompt JSON should parse");
+    assert_eq!(
+        parsed["complete"].as_bool(),
+        Some(true),
+        "an unchanged width must report complete; payload: {parsed}"
+    );
+}
+
 /// Acceptance: a fixture that prints nothing after the mark returns an empty result in
 /// raw, concise and JSON, while both dimensions are still stated.
 #[cfg(feature = "test-fixtures")]
@@ -5632,14 +6800,14 @@ fn prompt_reports_an_empty_result_with_both_dimensions_on_every_format() {
         return;
     }
 
+    let server = IsolatedTmuxServer::start_inside();
+
     let config = AgentsConfig::new();
     let name = format!("p7-empty-{}", std::process::id());
-    let mut guard = PaneGuard::new();
-    guard.track(&name);
 
-    launch_fake_tui_with(&name, &["--quiet-submit"]);
+    launch_fake_tui_with(&server, &name, &["--quiet-submit"]);
 
-    let parsed = prompt_json(&name, "", config.xdg(), &[]);
+    let parsed = prompt_json(&server, &name, "", config.xdg(), &[]);
     assert_eq!(
         parsed["output_since_prompt"].as_str(),
         Some(""),
@@ -5659,7 +6827,7 @@ fn prompt_reports_an_empty_result_with_both_dimensions_on_every_format() {
     );
 
     for format in ["raw", "concise"] {
-        let out = prompt_at_format(&name, "", format, config.xdg());
+        let out = prompt_at_format(&server, &name, "", format, config.xdg());
         out.assert_success(&format!("prompt empty {format}"));
         assert!(
             out.stdout.is_empty(),
@@ -5692,7 +6860,7 @@ fn prompt_excludes_pre_submission_output_after_real_eviction() {
         return;
     }
 
-    let server = IsolatedTmuxServer::start();
+    let server = IsolatedTmuxServer::start_outside();
     let name = format!("p7-evict-{}", std::process::id());
     let cmd = format!("{} --echo-submit", shell_quote(FAKE_TUI_BIN));
     let launched = server.cli(&[
@@ -5744,7 +6912,7 @@ fn prompt_excludes_pre_submission_output_after_real_eviction() {
     ]);
     out.assert_success("prompt after eviction");
 
-    let pane = isolated_pane_by_name(&server, &name).expect("eviction pane should exist");
+    let pane = pane_id_by_name(&server, &name).expect("eviction pane should exist");
     let full = server.cli(&["capture", "--all", "--target", &pane, "--format", "raw"]);
     full.assert_success("capture retained history");
     assert!(
@@ -5777,7 +6945,7 @@ fn launch_created_session_retains_more_history_than_the_global_limit() {
         return;
     }
 
-    let server = IsolatedTmuxServer::start();
+    let server = IsolatedTmuxServer::start_outside();
     let global = server.tmux(&["set-option", "-g", "history-limit", "1000"]);
     global.assert_success("set isolated global history-limit");
 
@@ -5847,7 +7015,7 @@ fn launch_created_session_ignores_a_caller_tmux_context() {
         return;
     }
 
-    let server = IsolatedTmuxServer::start();
+    let server = IsolatedTmuxServer::start_outside();
     let global = server.tmux(&["set-option", "-g", "history-limit", "1000"]);
     global.assert_success("set isolated global history-limit");
 
@@ -5972,7 +7140,7 @@ fn launch_creates_managed_session_despite_a_stray_pending_session() {
         return;
     }
 
-    let server = IsolatedTmuxServer::start();
+    let server = IsolatedTmuxServer::start_outside();
     let global = server.tmux(&["set-option", "-g", "history-limit", "1000"]);
     global.assert_success("set isolated global history-limit");
 
@@ -6071,7 +7239,7 @@ fn launch_removes_its_pending_session_when_a_post_creation_step_times_out() {
         return;
     }
 
-    let server = IsolatedTmuxServer::start();
+    let server = IsolatedTmuxServer::start_outside();
     // Hang the `set-option history-limit` invocation past tmux-tools' command timeout, so
     // `tmux::run` returns an `Err` through `?` after the private session was created.
     server.install_wrapper_script(&format!(
@@ -6117,7 +7285,7 @@ fn launch_into_a_foreign_session_leaves_its_history_limit_unchanged() {
         return;
     }
 
-    let server = IsolatedTmuxServer::start();
+    let server = IsolatedTmuxServer::start_outside();
     let created = server.tmux(&["new-session", "-d", "-s", "foreign", "sleep", "600"]);
     created.assert_success("create foreign session");
     let set = server.tmux(&["set-option", "-t", "foreign", "history-limit", "1234"]);
@@ -6158,7 +7326,7 @@ fn spawn_agent_created_session_gets_the_raised_limit() {
         return;
     }
 
-    let server = IsolatedTmuxServer::start();
+    let server = IsolatedTmuxServer::start_outside();
     let config = AgentsConfig::new();
     let report = config.xdg().join("foreign-report.bin");
     config.write_agents_toml(&observation_agents_toml(&report, &[]));
@@ -6198,7 +7366,7 @@ fn spawn_agent_into_a_foreign_session_leaves_its_history_limit_unchanged() {
         return;
     }
 
-    let server = IsolatedTmuxServer::start();
+    let server = IsolatedTmuxServer::start_outside();
     let created = server.tmux(&["new-session", "-d", "-s", "foreign", "sleep", "600"]);
     created.assert_success("create foreign session");
     let set = server.tmux(&["set-option", "-t", "foreign", "history-limit", "4321"]);
@@ -6333,6 +7501,7 @@ args = []
 /// Spawn an interrupt-test pane and wait until its fixture is rendering.
 #[cfg(feature = "test-fixtures")]
 fn spawn_interrupt_pane(
+    server: &IsolatedTmuxServer,
     config: &AgentsConfig,
     agent: &str,
     surface: Option<&str>,
@@ -6356,9 +7525,9 @@ fn spawn_interrupt_pane(
         args.push("--");
         args.extend_from_slice(caller_args);
     }
-    let out = run_bin_env(&args, config.xdg());
+    let out = server.cli_env(&args, config.xdg());
     out.assert_success("spawn-agent for interrupt");
-    wait_for_pane_ready(name, Duration::from_secs(5));
+    wait_for_pane_ready(server, name, Duration::from_secs(5));
 }
 
 /// A control key that is never an interrupt target: `C-g` (0x07). Sending it through
@@ -6381,10 +7550,10 @@ fn sentinel_count(events: &[ReportEvent]) -> usize {
 /// Send the sentinel through the pane's input path and block until the fixture reports
 /// this new sentinel, not one left by an earlier barrier.
 #[cfg(feature = "test-fixtures")]
-fn send_sentinel_and_wait(name: &str, report: &std::path::Path) {
+fn send_sentinel_and_wait(server: &IsolatedTmuxServer, name: &str, report: &std::path::Path) {
     let before = sentinel_count(&read_report(report));
-    let pane = pane_id_by_name(name).expect("pane should exist");
-    let sent = run_tmux(&["send-keys", "-t", &pane, "C-g"]);
+    let pane = pane_id_by_name(server, name).expect("pane should exist");
+    let sent = server.tmux(&["send-keys", "-t", &pane, "C-g"]);
     sent.assert_success("send sentinel key");
     wait_for_report(report, Duration::from_secs(5), |events| {
         sentinel_count(events) > before
@@ -6423,21 +7592,22 @@ fn assert_guidance(text: &str, required: &[&str], context: &str) {
 /// expected guidance, and settle each with a sentinel.
 #[cfg(feature = "test-fixtures")]
 fn assert_interrupt_refused(
+    server: &IsolatedTmuxServer,
     config: &AgentsConfig,
     name: &str,
     report: &std::path::Path,
     guidance: &[&str],
 ) {
-    let concise = run_bin_env(&["interrupt", "--target", name], config.xdg());
+    let concise = server.cli_env(&["interrupt", "--target", name], config.xdg());
     assert_ne!(
         concise.status, 0,
         "interrupt must be refused; stdout: {}\nstderr: {}",
         concise.stdout, concise.stderr
     );
     assert_guidance(&concise.stderr, guidance, "concise refusal");
-    send_sentinel_and_wait(name, report);
+    send_sentinel_and_wait(server, name, report);
 
-    let json = run_bin_env(
+    let json = server.cli_env(
         &["interrupt", "--target", name, "--format", "json"],
         config.xdg(),
     );
@@ -6453,27 +7623,28 @@ fn assert_interrupt_refused(
         guidance,
         "JSON refusal error",
     );
-    send_sentinel_and_wait(name, report);
+    send_sentinel_and_wait(server, name, report);
 }
 
 /// Run `interrupt`, assert success and its concise key naming, then settle with a
 /// sentinel and assert the fixture received exactly `expected`.
 #[cfg(feature = "test-fixtures")]
 fn assert_interrupt_sends(
+    server: &IsolatedTmuxServer,
     config: &AgentsConfig,
     name: &str,
     report: &std::path::Path,
     expected: &[u8],
     concise_fragment: &str,
 ) {
-    let out = run_bin_env(&["interrupt", "--target", name], config.xdg());
+    let out = server.cli_env(&["interrupt", "--target", name], config.xdg());
     out.assert_success("interrupt must send");
     assert!(
         out.stdout.contains(concise_fragment),
         "the concise output must name the sent key; got: {:?}",
         out.stdout
     );
-    send_sentinel_and_wait(name, report);
+    send_sentinel_and_wait(server, name, report);
     assert_eq!(
         keys_before_last_sentinel(report),
         expected,
@@ -6491,19 +7662,25 @@ fn interrupt_on_quit_hazard_surface_refuses_while_idle() {
         return;
     }
 
+    let server = IsolatedTmuxServer::start_inside();
+
     let config = AgentsConfig::new();
     let report = config.xdg().join("interrupt-hazard-idle-report.bin");
     config.write_agents_toml(&interrupt_agents_toml(&report));
 
     let name = format!("interrupt-hazard-idle-{}", std::process::id());
-    let mut guard = PaneGuard::new();
-    guard.track(&name);
 
     // The fixture's ready footer is on screen and matches the surface.
-    spawn_interrupt_pane(&config, "hazard", None, &name, &[]);
-    wait_for_pane_text(&name, "ready: HAZ-READY", Duration::from_secs(5));
+    spawn_interrupt_pane(&server, &config, "hazard", None, &name, &[]);
+    wait_for_pane_text(&server, &name, "ready: HAZ-READY", Duration::from_secs(5));
 
-    assert_interrupt_refused(&config, &name, &report, &["refus", "idle", "wait", "retry"]);
+    assert_interrupt_refused(
+        &server,
+        &config,
+        &name,
+        &report,
+        &["refus", "idle", "wait", "retry"],
+    );
     assert!(
         keys_before_last_sentinel(&report).is_empty(),
         "no key may reach the fixture on an idle quit-hazard refusal"
@@ -6520,20 +7697,26 @@ fn interrupt_on_quit_hazard_surface_refuses_while_unknown() {
         return;
     }
 
+    let server = IsolatedTmuxServer::start_inside();
+
     let config = AgentsConfig::new();
     let report = config.xdg().join("interrupt-hazard-unknown-report.bin");
     config.write_agents_toml(&interrupt_agents_toml(&report));
 
     let name = format!("interrupt-hazard-unknown-{}", std::process::id());
-    let mut guard = PaneGuard::new();
-    guard.track(&name);
 
     // The surface supplies no patterns, so P3 cannot decide and the refusal must name
     // that cause and a workable action rather than "wait and retry".
-    spawn_interrupt_pane(&config, "hazard", Some("unknown"), &name, &[]);
-    wait_for_pane_text(&name, "ready: HAZ-READY", Duration::from_secs(5));
+    spawn_interrupt_pane(&server, &config, "hazard", Some("unknown"), &name, &[]);
+    wait_for_pane_text(&server, &name, "ready: HAZ-READY", Duration::from_secs(5));
 
-    assert_interrupt_refused(&config, &name, &report, &["refus", "busy", "configure"]);
+    assert_interrupt_refused(
+        &server,
+        &config,
+        &name,
+        &report,
+        &["refus", "busy", "configure"],
+    );
     assert!(
         keys_before_last_sentinel(&report).is_empty(),
         "no key may reach the fixture on an unknown-state quit-hazard refusal"
@@ -6550,21 +7733,21 @@ fn interrupt_on_quit_hazard_surface_sends_declared_key_when_busy() {
         return;
     }
 
+    let server = IsolatedTmuxServer::start_inside();
+
     let config = AgentsConfig::new();
     let report = config.xdg().join("interrupt-busy-report.bin");
     config.write_agents_toml(&interrupt_agents_toml(&report));
 
     let name = format!("interrupt-hazard-busy-{}", std::process::id());
-    let mut guard = PaneGuard::new();
-    guard.track(&name);
 
-    spawn_interrupt_pane(&config, "hazard", None, &name, &[]);
-    wait_for_pane_text(&name, "ready: HAZ-READY", Duration::from_secs(5));
+    spawn_interrupt_pane(&server, &config, "hazard", None, &name, &[]);
+    wait_for_pane_text(&server, &name, "ready: HAZ-READY", Duration::from_secs(5));
 
-    fake_tui_command(&name, "busy");
-    wait_for_pane_text(&name, "busy: HAZ-BUSY", Duration::from_secs(5));
+    fake_tui_command(&server, &name, "busy");
+    wait_for_pane_text(&server, &name, "busy: HAZ-BUSY", Duration::from_secs(5));
 
-    assert_interrupt_sends(&config, &name, &report, &[KEY_C_U], "sent C-u");
+    assert_interrupt_sends(&server, &config, &name, &report, &[KEY_C_U], "sent C-u");
 }
 
 #[cfg(feature = "test-fixtures")]
@@ -6577,29 +7760,37 @@ fn interrupt_refuses_surface_unvalidated_pane_even_when_busy() {
         return;
     }
 
+    let server = IsolatedTmuxServer::start_inside();
+
     let config = AgentsConfig::new();
     let report = config.xdg().join("interrupt-unvalidated-report.bin");
     config.write_agents_toml(&interrupt_agents_toml(&report));
 
     let name = format!("interrupt-unvalidated-{}", std::process::id());
-    let mut guard = PaneGuard::new();
-    guard.track(&name);
 
     // Caller-supplied trailing arguments mark the pane `@tt-surface-unvalidated`.
-    spawn_interrupt_pane(&config, "hazard", None, &name, &["--caller-supplied"]);
+    spawn_interrupt_pane(
+        &server,
+        &config,
+        "hazard",
+        None,
+        &name,
+        &["--caller-supplied"],
+    );
     assert_eq!(
-        pane_option(&name, "@tt-surface-unvalidated"),
+        pane_option(&server, &name, "@tt-surface-unvalidated"),
         "1",
         "caller-supplied arguments must mark the pane surface-unvalidated"
     );
-    wait_for_pane_text(&name, "ready: HAZ-READY", Duration::from_secs(5));
+    wait_for_pane_text(&server, &name, "ready: HAZ-READY", Duration::from_secs(5));
 
     // Even a positively busy rendering is refused: it is not the rendering whose
     // quit hazard was declared.
-    fake_tui_command(&name, "busy");
-    wait_for_pane_text(&name, "busy: HAZ-BUSY", Duration::from_secs(5));
+    fake_tui_command(&server, &name, "busy");
+    wait_for_pane_text(&server, &name, "busy: HAZ-BUSY", Duration::from_secs(5));
 
     assert_interrupt_refused(
+        &server,
         &config,
         &name,
         &report,
@@ -6621,18 +7812,18 @@ fn interrupt_on_no_hazard_surface_sends_declared_key_while_idle() {
         return;
     }
 
+    let server = IsolatedTmuxServer::start_inside();
+
     let config = AgentsConfig::new();
     let report = config.xdg().join("interrupt-calm-idle-report.bin");
     config.write_agents_toml(&interrupt_agents_toml(&report));
 
     let name = format!("interrupt-calm-idle-{}", std::process::id());
-    let mut guard = PaneGuard::new();
-    guard.track(&name);
 
     // The ready footer matches, but a no-hazard surface sends regardless.
-    spawn_interrupt_pane(&config, "calm", None, &name, &[]);
-    wait_for_pane_text(&name, "ready: CALM-READY", Duration::from_secs(5));
-    assert_interrupt_sends(&config, &name, &report, &[KEY_C_U], "sent C-u");
+    spawn_interrupt_pane(&server, &config, "calm", None, &name, &[]);
+    wait_for_pane_text(&server, &name, "ready: CALM-READY", Duration::from_secs(5));
+    assert_interrupt_sends(&server, &config, &name, &report, &[KEY_C_U], "sent C-u");
 }
 
 #[cfg(feature = "test-fixtures")]
@@ -6645,18 +7836,18 @@ fn interrupt_on_no_hazard_surface_sends_declared_key_while_unknown() {
         return;
     }
 
+    let server = IsolatedTmuxServer::start_inside();
+
     let config = AgentsConfig::new();
     let report = config.xdg().join("interrupt-calm-unknown-report.bin");
     config.write_agents_toml(&interrupt_agents_toml(&report));
 
     let name = format!("interrupt-calm-unknown-{}", std::process::id());
-    let mut guard = PaneGuard::new();
-    guard.track(&name);
 
     // Neither pattern matches, but there is no hazard to guard against.
-    spawn_interrupt_pane(&config, "calm", Some("unknown"), &name, &[]);
-    wait_for_pane_text(&name, "ready: CALM-READY", Duration::from_secs(5));
-    assert_interrupt_sends(&config, &name, &report, &[KEY_C_U], "sent C-u");
+    spawn_interrupt_pane(&server, &config, "calm", Some("unknown"), &name, &[]);
+    wait_for_pane_text(&server, &name, "ready: CALM-READY", Duration::from_secs(5));
+    assert_interrupt_sends(&server, &config, &name, &report, &[KEY_C_U], "sent C-u");
 }
 
 #[cfg(feature = "test-fixtures")]
@@ -6669,23 +7860,30 @@ fn interrupt_on_no_hazard_surface_sends_declared_key_on_unvalidated_pane() {
         return;
     }
 
+    let server = IsolatedTmuxServer::start_inside();
+
     let config = AgentsConfig::new();
     let report = config.xdg().join("interrupt-calm-unvalidated-report.bin");
     config.write_agents_toml(&interrupt_agents_toml(&report));
 
     let name = format!("interrupt-calm-unvalidated-{}", std::process::id());
-    let mut guard = PaneGuard::new();
-    guard.track(&name);
 
     // Surface-unvalidated: still no hazard, so the key is sent.
-    spawn_interrupt_pane(&config, "calm", None, &name, &["--caller-supplied"]);
+    spawn_interrupt_pane(
+        &server,
+        &config,
+        "calm",
+        None,
+        &name,
+        &["--caller-supplied"],
+    );
     assert_eq!(
-        pane_option(&name, "@tt-surface-unvalidated"),
+        pane_option(&server, &name, "@tt-surface-unvalidated"),
         "1",
         "caller-supplied arguments must mark the pane surface-unvalidated"
     );
-    wait_for_pane_text(&name, "ready: CALM-READY", Duration::from_secs(5));
-    assert_interrupt_sends(&config, &name, &report, &[KEY_C_U], "sent C-u");
+    wait_for_pane_text(&server, &name, "ready: CALM-READY", Duration::from_secs(5));
+    assert_interrupt_sends(&server, &config, &name, &report, &[KEY_C_U], "sent C-u");
 }
 
 #[cfg(feature = "test-fixtures")]
@@ -6698,23 +7896,23 @@ fn interrupt_launched_pane_sends_c_c() {
         return;
     }
 
+    let server = IsolatedTmuxServer::start_inside();
+
     let config = AgentsConfig::new();
     let report = config.xdg().join("interrupt-launch-report.bin");
     let name = format!("interrupt-launch-{}", std::process::id());
-    let mut guard = PaneGuard::new();
-    guard.track(&name);
 
     // A `launch`ed pane has no agent and therefore no surface: `interrupt` keeps
     // today's unconditional `C-c`.
-    launch_fake_tui_with(&name, &["--report", report.to_str().unwrap()]);
-    let out = run_bin(&["interrupt", "--target", &name]);
+    launch_fake_tui_with(&server, &name, &["--report", report.to_str().unwrap()]);
+    let out = server.cli(&["interrupt", "--target", &name]);
     out.assert_success("interrupt a launched pane");
     assert!(
         out.stdout.contains("sent C-c"),
         "a launched pane must be sent C-c; got: {:?}",
         out.stdout
     );
-    send_sentinel_and_wait(&name, &report);
+    send_sentinel_and_wait(&server, &name, &report);
     assert_eq!(
         keys_before_last_sentinel(&report),
         vec![KEY_C_C],
@@ -6732,19 +7930,19 @@ fn interrupt_on_no_hazard_surface_with_malformed_regex_still_sends() {
         return;
     }
 
+    let server = IsolatedTmuxServer::start_inside();
+
     let config = AgentsConfig::new();
     let report = config.xdg().join("interrupt-malformed-calm-report.bin");
     config.write_agents_toml(&interrupt_agents_toml(&report));
 
     let name = format!("interrupt-malformed-calm-{}", std::process::id());
-    let mut guard = PaneGuard::new();
-    guard.track(&name);
 
     // The surface declares no quit hazard, so its malformed `busy_regex` must not be
     // compiled and must not stop the declared key from being sent.
-    spawn_interrupt_pane(&config, "malformed", None, &name, &[]);
-    wait_for_pane_text(&name, "ready: MAL-READY", Duration::from_secs(5));
-    assert_interrupt_sends(&config, &name, &report, &[KEY_C_U], "sent C-u");
+    spawn_interrupt_pane(&server, &config, "malformed", None, &name, &[]);
+    wait_for_pane_text(&server, &name, "ready: MAL-READY", Duration::from_secs(5));
+    assert_interrupt_sends(&server, &config, &name, &report, &[KEY_C_U], "sent C-u");
 }
 
 #[cfg(feature = "test-fixtures")]
@@ -6757,6 +7955,8 @@ fn interrupt_malformed_hazardous_unvalidated_pane_uses_unvalidated_refusal() {
         return;
     }
 
+    let server = IsolatedTmuxServer::start_inside();
+
     let config = AgentsConfig::new();
     let report = config
         .xdg()
@@ -6764,12 +7964,11 @@ fn interrupt_malformed_hazardous_unvalidated_pane_uses_unvalidated_refusal() {
     config.write_agents_toml(&interrupt_agents_toml(&report));
 
     let name = format!("interrupt-malformed-unvalidated-{}", std::process::id());
-    let mut guard = PaneGuard::new();
-    guard.track(&name);
 
     // A hazardous surface-unvalidated pane is refused before its malformed pattern is
     // ever compiled, so the refusal names the unvalidated rendering, not the regex.
     spawn_interrupt_pane(
+        &server,
         &config,
         "malformed_hazard",
         None,
@@ -6777,13 +7976,14 @@ fn interrupt_malformed_hazardous_unvalidated_pane_uses_unvalidated_refusal() {
         &["--caller-supplied"],
     );
     assert_eq!(
-        pane_option(&name, "@tt-surface-unvalidated"),
+        pane_option(&server, &name, "@tt-surface-unvalidated"),
         "1",
         "caller-supplied arguments must mark the pane surface-unvalidated"
     );
-    wait_for_pane_text(&name, "ready: MALH-READY", Duration::from_secs(5));
+    wait_for_pane_text(&server, &name, "ready: MALH-READY", Duration::from_secs(5));
 
     assert_interrupt_refused(
+        &server,
         &config,
         &name,
         &report,
@@ -6805,22 +8005,4365 @@ fn interrupt_on_validated_hazardous_surface_with_malformed_regex_refuses() {
         return;
     }
 
+    let server = IsolatedTmuxServer::start_inside();
+
     let config = AgentsConfig::new();
     let report = config.xdg().join("interrupt-malformed-hazard-report.bin");
     config.write_agents_toml(&interrupt_agents_toml(&report));
 
     let name = format!("interrupt-malformed-hazard-{}", std::process::id());
-    let mut guard = PaneGuard::new();
-    guard.track(&name);
 
     // A validated hazardous surface whose pattern cannot compile is refused: the pane
     // cannot be confirmed positively busy, so nothing is sent.
-    spawn_interrupt_pane(&config, "malformed_hazard", None, &name, &[]);
-    wait_for_pane_text(&name, "ready: MALH-READY", Duration::from_secs(5));
+    spawn_interrupt_pane(&server, &config, "malformed_hazard", None, &name, &[]);
+    wait_for_pane_text(&server, &name, "ready: MALH-READY", Duration::from_secs(5));
 
-    assert_interrupt_refused(&config, &name, &report, &["refus", "malformed", "fix"]);
+    assert_interrupt_refused(
+        &server,
+        &config,
+        &name,
+        &report,
+        &["refus", "malformed", "fix"],
+    );
     assert!(
         keys_before_last_sentinel(&report).is_empty(),
         "a malformed hazardous surface must send no key"
     );
+}
+
+// ---------------------------------------------------------------------------
+// ISSUE-260802-0628-01 — every pane `launch` / `spawn-agent` creates carries a
+// non-empty `@tt-name`: the `--name` value, or one derived from the launched
+// command plus a random suffix.
+//
+// These tests deliberately carry no "tmux not on PATH" skip: when the behavior or
+// tmux is absent they fail.
+// ---------------------------------------------------------------------------
+
+/// The pane's user options as `tmux show-options -p -t <pane>` lists them.
+fn pane_user_options(server: &IsolatedTmuxServer, pane: &str) -> Vec<(String, String)> {
+    let out = server.tmux(&["show-options", "-p", "-t", pane]);
+    out.assert_success("show-options -p");
+    out.stdout
+        .lines()
+        .filter_map(|line| {
+            let (key, value) = line.split_once(' ').unwrap_or((line, ""));
+            key.starts_with('@')
+                .then(|| (key.to_owned(), value.trim_matches('"').to_owned()))
+        })
+        .collect()
+}
+
+/// The pane's `@tt-name` as `tmux show-options -p` reports it (empty when unset).
+fn registered_name(server: &IsolatedTmuxServer, pane: &str) -> String {
+    pane_user_options(server, pane)
+        .into_iter()
+        .find(|(key, _)| key == "@tt-name")
+        .map(|(_, value)| value)
+        .unwrap_or_default()
+}
+
+/// Parse a spawning verb's `--format json` stdout into `(pane_id, name)`.
+fn json_pane_and_name(out: &CmdOutput) -> (String, serde_json::Value) {
+    let payload: serde_json::Value =
+        serde_json::from_str(out.stdout.trim()).expect("spawning verb JSON should parse");
+    let pane = payload
+        .get("pane_id")
+        .and_then(|value| value.as_str())
+        .expect("JSON should carry pane_id")
+        .to_owned();
+    let name = payload.get("name").cloned().unwrap_or_default();
+    (pane, name)
+}
+
+/// The `key=value` field of a concise output line.
+fn concise_field(out: &CmdOutput, key: &str) -> Option<String> {
+    let prefix = format!("{key}=");
+    out.stdout
+        .split_whitespace()
+        .find_map(|field| field.strip_prefix(&prefix).map(str::to_owned))
+}
+
+/// Flagless `launch --cmd <cmd> --format json`; returns the created pane id.
+fn launch_flagless_json(server: &IsolatedTmuxServer, cmd: &str) -> String {
+    let out = server.cli(&["launch", "--cmd", cmd, "--format", "json"]);
+    out.assert_success("flagless launch");
+    json_pane_and_name(&out).0
+}
+
+/// Kill `target` from the creating cwd without `--any` and assert exactly that pane
+/// left the server.
+fn assert_guarded_kill_removes_exactly(server: &IsolatedTmuxServer, target: &str, pane: &str) {
+    let before = all_pane_ids(server);
+    assert!(before.contains(&pane.to_owned()), "pane {pane} must exist");
+    let killed = server.cli(&["kill", "--target", target]);
+    killed.assert_success("kill --target <derived name> without --any");
+    let expected: Vec<String> = before.into_iter().filter(|p| p != pane).collect();
+    assert_eq!(
+        all_pane_ids(server),
+        expected,
+        "kill --target {target} must remove exactly pane {pane}"
+    );
+}
+
+#[test]
+fn flagless_launch_registers_a_non_empty_name() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+
+    let pane = launch_flagless_json(&server, "sh");
+
+    assert!(
+        !registered_name(&server, &pane).is_empty(),
+        "a flagless launch pane must carry a non-empty @tt-name; options: {:?}",
+        pane_user_options(&server, &pane)
+    );
+}
+
+#[test]
+fn flagless_launch_name_derives_from_the_command_first_word() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+
+    let pane = launch_flagless_json(&server, "cargo --version");
+
+    let name = registered_name(&server, &pane);
+    assert!(
+        name.starts_with("cargo-"),
+        "a flagless `launch --cmd 'cargo --version'` must be named cargo-<suffix>; got {name:?}"
+    );
+}
+
+#[test]
+fn flagless_launch_registers_name_launched_at_and_cwd() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+
+    let pane = launch_flagless_json(&server, "sleep 600");
+
+    let keys: Vec<String> = pane_user_options(&server, &pane)
+        .into_iter()
+        .map(|(key, _)| key)
+        .collect();
+    for key in ["@tt-name", "@tt-launched-at", "@tt-cwd"] {
+        assert!(
+            keys.iter().any(|k| k == key),
+            "show-options -p must list {key} on a flagless launch pane; got {keys:?}"
+        );
+    }
+}
+
+#[test]
+fn flagless_launch_with_no_usable_first_word_uses_the_fixed_stem_and_resolves_by_name() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+
+    // `:` yields no letter or digit, so the stem falls back to `pane`.
+    let pane = launch_flagless_json(&server, ": ; sleep 600");
+
+    let name = registered_name(&server, &pane);
+    assert!(
+        name.starts_with("pane-"),
+        "a first word without a letter or digit must give the fixed stem; got {name:?}"
+    );
+    assert_guarded_kill_removes_exactly(&server, &name, &pane);
+}
+
+#[test]
+fn flagless_launch_json_and_concise_report_the_registered_name() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+
+    let json = server.cli(&["launch", "--cmd", "sleep 600", "--format", "json"]);
+    json.assert_success("flagless launch --format json");
+    let (pane, name) = json_pane_and_name(&json);
+    let registered = registered_name(&server, &pane);
+    assert!(!registered.is_empty(), "the pane must carry @tt-name");
+    assert_eq!(
+        name.as_str(),
+        Some(registered.as_str()),
+        "launch JSON name must equal the pane's @tt-name; stdout: {}",
+        json.stdout
+    );
+
+    let concise = server.cli(&["launch", "--cmd", "sleep 600"]);
+    concise.assert_success("flagless concise launch");
+    let pane = concise_field(&concise, "pane").expect("concise output must carry pane=");
+    let registered = registered_name(&server, &pane);
+    assert!(!registered.is_empty(), "the pane must carry @tt-name");
+    assert_eq!(
+        concise_field(&concise, "name"),
+        Some(registered),
+        "concise launch must print name=<@tt-name>; stdout: {}",
+        concise.stdout
+    );
+}
+
+#[test]
+fn three_concurrent_flagless_launches_get_distinct_names() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+
+    let children: Vec<_> = (0..3)
+        .map(|_| {
+            server
+                .command_with_cli_env(BIN, &CliOptions::default())
+                .args(["launch", "--cmd", "sleep 600", "--format", "json"])
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .expect("spawn concurrent launch")
+        })
+        .collect();
+    let outputs: Vec<CmdOutput> = children
+        .into_iter()
+        .enumerate()
+        .map(|(i, child)| {
+            wait_for_child(
+                child,
+                &format!("concurrent launch {i}"),
+                Duration::from_secs(60),
+            )
+        })
+        .collect();
+
+    let mut names = Vec::new();
+    for (i, out) in outputs.iter().enumerate() {
+        out.assert_success(&format!("concurrent launch {i}"));
+        let (pane, _) = json_pane_and_name(out);
+        let name = registered_name(&server, &pane);
+        assert!(!name.is_empty(), "concurrent launch {i} pane must be named");
+        names.push(name);
+    }
+    names.sort();
+    names.dedup();
+    assert_eq!(
+        names.len(),
+        3,
+        "three concurrent same-command launches must get pairwise distinct names: {names:?}"
+    );
+}
+
+/// A per-test working directory under the server's private tmpdir, canonicalized
+/// (on macOS `/tmp` is a symlink, and the CLI records the resolved cwd).
+fn private_cwd(server: &IsolatedTmuxServer, leaf: &str) -> std::path::PathBuf {
+    let dir = server.tmpdir().join(leaf);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::canonicalize(&dir).unwrap()
+}
+
+fn cli_in(server: &IsolatedTmuxServer, args: &[&str], cwd: &std::path::Path) -> CmdOutput {
+    server.run_cli(
+        args,
+        CliOptions {
+            cwd: Some(cwd),
+            ..CliOptions::default()
+        },
+    )
+}
+
+#[test]
+fn kill_without_any_acts_on_a_flagless_launch_pane_from_the_creating_cwd() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    let cwd_a = private_cwd(&server, "cwd-a");
+
+    let launched = cli_in(
+        &server,
+        &["launch", "--cmd", "sleep 600", "--format", "json"],
+        &cwd_a,
+    );
+    launched.assert_success("flagless launch from cwd A");
+    let (pane, _) = json_pane_and_name(&launched);
+
+    let killed = cli_in(&server, &["kill", "--target", &pane], &cwd_a);
+    killed.assert_success("kill --target <pane id> from cwd A without --any");
+    assert!(
+        !all_pane_ids(&server).contains(&pane),
+        "pane {pane} must be gone after kill"
+    );
+}
+
+#[test]
+fn kill_from_another_cwd_is_denied_naming_the_creating_cwd() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    let cwd_a = private_cwd(&server, "cwd-a");
+    let cwd_b = private_cwd(&server, "cwd-b");
+
+    let launched = cli_in(
+        &server,
+        &["launch", "--cmd", "sleep 600", "--format", "json"],
+        &cwd_a,
+    );
+    launched.assert_success("flagless launch from cwd A");
+    let (pane, _) = json_pane_and_name(&launched);
+
+    let killed = cli_in(&server, &["kill", "--target", &pane], &cwd_b);
+    assert_ne!(killed.status, 0, "kill from cwd B must be denied");
+    let cwd_a = cwd_a.to_string_lossy();
+    assert!(
+        killed
+            .stderr
+            .contains(&format!("owned by another cwd ({cwd_a})")),
+        "the denial must name cwd A as the other cwd; stderr: {}",
+        killed.stderr
+    );
+    assert!(
+        !killed.stderr.contains("not created by tmux-tools"),
+        "the denial must not claim the pane is foreign; stderr: {}",
+        killed.stderr
+    );
+    assert!(
+        all_pane_ids(&server).contains(&pane),
+        "pane {pane} must survive"
+    );
+}
+
+#[test]
+fn explicit_name_collision_and_raw_output_are_preserved() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    let name = format!("explicit-{}", std::process::id());
+
+    let first = server.cli(&[
+        "launch",
+        "--cmd",
+        "sleep 600",
+        "--name",
+        &name,
+        "--format",
+        "json",
+    ]);
+    first.assert_success("launch --name");
+    let (pane, reported) = json_pane_and_name(&first);
+    assert_eq!(
+        registered_name(&server, &pane),
+        name,
+        "--name registers exactly"
+    );
+    assert_eq!(reported.as_str(), Some(name.as_str()));
+
+    let second = server.cli(&["launch", "--cmd", "sleep 600", "--name", &name]);
+    assert_ne!(second.status, 0, "a second launch --name {name} must fail");
+    assert!(
+        second
+            .stderr
+            .contains(&format!("name '{name}' is already used by pane {pane}")),
+        "the existing name-collision error must be reported; stderr: {}",
+        second.stderr
+    );
+
+    let raw = server.cli(&["launch", "--cmd", "sleep 600", "--format", "raw"]);
+    raw.assert_success("flagless launch --format raw");
+    let pane_id = raw.stdout.strip_suffix('\n').unwrap_or_default();
+    assert!(
+        pane_id.starts_with('%')
+            && pane_id.len() > 1
+            && pane_id[1..].chars().all(|c| c.is_ascii_digit()),
+        "raw stdout must be exactly the bare pane id and a newline; got {:?}",
+        raw.stdout
+    );
+}
+
+/// The registry the auto-name `spawn-agent` criteria use: one agent, `tt-fake-tui`,
+/// whose binary is the fixture (no installed vendor agent).
+#[cfg(feature = "test-fixtures")]
+fn fake_tui_agent_config() -> AgentsConfig {
+    let config = AgentsConfig::new();
+    config.write_agents_toml(&format!(
+        r#"
+[tt-fake-tui]
+binary = "{fake}"
+
+[tt-fake-tui.access.default]
+args = []
+"#,
+        fake = FAKE_TUI_BIN
+    ));
+    config
+}
+
+#[cfg(feature = "test-fixtures")]
+#[test]
+fn flagless_spawn_agent_registers_a_non_empty_name() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    let config = fake_tui_agent_config();
+
+    let spawned = server.cli_env(
+        &["spawn-agent", "tt-fake-tui", "--bare", "--format", "json"],
+        config.xdg(),
+    );
+    spawned.assert_success("flagless spawn-agent");
+    let (pane, _) = json_pane_and_name(&spawned);
+
+    assert!(
+        !registered_name(&server, &pane).is_empty(),
+        "a flagless spawn-agent pane must carry a non-empty @tt-name; options: {:?}",
+        pane_user_options(&server, &pane)
+    );
+}
+
+#[cfg(feature = "test-fixtures")]
+#[test]
+fn flagless_spawn_agent_name_derives_from_the_agent_command_and_resolves_by_name() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    let config = fake_tui_agent_config();
+
+    let spawned = server.cli_env(
+        &["spawn-agent", "tt-fake-tui", "--bare", "--format", "json"],
+        config.xdg(),
+    );
+    spawned.assert_success("flagless spawn-agent");
+    let (pane, _) = json_pane_and_name(&spawned);
+
+    let name = registered_name(&server, &pane);
+    assert!(
+        name.starts_with("tt-fake-tui-"),
+        "the name must derive from the agent binary's basename; got {name:?}"
+    );
+    assert_guarded_kill_removes_exactly(&server, &name, &pane);
+}
+
+#[cfg(feature = "test-fixtures")]
+#[test]
+fn flagless_spawn_agent_json_and_concise_report_the_registered_name() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    let config = fake_tui_agent_config();
+
+    let json = server.cli_env(
+        &["spawn-agent", "tt-fake-tui", "--bare", "--format", "json"],
+        config.xdg(),
+    );
+    json.assert_success("flagless spawn-agent --format json");
+    let (pane, name) = json_pane_and_name(&json);
+    let registered = registered_name(&server, &pane);
+    assert!(!registered.is_empty(), "the pane must carry @tt-name");
+    assert_eq!(
+        name.as_str(),
+        Some(registered.as_str()),
+        "spawn-agent JSON name must equal the pane's @tt-name; stdout: {}",
+        json.stdout
+    );
+
+    let concise = server.cli_env(&["spawn-agent", "tt-fake-tui", "--bare"], config.xdg());
+    concise.assert_success("flagless concise spawn-agent");
+    let pane = concise_field(&concise, "pane").expect("concise output must carry pane=");
+    let registered = registered_name(&server, &pane);
+    assert!(!registered.is_empty(), "the pane must carry @tt-name");
+    assert_eq!(
+        concise_field(&concise, "name"),
+        Some(registered),
+        "concise spawn-agent must print name=<@tt-name>; stdout: {}",
+        concise.stdout
+    );
+}
+
+// ---------------------------------------------------------------------------
+// ISSUE-260801-1310-04 — the core layout module owns placement, and both spawning
+// verbs report the measured geometry of the window the pane landed in.
+//
+// These tests deliberately carry no "tmux not on PATH" skip: when the behavior or
+// tmux is absent they fail.
+// ---------------------------------------------------------------------------
+
+/// The landing a spawning verb's `--format json` stdout reports:
+/// `(pane_id, window_id, min_pane_cols, min_pane_rows)`.
+fn json_landing(out: &CmdOutput, ctx: &str) -> (String, String, u64, u64) {
+    out.assert_success(ctx);
+    let payload: serde_json::Value = serde_json::from_str(out.stdout.trim())
+        .unwrap_or_else(|e| panic!("{ctx}: JSON should parse ({e}): {:?}", out.stdout));
+    let text = |key: &str| {
+        payload
+            .get(key)
+            .and_then(|value| value.as_str())
+            .unwrap_or_else(|| panic!("{ctx}: JSON must carry string {key}: {}", out.stdout))
+            .to_owned()
+    };
+    let number = |key: &str| {
+        payload
+            .get(key)
+            .and_then(|value| value.as_u64())
+            .unwrap_or_else(|| panic!("{ctx}: JSON must carry numeric {key}: {}", out.stdout))
+    };
+    (
+        text("pane_id"),
+        text("window_id"),
+        number("min_pane_cols"),
+        number("min_pane_rows"),
+    )
+}
+
+/// The landing as tmux itself reports it for `pane`: the pane's `#{window_id}` and
+/// the componentwise minimum of `list-panes -t <window_id> -F '#{pane_width}
+/// #{pane_height}'`.
+fn tmux_landing(server: &IsolatedTmuxServer, pane: &str) -> (String, u64, u64) {
+    let window = tmux_format(server, pane, "#{window_id}");
+    let out = server.tmux(&[
+        "list-panes",
+        "-t",
+        &window,
+        "-F",
+        "#{pane_width} #{pane_height}",
+    ]);
+    out.assert_success("list-panes of the landing window");
+    let sizes: Vec<(u64, u64)> = out
+        .stdout
+        .lines()
+        .map(|line| {
+            let (cols, rows) = line.split_once(' ').expect("width height");
+            (cols.parse().unwrap(), rows.parse().unwrap())
+        })
+        .collect();
+    assert!(!sizes.is_empty(), "the landing window must list panes");
+    let cols = sizes.iter().map(|(cols, _)| *cols).min().unwrap();
+    let rows = sizes.iter().map(|(_, rows)| *rows).min().unwrap();
+    (window, cols, rows)
+}
+
+/// Assert a concise line carries the landing tmux reports for its `pane=`.
+fn assert_concise_landing(server: &IsolatedTmuxServer, out: &CmdOutput, ctx: &str) {
+    out.assert_success(ctx);
+    let pane = concise_field(out, "pane")
+        .unwrap_or_else(|| panic!("{ctx}: concise must carry pane=: {}", out.stdout));
+    let (window, cols, rows) = tmux_landing(server, &pane);
+    assert!(
+        out.stdout.contains(&window),
+        "{ctx}: concise must contain the pane's window id {window}: {}",
+        out.stdout
+    );
+    assert_eq!(
+        concise_field(out, "window_id"),
+        Some(window),
+        "{ctx}: concise must carry window_id=<the pane's window id>: {}",
+        out.stdout
+    );
+    assert_eq!(
+        concise_field(out, "min_pane_cols"),
+        Some(cols.to_string()),
+        "{ctx}: concise must carry the measured minimum width: {}",
+        out.stdout
+    );
+    assert_eq!(
+        concise_field(out, "min_pane_rows"),
+        Some(rows.to_string()),
+        "{ctx}: concise must carry the measured minimum height: {}",
+        out.stdout
+    );
+}
+
+/// The pane's `@tt-*` registration keys, sorted, asserting that none is present with
+/// an empty value.
+fn tt_registration_keys(server: &IsolatedTmuxServer, pane: &str) -> Vec<String> {
+    let mut keys = Vec::new();
+    for (key, value) in pane_user_options(server, pane) {
+        if !key.starts_with("@tt-") {
+            continue;
+        }
+        assert!(
+            !value.is_empty(),
+            "registration key {key} on {pane} must not be present with an empty value"
+        );
+        keys.push(key);
+    }
+    keys.sort();
+    keys
+}
+
+fn sorted_keys(keys: &[&str]) -> Vec<String> {
+    let mut keys: Vec<String> = keys.iter().map(|key| (*key).to_owned()).collect();
+    keys.sort();
+    keys
+}
+
+/// Preservation: a flagless `launch` from a window holding only the (not owned)
+/// caller pane is still the horizontal split that gives the new pane 70% of the
+/// window width, with both panes at full height, and `@tt-tiled` stays absent.
+#[test]
+fn flagless_launch_inside_tmux_splits_horizontally_giving_the_new_pane_seventy_percent() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+
+    let pane = launch_flagless_json(&server, "sh");
+
+    let window = tmux_format(&server, &pane, "#{window_id}");
+    assert_eq!(
+        window,
+        tmux_format(&server, server.pane(), "#{window_id}"),
+        "a flagless launch must split the calling pane's window"
+    );
+    let width: i64 = tmux_format(&server, &window, "#{window_width}")
+        .parse()
+        .unwrap();
+    let height: i64 = tmux_format(&server, &window, "#{window_height}")
+        .parse()
+        .unwrap();
+    let out = server.tmux(&[
+        "list-panes",
+        "-t",
+        &window,
+        "-F",
+        "#{pane_id} #{pane_left} #{pane_top} #{pane_width} #{pane_height}",
+    ]);
+    out.assert_success("list-panes of the split window");
+    let panes: Vec<Vec<String>> = out
+        .stdout
+        .lines()
+        .map(|line| line.split(' ').map(str::to_owned).collect())
+        .collect();
+    assert_eq!(panes.len(), 2, "the window must hold two panes: {panes:?}");
+    let field = |row: &[String], i: usize| -> i64 { row[i].parse().unwrap() };
+    let new = panes.iter().find(|row| row[0] == pane).expect("new pane");
+    let old = panes
+        .iter()
+        .find(|row| row[0] != pane)
+        .expect("calling pane");
+    for row in [new, old] {
+        assert_eq!(
+            field(row, 2),
+            0,
+            "both panes must start at the top: {panes:?}"
+        );
+        assert_eq!(
+            field(row, 4),
+            height,
+            "both panes must span the full window height: {panes:?}"
+        );
+    }
+    assert!(
+        field(new, 1) > field(old, 1),
+        "the split must be horizontal, new pane to the right: {panes:?}"
+    );
+    assert!(
+        (field(new, 3) - width * 70 / 100).abs() <= 1,
+        "the new pane must have 70% of the {width}-column window: {panes:?}"
+    );
+    // The calling pane is not ours, so the window was not ours before the split: the
+    // first placement is not a tiling one and records no layout intent.
+    assert!(
+        !tiled_marker_present(&server, &window),
+        "the first placement into a window not owned must leave @tt-tiled absent"
+    );
+}
+
+/// `launch --format json` reports the landing window's id and its componentwise
+/// measured minima, here taken from two different panes.
+#[test]
+fn launch_json_reports_the_landing_window_and_its_measured_minima() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    // A short full-width pane below the calling pane: the window's minimum height then
+    // comes from it, and its minimum width from the narrowed calling pane.
+    server
+        .tmux(&[
+            "split-window",
+            "-v",
+            "-l",
+            "10",
+            "-d",
+            "-t",
+            server.pane(),
+            "sleep",
+            "600",
+        ])
+        .assert_success("add a short pane below the calling pane");
+
+    let out = server.cli(&["launch", "--cmd", "sleep 600", "--format", "json"]);
+    let (pane, window, cols, rows) = json_landing(&out, "launch --format json");
+
+    assert_eq!(
+        window,
+        tmux_format(&server, &pane, "#{window_id}"),
+        "window_id must be the pane's window id"
+    );
+    assert_eq!(
+        tmux_landing(&server, &pane),
+        (window, cols, rows),
+        "the minima must be the componentwise minimum of the window's panes; stdout: {}",
+        out.stdout
+    );
+    assert_eq!(rows, 10, "the minimum height must come from the short pane");
+}
+
+#[test]
+fn launch_concise_reports_the_landing_window_and_its_measured_minima() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+
+    let out = server.cli(&["launch", "--cmd", "sleep 600", "--format", "concise"]);
+    assert_concise_landing(&server, &out, "launch --format concise");
+}
+
+#[test]
+fn launch_raw_output_is_exactly_the_pane_id() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+
+    let out = server.cli(&["launch", "--cmd", "sleep 600", "--format", "raw"]);
+    out.assert_success("launch --format raw");
+    let pane = out.stdout.strip_suffix('\n').unwrap_or_default();
+    assert!(
+        pane.starts_with('%') && pane[1..].parse::<u32>().is_ok(),
+        "raw stdout must be exactly the pane id and a newline; got {:?}",
+        out.stdout
+    );
+    assert!(all_pane_ids(&server).contains(&pane.to_owned()));
+}
+
+#[test]
+fn flagless_launch_registers_exactly_name_launched_at_and_cwd() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+
+    let pane = launch_flagless_json(&server, "sleep 600");
+
+    assert_eq!(
+        tt_registration_keys(&server, &pane),
+        sorted_keys(&["@tt-name", "@tt-launched-at", "@tt-cwd"]),
+        "a flagless launch registers exactly name, launched-at and cwd"
+    );
+}
+
+/// Outside tmux, `launch` lands in a window of the managed `tmux-tools` session.
+#[test]
+fn outside_tmux_launch_reports_a_window_in_the_managed_session() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_outside();
+
+    let out = server.cli(&["launch", "--cmd", "sleep 600", "--format", "json"]);
+    let (pane, window, cols, rows) = json_landing(&out, "outside-tmux launch --format json");
+
+    assert_eq!(
+        tmux_format(&server, &window, "#{session_name}"),
+        "tmux-tools"
+    );
+    assert_eq!(tmux_landing(&server, &pane), (window, cols, rows));
+}
+
+/// `launch --session <s>` without `--target` reports a new window in session `<s>`.
+#[test]
+fn launch_with_session_scope_reports_a_new_window_in_that_session() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_outside();
+    let session_target = format!("={HARNESS_SESSION}");
+    let before = server.tmux(&["list-windows", "-t", &session_target, "-F", "#{window_id}"]);
+    before.assert_success("list harness session windows");
+
+    let out = server.cli(&[
+        "launch",
+        "--cmd",
+        "sleep 600",
+        "--session",
+        HARNESS_SESSION,
+        "--format",
+        "json",
+    ]);
+    let (pane, window, cols, rows) = json_landing(&out, "launch --session --format json");
+
+    assert!(
+        !before.stdout.lines().any(|line| line == window),
+        "the reported window {window} must be new; windows before: {:?}",
+        before.stdout
+    );
+    assert_eq!(
+        tmux_format(&server, &window, "#{session_name}"),
+        HARNESS_SESSION
+    );
+    assert_eq!(tmux_landing(&server, &pane), (window, cols, rows));
+}
+
+#[cfg(feature = "test-fixtures")]
+#[test]
+fn spawn_agent_json_reports_the_landing_window_and_its_measured_minima() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    let config = fake_tui_agent_config();
+
+    let out = server.cli_env(
+        &["spawn-agent", "tt-fake-tui", "--bare", "--format", "json"],
+        config.xdg(),
+    );
+    let (pane, window, cols, rows) = json_landing(&out, "spawn-agent --format json");
+
+    assert_eq!(window, tmux_format(&server, &pane, "#{window_id}"));
+    assert_eq!(
+        tmux_landing(&server, &pane),
+        (window, cols, rows),
+        "spawn-agent minima must be the window's measured minima; stdout: {}",
+        out.stdout
+    );
+}
+
+#[cfg(feature = "test-fixtures")]
+#[test]
+fn spawn_agent_concise_reports_the_landing_window_and_its_measured_minima() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    let config = fake_tui_agent_config();
+
+    let out = server.cli_env(
+        &[
+            "spawn-agent",
+            "tt-fake-tui",
+            "--bare",
+            "--format",
+            "concise",
+        ],
+        config.xdg(),
+    );
+    assert_concise_landing(&server, &out, "spawn-agent --format concise");
+}
+
+#[cfg(feature = "test-fixtures")]
+#[test]
+fn spawn_agent_raw_output_is_exactly_the_pane_id() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    let config = fake_tui_agent_config();
+
+    let out = server.cli_env(
+        &["spawn-agent", "tt-fake-tui", "--bare", "--format", "raw"],
+        config.xdg(),
+    );
+    out.assert_success("spawn-agent --format raw");
+    let pane = out.stdout.strip_suffix('\n').unwrap_or_default();
+    assert!(
+        pane.starts_with('%') && pane[1..].parse::<u32>().is_ok(),
+        "raw stdout must be exactly the pane id and a newline; got {:?}",
+        out.stdout
+    );
+    assert!(all_pane_ids(&server).contains(&pane.to_owned()));
+}
+
+#[cfg(feature = "test-fixtures")]
+#[test]
+fn spawn_agent_without_access_or_trailing_args_registers_exactly_the_agent_set() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    let config = fake_tui_agent_config();
+
+    let out = server.cli_env(
+        &["spawn-agent", "tt-fake-tui", "--bare", "--format", "json"],
+        config.xdg(),
+    );
+    out.assert_success("flagless spawn-agent");
+    let (pane, _) = json_pane_and_name(&out);
+
+    assert_eq!(
+        tt_registration_keys(&server, &pane),
+        sorted_keys(&[
+            "@tt-name",
+            "@tt-launched-at",
+            "@tt-cwd",
+            "@tt-agent",
+            "@tt-surface",
+        ]),
+        "spawn-agent without --access or trailing arguments registers neither @tt-access nor the unvalidated mark"
+    );
+}
+
+#[cfg(feature = "test-fixtures")]
+#[test]
+fn spawn_agent_with_access_and_trailing_args_registers_access_and_unvalidated_mark() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    let config = fake_tui_agent_config();
+
+    let out = server.cli_env(
+        &[
+            "spawn-agent",
+            "--access",
+            "default",
+            "--bare",
+            "--format",
+            "json",
+            "tt-fake-tui",
+            "--",
+            "--quiet-submit",
+        ],
+        config.xdg(),
+    );
+    out.assert_success("spawn-agent --access default tt-fake-tui -- --quiet-submit");
+    let (pane, _) = json_pane_and_name(&out);
+
+    assert_eq!(
+        tt_registration_keys(&server, &pane),
+        sorted_keys(&[
+            "@tt-name",
+            "@tt-launched-at",
+            "@tt-cwd",
+            "@tt-agent",
+            "@tt-surface",
+            "@tt-access",
+            "@tt-surface-unvalidated",
+        ]),
+        "--access and trailing caller arguments add @tt-access and @tt-surface-unvalidated"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// ISSUE-260801-1310-05 — per-surface floors and the `below_floor` verdict.
+//
+// Every case injects its own `XDG_CONFIG_HOME` (empty unless the test writes an
+// `agents.toml`), so the developer's registry never decides a verdict. The cases carry
+// no "tmux not on PATH" skip: when the behavior or tmux is absent they fail.
+// ---------------------------------------------------------------------------
+
+/// An agent no registry knows: its panes resolve to the 58x16 default floor.
+const FLOOR_PROBE_AGENT: &str = "tt-floor-probe";
+
+/// A throwaway `XDG_CONFIG_HOME` holding no `agents.toml` until a test writes one.
+struct FloorXdg {
+    dir: std::path::PathBuf,
+}
+
+impl FloorXdg {
+    fn new() -> Self {
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "tt-floor-xdg-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::SeqCst)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("tmux-tools")).unwrap();
+        Self { dir }
+    }
+
+    fn path(&self) -> &std::path::Path {
+        &self.dir
+    }
+
+    fn write_agents_toml(&self, contents: &str) {
+        std::fs::write(self.dir.join("tmux-tools").join("agents.toml"), contents).unwrap();
+    }
+}
+
+impl Drop for FloorXdg {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+/// Parse `--format json` stdout of a successful command.
+fn json_payload(out: &CmdOutput, ctx: &str) -> serde_json::Value {
+    out.assert_success(ctx);
+    serde_json::from_str(out.stdout.trim())
+        .unwrap_or_else(|e| panic!("{ctx}: JSON should parse ({e}): {:?}", out.stdout))
+}
+
+/// The JSON `below_floor` field, which must be present and boolean.
+fn json_below_floor(payload: &serde_json::Value, ctx: &str) -> bool {
+    payload
+        .get("below_floor")
+        .and_then(|value| value.as_bool())
+        .unwrap_or_else(|| panic!("{ctx}: JSON must carry boolean below_floor: {payload}"))
+}
+
+/// Register `pane` with `@tt-agent` directly through tmux (no spawn involved).
+fn register_agent_directly(server: &IsolatedTmuxServer, pane: &str, agent: &str) {
+    server
+        .tmux(&["set-option", "-p", "-t", pane, "@tt-agent", agent])
+        .assert_success("set @tt-agent directly");
+}
+
+/// Crowd the harness window: a 200-column pane to the right of the calling pane, which
+/// leaves the calling pane 79 columns wide, so a 70% split of it yields panes narrower
+/// than 58 columns. Returns the new right-hand pane.
+fn crowd_calling_pane(server: &IsolatedTmuxServer) -> String {
+    let out = server.tmux(&[
+        "split-window",
+        "-h",
+        "-d",
+        "-l",
+        "200",
+        "-t",
+        server.pane(),
+        "-P",
+        "-F",
+        "#{pane_id}",
+        "sleep",
+        "600",
+    ]);
+    out.assert_success("crowd the calling pane");
+    out.stdout.trim().to_owned()
+}
+
+/// Assert a spawning verb's verdict (`below`) in the given format.
+fn assert_spawn_verdict(out: &CmdOutput, format: &str, below: bool, ctx: &str) {
+    match format {
+        "json" => {
+            let payload = json_payload(out, ctx);
+            assert_eq!(
+                json_below_floor(&payload, ctx),
+                below,
+                "{ctx}: below_floor; stdout: {}",
+                out.stdout
+            );
+        }
+        "concise" => {
+            out.assert_success(ctx);
+            assert_eq!(
+                concise_field(out, "below_floor"),
+                Some(below.to_string()),
+                "{ctx}: concise must carry below_floor={below}; stdout: {}",
+                out.stdout
+            );
+        }
+        other => panic!("unexpected format {other}"),
+    }
+}
+
+/// `launch` into a window whose agent pane's floor (58x16) the landing breaks. The
+/// agent pane makes the window owned, so the setup's 70% split of the calling pane is
+/// the explicit opt-out `--split h --size 70` rather than a (tiling) flagless launch.
+fn launch_into_crowded_agent_window(format: &str) {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    let xdg = FloorXdg::new();
+    let agent_pane = crowd_calling_pane(&server);
+    register_agent_directly(&server, &agent_pane, FLOOR_PROBE_AGENT);
+
+    let out = server.cli_env(
+        &[
+            "launch",
+            "--cmd",
+            "sleep 600",
+            "--split",
+            "h",
+            "--size",
+            "70",
+            "--format",
+            format,
+        ],
+        xdg.path(),
+    );
+    assert_spawn_verdict(
+        &out,
+        format,
+        true,
+        &format!("launch --format {format} (crowded)"),
+    );
+}
+
+/// `launch` into a window holding an agent pane, with room for its floor.
+fn launch_into_roomy_agent_window(format: &str) {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    let xdg = FloorXdg::new();
+    register_agent_directly(&server, server.pane(), FLOOR_PROBE_AGENT);
+
+    let out = server.cli_env(
+        &["launch", "--cmd", "sleep 600", "--format", format],
+        xdg.path(),
+    );
+    assert_spawn_verdict(
+        &out,
+        format,
+        false,
+        &format!("launch --format {format} (roomy)"),
+    );
+}
+
+#[test]
+fn launch_json_reports_below_floor_in_a_crowded_agent_window() {
+    launch_into_crowded_agent_window("json");
+}
+
+#[test]
+fn launch_concise_reports_below_floor_in_a_crowded_agent_window() {
+    launch_into_crowded_agent_window("concise");
+}
+
+#[test]
+fn launch_json_reports_not_below_floor_in_a_roomy_agent_window() {
+    launch_into_roomy_agent_window("json");
+}
+
+#[test]
+fn launch_concise_reports_not_below_floor_in_a_roomy_agent_window() {
+    launch_into_roomy_agent_window("concise");
+}
+
+/// A window with no `@tt-agent` pane has no effective floor: however crowded, the
+/// verdict is present and false.
+#[test]
+fn launch_json_into_a_crowded_window_without_agents_reports_below_floor_false() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    let xdg = FloorXdg::new();
+    crowd_calling_pane(&server);
+
+    let out = server.cli_env(
+        &["launch", "--cmd", "sleep 600", "--format", "json"],
+        xdg.path(),
+    );
+    let (pane, _, cols, _) = json_landing(&out, "launch --format json (crowded, no agents)");
+    assert!(
+        cols < 58,
+        "the window must be crowded below 58 columns; got {cols}"
+    );
+    assert!(
+        tt_registration_keys(&server, &pane)
+            .iter()
+            .all(|key| key != "@tt-agent"),
+        "launch registers no agent"
+    );
+    let payload = json_payload(&out, "launch --format json");
+    assert!(
+        !json_below_floor(&payload, "launch --format json (crowded, no agents)"),
+        "a window without agent panes is never below floor: {}",
+        out.stdout
+    );
+}
+
+/// `spawn-agent` lands its own agent pane (the fixture agent, default floor 58x16)
+/// either in a crowded window or with room.
+#[cfg(feature = "test-fixtures")]
+fn spawn_agent_verdict(format: &str, crowded: bool) {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    let config = fake_tui_agent_config();
+    if crowded {
+        crowd_calling_pane(&server);
+    }
+
+    let out = server.cli_env(
+        &["spawn-agent", "tt-fake-tui", "--bare", "--format", format],
+        config.xdg(),
+    );
+    assert_spawn_verdict(
+        &out,
+        format,
+        crowded,
+        &format!("spawn-agent --format {format} (crowded: {crowded})"),
+    );
+}
+
+#[cfg(feature = "test-fixtures")]
+#[test]
+fn spawn_agent_json_reports_below_floor_in_a_crowded_window() {
+    spawn_agent_verdict("json", true);
+}
+
+#[cfg(feature = "test-fixtures")]
+#[test]
+fn spawn_agent_concise_reports_below_floor_in_a_crowded_window() {
+    spawn_agent_verdict("concise", true);
+}
+
+#[cfg(feature = "test-fixtures")]
+#[test]
+fn spawn_agent_json_reports_not_below_floor_in_a_roomy_window() {
+    spawn_agent_verdict("json", false);
+}
+
+#[cfg(feature = "test-fixtures")]
+#[test]
+fn spawn_agent_concise_reports_not_below_floor_in_a_roomy_window() {
+    spawn_agent_verdict("concise", false);
+}
+
+/// A new detached window in the harness session; returns its pane.
+fn new_window_pane(server: &IsolatedTmuxServer) -> String {
+    let target = format!("={HARNESS_SESSION}:");
+    let out = server.tmux(&[
+        "new-window",
+        "-d",
+        "-t",
+        &target,
+        "-P",
+        "-F",
+        "#{pane_id}",
+        "sleep",
+        "600",
+    ]);
+    out.assert_success("create a window");
+    out.stdout.trim().to_owned()
+}
+
+/// A window holding one `@tt-agent` pane, crowded below 58 columns by direct
+/// `tmux split-window` calls. Returns the agent pane.
+fn crowded_window_with_agent(server: &IsolatedTmuxServer) -> String {
+    let pane = new_window_pane(server);
+    register_agent_directly(server, &pane, FLOOR_PROBE_AGENT);
+    for _ in 0..3 {
+        server
+            .tmux(&["split-window", "-h", "-d", "-t", &pane, "sleep", "600"])
+            .assert_success("crowd the window by a direct split");
+    }
+    pane
+}
+
+/// A window holding one `@tt-agent` pane and nothing else. Returns the agent pane.
+fn roomy_window_with_agent(server: &IsolatedTmuxServer) -> String {
+    let pane = new_window_pane(server);
+    register_agent_directly(server, &pane, FLOOR_PROBE_AGENT);
+    pane
+}
+
+/// A `key: value` line of `status --format concise`.
+fn status_concise_field(out: &CmdOutput, key: &str) -> Option<String> {
+    let prefix = format!("{key}: ");
+    out.stdout
+        .lines()
+        .find_map(|line| line.strip_prefix(&prefix).map(str::to_owned))
+}
+
+/// `status` pointed at `pane` reports its window's measured minima (as tmux reports
+/// them) and the expected verdict, in `json` and `concise`.
+fn assert_status_verdict(server: &IsolatedTmuxServer, xdg: &FloorXdg, pane: &str, below: bool) {
+    let (_, cols, rows) = tmux_landing(server, pane);
+
+    let json = server.cli_env(
+        &["status", "--target", pane, "--format", "json"],
+        xdg.path(),
+    );
+    let payload = json_payload(&json, "status --format json");
+    assert_eq!(
+        json_below_floor(&payload, "status --format json"),
+        below,
+        "status json below_floor for {pane}: {}",
+        json.stdout
+    );
+    assert_eq!(
+        payload.get("min_pane_cols").and_then(|v| v.as_u64()),
+        Some(cols),
+        "status json min_pane_cols: {}",
+        json.stdout
+    );
+    assert_eq!(
+        payload.get("min_pane_rows").and_then(|v| v.as_u64()),
+        Some(rows),
+        "status json min_pane_rows: {}",
+        json.stdout
+    );
+    assert!(
+        payload.get("min_cols").is_none() && payload.get("min_rows").is_none(),
+        "status must not reuse the registry's floor names: {}",
+        json.stdout
+    );
+
+    let concise = server.cli_env(
+        &["status", "--target", pane, "--format", "concise"],
+        xdg.path(),
+    );
+    concise.assert_success("status --format concise");
+    assert_eq!(
+        status_concise_field(&concise, "below_floor"),
+        Some(below.to_string()),
+        "status concise below_floor for {pane}: {}",
+        concise.stdout
+    );
+    assert_eq!(
+        status_concise_field(&concise, "min_pane_cols"),
+        Some(cols.to_string()),
+        "status concise min_pane_cols: {}",
+        concise.stdout
+    );
+    assert_eq!(
+        status_concise_field(&concise, "min_pane_rows"),
+        Some(rows.to_string()),
+        "status concise min_pane_rows: {}",
+        concise.stdout
+    );
+}
+
+#[test]
+fn status_reports_a_window_crowded_by_direct_splits_below_floor() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    let xdg = FloorXdg::new();
+    let pane = crowded_window_with_agent(&server);
+    let (_, cols, _) = tmux_landing(&server, &pane);
+    assert!(
+        cols < 58,
+        "the window must be crowded below 58 columns; got {cols}"
+    );
+
+    assert_status_verdict(&server, &xdg, &pane, true);
+}
+
+#[test]
+fn status_reports_a_roomy_window_with_the_same_registration_not_below_floor() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    let xdg = FloorXdg::new();
+    let pane = roomy_window_with_agent(&server);
+
+    assert_status_verdict(&server, &xdg, &pane, false);
+}
+
+/// The tmux format `status --format raw` passes through, as it stood before floors.
+fn status_raw_format() -> String {
+    [
+        "#{session_name}",
+        "#{window_index}.#{window_name}",
+        "#{pane_index}.#{pane_id}",
+        "#{@tt-name}",
+        "#{@tt-agent}",
+        "#{@tt-access}",
+        "#{@tt-launched-at}",
+        "#{@tt-cwd}",
+    ]
+    .join("\x1f")
+}
+
+#[test]
+fn status_raw_is_byte_for_byte_the_unchanged_passthrough() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    let xdg = FloorXdg::new();
+    let pane = crowded_window_with_agent(&server);
+
+    let raw = server.cli_env(
+        &["status", "--target", &pane, "--format", "raw"],
+        xdg.path(),
+    );
+    raw.assert_success("status --format raw");
+    let expected = server.tmux(&["display-message", "-p", "-t", &pane, &status_raw_format()]);
+    expected.assert_success("display the status format directly");
+    assert_eq!(
+        raw.stdout, expected.stdout,
+        "raw must be the passthrough, byte for byte"
+    );
+    assert_eq!(raw.stderr, "", "raw prints nothing on stderr");
+}
+
+/// The unparsable `agents.toml` the load-failure criteria inject.
+const UNPARSABLE_AGENTS_TOML: &str = "[codex\nmin_cols = 50\n";
+
+fn assert_registry_warning(out: &CmdOutput, ctx: &str) {
+    let warnings: Vec<&str> = out
+        .stderr
+        .lines()
+        .filter(|line| line.starts_with("warning: agent registry"))
+        .collect();
+    assert_eq!(
+        warnings.len(),
+        1,
+        "{ctx}: stderr must carry exactly one registry warning line: {:?}",
+        out.stderr
+    );
+    assert!(
+        warnings[0].ends_with("; using built-in floors"),
+        "{ctx}: the warning must say the built-in floors are used: {:?}",
+        warnings[0]
+    );
+    assert!(
+        warnings[0].contains("agents.toml"),
+        "{ctx}: the warning must name the file: {:?}",
+        warnings[0]
+    );
+}
+
+#[test]
+fn unparsable_agents_toml_warns_and_launch_and_status_still_report_floors() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    let broken = FloorXdg::new();
+    broken.write_agents_toml(UNPARSABLE_AGENTS_TOML);
+    let empty = FloorXdg::new();
+
+    let before = all_pane_ids(&server);
+    let launch = server.cli_env(
+        &["launch", "--cmd", "sh", "--format", "json"],
+        broken.path(),
+    );
+    let payload = json_payload(&launch, "launch with an unparsable agents.toml");
+    json_below_floor(&payload, "launch with an unparsable agents.toml");
+    assert_registry_warning(&launch, "launch");
+    let pane = payload["pane_id"].as_str().expect("pane_id").to_owned();
+    let after = all_pane_ids(&server);
+    assert_eq!(
+        after.len(),
+        before.len() + 1,
+        "launch must create exactly one pane: before {before:?}, after {after:?}"
+    );
+    assert!(after.contains(&pane));
+
+    let status = server.cli_env(
+        &["status", "--target", &pane, "--format", "json"],
+        broken.path(),
+    );
+    let payload = json_payload(
+        &status,
+        "status --format json with an unparsable agents.toml",
+    );
+    json_below_floor(&payload, "status --format json");
+    assert_registry_warning(&status, "status --format json");
+
+    let concise = server.cli_env(
+        &["status", "--target", &pane, "--format", "concise"],
+        broken.path(),
+    );
+    concise.assert_success("status --format concise with an unparsable agents.toml");
+    assert!(status_concise_field(&concise, "below_floor").is_some());
+    assert_registry_warning(&concise, "status --format concise");
+
+    // Pin the window name: automatic-rename could otherwise rename the window between
+    // the two raw calls and make their stdout differ for a reason unrelated to agents.toml.
+    server
+        .tmux(&["set-window-option", "-t", &pane, "automatic-rename", "off"])
+        .assert_success("set-window-option automatic-rename off");
+    let raw_broken = server.cli_env(
+        &["status", "--target", &pane, "--format", "raw"],
+        broken.path(),
+    );
+    let raw_empty = server.cli_env(
+        &["status", "--target", &pane, "--format", "raw"],
+        empty.path(),
+    );
+    raw_broken.assert_success("status --format raw with an unparsable agents.toml");
+    raw_empty.assert_success("status --format raw without agents.toml");
+    assert_eq!(
+        raw_broken.stdout, raw_empty.stdout,
+        "raw stdout must not change"
+    );
+    assert_eq!(
+        raw_broken.stderr, raw_empty.stderr,
+        "raw stderr must not change"
+    );
+}
+
+/// `status --target` with `TMUX` unset still renders a pane, so it loads the registry.
+#[test]
+fn status_target_outside_tmux_loads_the_registry_and_reports_the_verdict() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_outside();
+    let broken = FloorXdg::new();
+    broken.write_agents_toml(UNPARSABLE_AGENTS_TOML);
+    let empty = FloorXdg::new();
+    let pane = crowded_window_with_agent(&server);
+
+    let json = server.cli_env(
+        &["status", "--target", &pane, "--format", "json"],
+        empty.path(),
+    );
+    let payload = json_payload(&json, "status --target outside tmux");
+    assert!(json_below_floor(&payload, "status --target outside tmux"));
+
+    let warned = server.cli_env(
+        &["status", "--target", &pane, "--format", "json"],
+        broken.path(),
+    );
+    json_payload(
+        &warned,
+        "status --target outside tmux, unparsable agents.toml",
+    );
+    assert_registry_warning(&warned, "status --target outside tmux");
+}
+
+/// The not-in-tmux output never loads the registry.
+#[test]
+fn status_not_in_tmux_output_is_unchanged_and_loads_no_registry() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_outside();
+    let broken = FloorXdg::new();
+    broken.write_agents_toml(UNPARSABLE_AGENTS_TOML);
+
+    for (format, expected) in [
+        ("concise", "not in tmux\n"),
+        ("raw", "not in tmux\n"),
+        ("json", "{\n  \"in_tmux\": false\n}\n"),
+    ] {
+        let out = server.cli_env(&["status", "--format", format], broken.path());
+        out.assert_success(&format!("status --format {format} outside tmux"));
+        assert_eq!(
+            out.stdout, expected,
+            "status --format {format} not-in-tmux output"
+        );
+        assert_eq!(
+            out.stderr, "",
+            "status --format {format} must not load the registry"
+        );
+    }
+}
+
+#[cfg(feature = "test-fixtures")]
+#[test]
+fn spawn_agent_and_wait_idle_still_fail_on_an_unparsable_agents_toml() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    let broken = FloorXdg::new();
+    broken.write_agents_toml(UNPARSABLE_AGENTS_TOML);
+
+    let before = all_pane_ids(&server);
+    let spawned = server.cli_env(
+        &["spawn-agent", "codex", "--bare", "--format", "json"],
+        broken.path(),
+    );
+    assert_ne!(spawned.status, 0, "spawn-agent must fail: {spawned:?}");
+    assert_eq!(
+        all_pane_ids(&server),
+        before,
+        "spawn-agent must create no pane"
+    );
+
+    // wait-idle reads the registry for a pane that names an agent.
+    let agent_pane = roomy_window_with_agent(&server);
+    let waited = server.cli_env(
+        &["wait-idle", "--target", &agent_pane, "--timeout", "2"],
+        broken.path(),
+    );
+    assert_ne!(waited.status, 0, "wait-idle must fail: {waited:?}");
+}
+
+/// The README section documenting floors (`### Floors` up to the next heading).
+fn readme_floor_section() -> String {
+    let readme = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/README.md"))
+        .expect("README should be readable");
+    let start = readme
+        .find("### Floors")
+        .expect("README must document floors under a `### Floors` heading");
+    let body = &readme[start + "### Floors".len()..];
+    let end = body
+        .find("\n## ")
+        .into_iter()
+        .chain(body.find("\n### "))
+        .min()
+        .unwrap_or(body.len());
+    body[..end].to_owned()
+}
+
+#[test]
+fn readme_documents_surface_floors_and_their_limits() {
+    let section = readme_floor_section();
+    let normalized = section.split_whitespace().collect::<Vec<_>>().join(" ");
+    for needle in [
+        "`min_cols`",
+        "`min_rows`",
+        "pre-surface rendering",
+        "58×16",
+        "assumption",
+        "`codex` `default`",
+        "`cursor` `default`",
+        "`claude` `rich`",
+        "status-line pattern",
+        "`ready_regex`",
+        "`ready_lines`",
+        "does not enforce",
+        "agent versions",
+        "`validated_version`",
+    ] {
+        assert!(
+            normalized.contains(needle),
+            "README's floor section must mention {needle:?}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ISSUE-260802-0128-01 — tile is the default placement inside tmux: split, then
+// retile the window with tmux's `tiled` layout when it held an owned pane before the
+// split, recorded by the `@tt-tiled` window marker; explicit sizing opts out.
+//
+// "Retiled" means the window's pane geometry equals what an explicit
+// `select-layout tiled` of the same panes produces. These cases carry no "tmux not on
+// PATH" skip: when the behavior or tmux is absent they fail.
+// ---------------------------------------------------------------------------
+
+/// The `@tt-tiled` window marker.
+const TILED_MARKER: &str = "@tt-tiled";
+
+/// One pane's rectangle: `(pane_id, left, top, width, height)`.
+type PaneRect = (String, i64, i64, i64, i64);
+
+/// Every pane of `window` (any window target) with its rectangle, in pane order.
+fn window_rects(server: &IsolatedTmuxServer, window: &str) -> Vec<PaneRect> {
+    let out = server.tmux(&[
+        "list-panes",
+        "-t",
+        window,
+        "-F",
+        "#{pane_id} #{pane_left} #{pane_top} #{pane_width} #{pane_height}",
+    ]);
+    out.assert_success(&format!("list-panes -t {window}"));
+    out.stdout
+        .lines()
+        .map(|line| {
+            let fields: Vec<&str> = line.split(' ').collect();
+            let number = |i: usize| -> i64 { fields[i].parse().unwrap() };
+            (
+                fields[0].to_owned(),
+                number(1),
+                number(2),
+                number(3),
+                number(4),
+            )
+        })
+        .collect()
+}
+
+/// Whether `tmux show-options -w -t <window>` lists `@tt-tiled`.
+fn tiled_marker_present(server: &IsolatedTmuxServer, window: &str) -> bool {
+    let out = server.tmux(&["show-options", "-w", "-t", window]);
+    out.assert_success(&format!("show-options -w -t {window}"));
+    out.stdout
+        .lines()
+        .any(|line| line.split_whitespace().next() == Some(TILED_MARKER))
+}
+
+/// Assert `window` is retiled: an explicit `select-layout tiled` of its panes changes
+/// no pane's rectangle.
+fn assert_retiled(server: &IsolatedTmuxServer, window: &str, ctx: &str) {
+    let placed = window_rects(server, window);
+    server
+        .tmux(&["select-layout", "-t", window, "tiled"])
+        .assert_success("explicit select-layout tiled");
+    let tiled = window_rects(server, window);
+    assert_eq!(
+        placed, tiled,
+        "{ctx}: the window must already be in tmux's tiled arrangement"
+    );
+}
+
+/// The window id of `pane`.
+fn window_of(server: &IsolatedTmuxServer, pane: &str) -> String {
+    tmux_format(server, pane, "#{window_id}")
+}
+
+/// Register `pane` directly through tmux with `@tt-name` and `@tt-cwd`.
+fn register_name_and_cwd(server: &IsolatedTmuxServer, pane: &str, name: &str, cwd: &str) {
+    server
+        .tmux(&["set-option", "-p", "-t", pane, "@tt-name", name])
+        .assert_success("set @tt-name directly");
+    server
+        .tmux(&["set-option", "-p", "-t", pane, "@tt-cwd", cwd])
+        .assert_success("set @tt-cwd directly");
+}
+
+/// The cwd the CLI runs in under the harness (the test process's own).
+fn harness_cwd() -> String {
+    std::env::current_dir()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// Assert the window holds three panes whose heights are within one row of each
+/// other, none spanning the full window height.
+fn assert_three_tiled_rows(server: &IsolatedTmuxServer, window: &str, ctx: &str) {
+    let panes = window_rects(server, window);
+    assert_eq!(
+        panes.len(),
+        3,
+        "{ctx}: the window must hold three panes: {panes:?}"
+    );
+    let window_height: i64 = tmux_format(server, window, "#{window_height}")
+        .parse()
+        .unwrap();
+    let heights: Vec<i64> = panes.iter().map(|pane| pane.4).collect();
+    let (min, max) = (
+        *heights.iter().min().unwrap(),
+        *heights.iter().max().unwrap(),
+    );
+    assert!(
+        max - min <= 1,
+        "{ctx}: pane heights must be within one row of each other: {panes:?}"
+    );
+    assert!(
+        heights.iter().all(|height| *height < window_height),
+        "{ctx}: no pane may span the full {window_height}-row window height: {panes:?}"
+    );
+}
+
+/// Acceptance: two flagless `spawn-agent` placements from a window holding only the
+/// caller pane tile it, and the second reports the window's measured minima.
+#[cfg(feature = "test-fixtures")]
+#[test]
+fn two_flagless_spawn_agents_tile_the_callers_window() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    let config = fake_tui_agent_config();
+    let args = ["spawn-agent", "tt-fake-tui", "--bare", "--format", "json"];
+
+    server
+        .cli_env(&args, config.xdg())
+        .assert_success("first flagless spawn-agent");
+    let second = server.cli_env(&args, config.xdg());
+    let (pane, window, cols, rows) = json_landing(&second, "second flagless spawn-agent");
+
+    assert_eq!(window, window_of(&server, server.pane()));
+    assert_three_tiled_rows(&server, &window, "two flagless spawn-agents");
+    assert_eq!(
+        tmux_landing(&server, &pane),
+        (window, cols, rows),
+        "the second placement must report the window's measured minima: {}",
+        second.stdout
+    );
+}
+
+/// Acceptance: two flagless, unnamed `launch` placements tile the caller's window.
+#[test]
+fn two_flagless_launches_tile_the_callers_window() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+
+    launch_flagless_json(&server, "sh");
+    let pane = launch_flagless_json(&server, "sh");
+
+    let window = window_of(&server, &pane);
+    assert_eq!(window, window_of(&server, server.pane()));
+    assert_three_tiled_rows(&server, &window, "two flagless launches");
+}
+
+/// Acceptance: a flagless placement into a window whose panes carry a different
+/// `@tt-cwd` neither retiles nor marks it; one into an owned window does both.
+#[test]
+fn flagless_launch_tiles_an_owned_window_but_not_a_foreign_cwd_one() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+
+    // A window whose two panes were registered from another project's cwd.
+    let foreign = new_window_pane(&server);
+    let sibling = server.tmux(&[
+        "split-window",
+        "-v",
+        "-d",
+        "-t",
+        &foreign,
+        "-P",
+        "-F",
+        "#{pane_id}",
+        "sleep",
+        "600",
+    ]);
+    sibling.assert_success("add a sibling to the foreign window");
+    let sibling = sibling.stdout.trim().to_owned();
+    register_name_and_cwd(&server, &foreign, "foreign-a", "/nonexistent/other-project");
+    register_name_and_cwd(&server, &sibling, "foreign-b", "/nonexistent/other-project");
+    let foreign_window = window_of(&server, &foreign);
+    let sibling_rect = |server: &IsolatedTmuxServer| {
+        window_rects(server, &foreign_window)
+            .into_iter()
+            .find(|rect| rect.0 == sibling)
+            .unwrap()
+    };
+    let sibling_before = sibling_rect(&server);
+
+    let out = server.cli(&[
+        "launch",
+        "--cmd",
+        "sleep 600",
+        "--target",
+        &foreign,
+        "--format",
+        "json",
+    ]);
+    let (_, landed, _, _) = json_landing(&out, "flagless launch --target <foreign pane>");
+    assert_eq!(
+        landed, foreign_window,
+        "the pane must land in the foreign window"
+    );
+    assert_eq!(window_rects(&server, &foreign_window).len(), 3);
+    assert_eq!(
+        sibling_rect(&server),
+        sibling_before,
+        "the foreign window's other pane must keep its geometry"
+    );
+    assert!(
+        !tiled_marker_present(&server, &foreign_window),
+        "a foreign-cwd window must not be marked tiled"
+    );
+
+    // A window holding one pane registered from this cwd.
+    let owned = new_window_pane(&server);
+    register_name_and_cwd(&server, &owned, "owned-a", &harness_cwd());
+    let owned_window = window_of(&server, &owned);
+    let out = server.cli(&[
+        "launch",
+        "--cmd",
+        "sleep 600",
+        "--target",
+        &owned,
+        "--format",
+        "json",
+    ]);
+    let (_, landed, _, _) = json_landing(&out, "flagless launch --target <owned pane>");
+    assert_eq!(landed, owned_window);
+    assert_eq!(window_rects(&server, &owned_window).len(), 2);
+    assert!(
+        tiled_marker_present(&server, &owned_window),
+        "a flagless placement into an owned window must mark it tiled"
+    );
+    assert_retiled(
+        &server,
+        &owned_window,
+        "flagless launch into an owned window",
+    );
+}
+
+/// Acceptance: the marker is set by tiling, cleared by an explicit `--split v`, and
+/// set again by the next flagless placement, which tiles the window again.
+#[test]
+fn tiled_marker_is_cleared_by_an_explicit_split_and_restored_by_a_flagless_placement() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    let window = window_of(&server, server.pane());
+
+    // The harness pane is not ours, so the first placement splits; the second tiles.
+    launch_flagless_json(&server, "sleep 600");
+    launch_flagless_json(&server, "sleep 600");
+    assert!(
+        tiled_marker_present(&server, &window),
+        "a flagless placement into an owned window must mark it tiled"
+    );
+    assert_retiled(&server, &window, "first tiling placement");
+
+    let split = server.cli(&[
+        "launch",
+        "--cmd",
+        "sleep 600",
+        "--split",
+        "v",
+        "--format",
+        "json",
+    ]);
+    let (_, landed, _, _) = json_landing(&split, "launch --split v");
+    assert_eq!(landed, window);
+    assert!(
+        !tiled_marker_present(&server, &window),
+        "an explicit --split v must clear the marker"
+    );
+
+    launch_flagless_json(&server, "sleep 600");
+    assert!(
+        tiled_marker_present(&server, &window),
+        "a later flagless placement into the owned window must mark it again"
+    );
+    assert_retiled(&server, &window, "flagless placement after --split v");
+}
+
+/// A tiled harness window (three panes, marker present); returns its window id.
+fn tiled_harness_window(server: &IsolatedTmuxServer) -> String {
+    launch_flagless_json(server, "sleep 600");
+    let pane = launch_flagless_json(server, "sleep 600");
+    let window = window_of(server, &pane);
+    assert!(
+        tiled_marker_present(server, &window),
+        "setup: the second flagless placement must mark the window tiled"
+    );
+    window
+}
+
+/// Acceptance: a sizing opt-out into a tiled window divides only the target pane's
+/// rectangle (horizontally unless `vertical`; the new pane `percent`% when given),
+/// keeps every other pane's geometry, and clears the marker.
+fn assert_opt_out_divides_only_the_target(flags: &[&str], vertical: bool, percent: Option<i64>) {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    let window = tiled_harness_window(&server);
+    let before = window_rects(&server, &window);
+    // The widest pane: tiled's full-width last row.
+    let target = before.iter().max_by_key(|rect| rect.3).unwrap().clone();
+
+    let mut args = vec![
+        "launch",
+        "--cmd",
+        "sleep 600",
+        "--target",
+        target.0.as_str(),
+        "--format",
+        "json",
+    ];
+    args.extend_from_slice(flags);
+    let out = server.cli(&args);
+    let (new_pane, landed, _, _) = json_landing(&out, &format!("launch {flags:?}"));
+    assert_eq!(landed, window);
+
+    let after = window_rects(&server, &window);
+    for rect in before.iter().filter(|rect| rect.0 != target.0) {
+        assert!(
+            after.contains(rect),
+            "{flags:?}: pane {} must keep its geometry; before {before:?}, after {after:?}",
+            rect.0
+        );
+    }
+    let find = |id: &str| after.iter().find(|rect| rect.0 == id).unwrap().clone();
+    let (old, new) = (find(&target.0), find(&new_pane));
+    let (_, left, top, width, height) = target.clone();
+    if vertical {
+        for rect in [&old, &new] {
+            assert_eq!((rect.1, rect.3), (left, width), "{flags:?}: {after:?}");
+        }
+        assert_eq!(old.2, top, "{flags:?}: {after:?}");
+        assert!(new.2 > top, "{flags:?}: new pane below: {after:?}");
+        assert_eq!(old.4 + new.4 + 1, height, "{flags:?}: {after:?}");
+    } else {
+        for rect in [&old, &new] {
+            assert_eq!((rect.2, rect.4), (top, height), "{flags:?}: {after:?}");
+        }
+        assert_eq!(old.1, left, "{flags:?}: {after:?}");
+        assert!(new.1 > left, "{flags:?}: new pane to the right: {after:?}");
+        assert_eq!(old.3 + new.3 + 1, width, "{flags:?}: {after:?}");
+    }
+    if let Some(percent) = percent {
+        assert!(
+            (new.3 - width * percent / 100).abs() <= 1,
+            "{flags:?}: the new pane must have {percent}% of the {width}-column rectangle: {after:?}"
+        );
+    }
+    assert!(
+        !tiled_marker_present(&server, &window),
+        "{flags:?} must clear the marker"
+    );
+}
+
+#[test]
+fn split_h_into_a_tiled_window_divides_only_the_target_and_clears_the_marker() {
+    assert_opt_out_divides_only_the_target(&["--split", "h"], false, None);
+}
+
+#[test]
+fn split_v_into_a_tiled_window_divides_only_the_target_and_clears_the_marker() {
+    assert_opt_out_divides_only_the_target(&["--split", "v"], true, None);
+}
+
+#[test]
+fn size_alone_into_a_tiled_window_divides_only_the_target_and_clears_the_marker() {
+    assert_opt_out_divides_only_the_target(&["--size", "40"], false, Some(40));
+}
+
+/// Acceptance: an explicit `--split tile` into an owned window tiles and marks it.
+#[test]
+fn explicit_split_tile_into_an_owned_window_tiles_and_marks_it() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    let window = window_of(&server, server.pane());
+    launch_flagless_json(&server, "sleep 600");
+
+    let out = server.cli(&[
+        "launch", "--cmd", "sh", "--split", "tile", "--format", "json",
+    ]);
+    let (_, landed, _, _) = json_landing(&out, "launch --split tile");
+    assert_eq!(landed, window);
+    assert_retiled(&server, &window, "launch --split tile");
+    assert!(tiled_marker_present(&server, &window));
+}
+
+/// Acceptance: `--split tile --size N` is rejected before any pane is created, with a
+/// diagnostic naming both flags.
+#[test]
+fn split_tile_with_size_is_rejected_naming_both_flags() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    let before = all_pane_ids(&server);
+
+    let out = server.cli(&["launch", "--cmd", "sh", "--split", "tile", "--size", "50"]);
+
+    assert_ne!(out.status, 0, "--split tile --size must fail: {out:?}");
+    assert!(
+        out.stderr.contains("--split") && out.stderr.contains("--size"),
+        "stderr must name --split and --size: {:?}",
+        out.stderr
+    );
+    assert_eq!(all_pane_ids(&server), before, "no pane may be created");
+}
+
+/// Acceptance: a flagless `--session S` placement makes a new single-pane window W;
+/// `--session S --window W --split tile` then splits W and tiles it.
+#[test]
+fn split_tile_with_session_and_window_scope_tiles_the_scoped_window() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    let windows_before = window_indexes(&server, HARNESS_SESSION);
+
+    let first = server.cli(&[
+        "launch",
+        "--session",
+        HARNESS_SESSION,
+        "--cmd",
+        "sleep 600",
+        "--format",
+        "json",
+    ]);
+    let (pane, window, _, _) = json_landing(&first, "flagless launch --session");
+    let windows = window_indexes(&server, HARNESS_SESSION);
+    assert_eq!(
+        windows.len(),
+        windows_before.len() + 1,
+        "S must gain one window"
+    );
+    assert_eq!(window_rects(&server, &window).len(), 1);
+    let index = tmux_format(&server, &pane, "#{window_index}");
+
+    let second = server.cli(&[
+        "launch",
+        "--session",
+        HARNESS_SESSION,
+        "--window",
+        &index,
+        "--split",
+        "tile",
+        "--cmd",
+        "sleep 600",
+        "--format",
+        "json",
+    ]);
+    let (_, landed, _, _) = json_landing(&second, "launch --session --window --split tile");
+    assert_eq!(landed, window, "the pane must land in W");
+    assert_eq!(
+        window_rects(&server, &window).len(),
+        2,
+        "W must hold two panes"
+    );
+    assert_eq!(
+        window_indexes(&server, HARNESS_SESSION),
+        windows,
+        "S's window count must not change"
+    );
+    assert_retiled(&server, &window, "--split tile into the scoped window");
+    assert!(tiled_marker_present(&server, &window));
+}
+
+/// Acceptance: a tiled placement's `raw` output is exactly the pane id and a newline.
+#[test]
+fn tiled_launch_raw_output_is_exactly_the_pane_id() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    let window = window_of(&server, server.pane());
+    launch_flagless_json(&server, "sleep 600");
+    let before = all_pane_ids(&server);
+
+    let out = server.cli(&["launch", "--cmd", "sleep 600", "--format", "raw"]);
+    out.assert_success("tiled launch --format raw");
+
+    let created: Vec<String> = all_pane_ids(&server)
+        .into_iter()
+        .filter(|pane| !before.contains(pane))
+        .collect();
+    assert_eq!(created.len(), 1, "exactly one pane must be created");
+    assert_eq!(out.stdout, format!("{}\n", created[0]));
+    assert!(
+        tiled_marker_present(&server, &window),
+        "the placement must have tiled the window"
+    );
+}
+
+/// Acceptance: the core `rebalance` operation retiles a ragged window and returns the
+/// geometry tmux reports for it.
+#[test]
+fn core_rebalance_retiles_a_ragged_window_and_returns_its_measured_geometry() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    let window = window_of(&server, server.pane());
+    for split in [["-h", "70"], ["-h", "70"], ["-v", "20"]] {
+        server
+            .tmux(&[
+                "split-window",
+                split[0],
+                "-p",
+                split[1],
+                "-d",
+                "-t",
+                server.pane(),
+                "sleep",
+                "600",
+            ])
+            .assert_success("make the window ragged");
+    }
+    let ragged = window_rects(&server, &window);
+
+    let geometry = tmux_tools_core::with_invocation(server.core_invocation(), || {
+        tmux_tools_core::layout::rebalance(&window)
+    })
+    .expect("rebalance must succeed");
+
+    assert_ne!(
+        window_rects(&server, &window),
+        ragged,
+        "rebalance must change the ragged window"
+    );
+    assert_retiled(&server, &window, "core rebalance");
+    let (measured_window, cols, rows) = tmux_landing(&server, server.pane());
+    assert_eq!(
+        (
+            geometry.window_id.clone(),
+            u64::from(geometry.min_pane_cols()),
+            u64::from(geometry.min_pane_rows())
+        ),
+        (measured_window, cols, rows),
+        "rebalance must return the window id and minima tmux reports"
+    );
+    assert_eq!(geometry.panes.len(), 4);
+}
+
+/// Acceptance: `launch --help` and `spawn-agent --help` list `tile` and no longer
+/// say the implicit default is a horizontal split.
+#[test]
+fn spawning_verb_help_lists_tile_and_not_the_horizontal_split_default() {
+    for verb in ["launch", "spawn-agent"] {
+        let out = Command::new(BIN)
+            .args([verb, "--help"])
+            .output()
+            .expect("run --help");
+        assert!(out.status.success(), "{verb} --help must succeed");
+        let help = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            help.split(|c: char| !(c.is_alphanumeric() || c == '_'))
+                .any(|word| word == "tile"),
+            "{verb} --help must list tile: {help}"
+        );
+        assert!(
+            !help.contains("now a horizontal split"),
+            "{verb} --help must not say the default is a horizontal split: {help}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ISSUE-261102-0329-01 — `launch` and `spawn-agent` succeed, without window
+// geometry, when their new pane no longer exists at a placement step after the
+// split; every other failure at those steps still fails the verb.
+// ---------------------------------------------------------------------------
+
+/// A placement step after the split, as a fake `tmux` recognizes its first call that
+/// targets the new pane.
+#[cfg(feature = "test-fixtures")]
+#[derive(Clone, Copy, Debug)]
+enum PlacementStep {
+    /// The registration's first `set-option -p -t <pane>`.
+    Registration,
+    /// `select-layout -t <pane> tiled`.
+    Retile,
+    /// The `@tt-tiled` window marker's `set-option -w -t <pane>`.
+    Marker,
+    /// The measurement's `list-panes -t <pane>` (its format reads `#{pane_width}`).
+    Measurement,
+}
+
+/// What a fake `tmux` does to the first call of a [`PlacementStep`].
+#[cfg(feature = "test-fixtures")]
+#[derive(Clone, Copy, Debug)]
+enum StepFault {
+    /// Kill the call's target pane, then pass the call to real tmux unchanged, so the
+    /// CLI gets tmux's own error and exit status.
+    PaneGone,
+    /// Leave the pane alive and make the call exit 1 with an error message.
+    InjectedError,
+    /// Leave the pane alive and answer the call with output that cannot be parsed.
+    UnparsableOutput,
+}
+
+/// A fake `tmux` that applies `fault` to the first call of `step` and delegates every
+/// other call to the real binary. It records the call's target pane in `state`, which
+/// therefore exists only once the fault fired.
+#[cfg(feature = "test-fixtures")]
+fn tmux_wrapper_at_placement_step(
+    step: PlacementStep,
+    fault: StepFault,
+    state: &std::path::Path,
+) -> String {
+    let matches = match step {
+        PlacementStep::Registration => "[ \"$1\" = set-option ] && [ $has_p = 1 ]",
+        PlacementStep::Retile => "[ \"$1\" = select-layout ]",
+        PlacementStep::Marker => "[ \"$1\" = set-option ] && [ $has_w = 1 ]",
+        PlacementStep::Measurement => "[ \"$1\" = list-panes ] && [ $has_width = 1 ]",
+    };
+    let action = match fault {
+        StepFault::PaneGone => "\t\"$REAL\" kill-pane -t \"$target\" || exit 99\n".to_owned(),
+        StepFault::InjectedError => {
+            format!("\tprintf '%s\\n' 'injected {step:?} failure' >&2\n\texit 1\n")
+        }
+        StepFault::UnparsableOutput => {
+            "\tprintf '%s\\n' 'not a pane geometry line'\n\texit 0\n".to_owned()
+        }
+    };
+    format!(
+        "#!/bin/sh\n\
+         REAL='{real}'\n\
+         STATE='{state}'\n\
+         target=\n\
+         has_p=0\n\
+         has_w=0\n\
+         has_width=0\n\
+         prev=\n\
+         for arg in \"$@\"; do\n\
+         \t[ \"$prev\" = -t ] && target=$arg\n\
+         \tcase \"$arg\" in\n\
+         \t\t-p) has_p=1 ;;\n\
+         \t\t-w) has_w=1 ;;\n\
+         \t\t*'#{{pane_width}}'*) has_width=1 ;;\n\
+         \tesac\n\
+         \tprev=$arg\n\
+         done\n\
+         if {matches} && [ ! -e \"$STATE\" ]; then\n\
+         \tprintf '%s\\n' \"$target\" > \"$STATE\"\n\
+         {action}\
+         fi\n\
+         exec \"$REAL\" \"$@\"\n",
+        real = real_tmux_path(),
+        state = state.display(),
+    )
+}
+
+/// The fields a spawning verb leaves out when its pane is gone before measurement.
+#[cfg(feature = "test-fixtures")]
+const UNMEASURED_KEYS: [&str; 4] = ["window_id", "min_pane_cols", "min_pane_rows", "below_floor"];
+
+/// Install a fake `tmux` applying `fault` at `step` in `config`'s directory; returns
+/// the path of its state file.
+#[cfg(feature = "test-fixtures")]
+fn install_step_fault(
+    config: &AgentsConfig,
+    step: PlacementStep,
+    fault: StepFault,
+) -> std::path::PathBuf {
+    let state = config.xdg().join("step-fault-fired");
+    config.write_executable("tmux", &tmux_wrapper_at_placement_step(step, fault, &state));
+    state
+}
+
+/// The pane id the fake `tmux` recorded when its fault fired.
+#[cfg(feature = "test-fixtures")]
+fn faulted_pane(state: &std::path::Path, ctx: &str) -> String {
+    std::fs::read_to_string(state)
+        .unwrap_or_else(|e| panic!("{ctx}: the step fault must have fired ({e})"))
+        .trim()
+        .to_owned()
+}
+
+/// Assert the pane-gone result's stderr and that `pane` really left the server.
+#[cfg(feature = "test-fixtures")]
+fn assert_pane_gone_warning(server: &IsolatedTmuxServer, out: &CmdOutput, pane: &str, ctx: &str) {
+    let warning = format!("warning: pane {pane} no longer exists; window geometry not measured");
+    assert_eq!(
+        out.stderr.lines().filter(|line| *line == warning).count(),
+        1,
+        "{ctx}: stderr must carry the warning line {warning:?} once; stderr: {:?}",
+        out.stderr
+    );
+    assert!(
+        !all_pane_ids(server).contains(&pane.to_owned()),
+        "{ctx}: the test must have removed pane {pane}"
+    );
+}
+
+/// Assert the pane-gone `--format json` result: exit 0, `pane_id` is the faulted
+/// pane, the four geometry keys are absent, and the warning is on stderr. Returns the
+/// parsed payload.
+#[cfg(feature = "test-fixtures")]
+fn assert_pane_gone_json(
+    server: &IsolatedTmuxServer,
+    out: &CmdOutput,
+    state: &std::path::Path,
+    ctx: &str,
+) -> serde_json::Value {
+    out.assert_success(ctx);
+    let pane = faulted_pane(state, ctx);
+    let payload: serde_json::Value = serde_json::from_str(out.stdout.trim())
+        .unwrap_or_else(|e| panic!("{ctx}: JSON should parse ({e}): {:?}", out.stdout));
+    assert_eq!(
+        payload.get("pane_id").and_then(|value| value.as_str()),
+        Some(pane.as_str()),
+        "{ctx}: JSON must carry the new pane's pane_id; stdout: {}",
+        out.stdout
+    );
+    for key in UNMEASURED_KEYS {
+        assert!(
+            payload.get(key).is_none(),
+            "{ctx}: JSON must leave out {key}; stdout: {}",
+            out.stdout
+        );
+    }
+    assert_pane_gone_warning(server, out, &pane, ctx);
+    payload
+}
+
+/// Acceptance: the pane gone at measurement — `launch --format json` exits 0 with the
+/// pane id and without the window geometry, and warns on stderr.
+#[cfg(feature = "test-fixtures")]
+#[test]
+fn launch_json_succeeds_without_geometry_when_the_pane_is_gone_at_measurement() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    let config = AgentsConfig::new();
+    let state = install_step_fault(&config, PlacementStep::Measurement, StepFault::PaneGone);
+
+    let out = server.cli_env_path(
+        &["launch", "--cmd", "sleep 600", "--format", "json"],
+        config.xdg(),
+        config.xdg(),
+    );
+
+    assert_pane_gone_json(
+        &server,
+        &out,
+        &state,
+        "launch json, pane gone at measurement",
+    );
+}
+
+/// Acceptance: with the pane gone at measurement, `concise` exits 0 without the four
+/// geometry keys and `raw` prints exactly the pane id and a newline.
+#[cfg(feature = "test-fixtures")]
+#[test]
+fn launch_concise_and_raw_succeed_when_the_pane_is_gone_at_measurement() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+
+    let config = AgentsConfig::new();
+    let state = install_step_fault(&config, PlacementStep::Measurement, StepFault::PaneGone);
+    let concise = server.cli_env_path(
+        &["launch", "--cmd", "sleep 600", "--format", "concise"],
+        config.xdg(),
+        config.xdg(),
+    );
+    concise.assert_success("launch concise, pane gone at measurement");
+    let pane = faulted_pane(&state, "launch concise");
+    assert_eq!(
+        concise_field(&concise, "pane"),
+        Some(pane.clone()),
+        "concise must carry pane=<the new pane>; stdout: {}",
+        concise.stdout
+    );
+    for key in UNMEASURED_KEYS {
+        assert!(
+            !concise.stdout.contains(key),
+            "concise must not print {key}; stdout: {}",
+            concise.stdout
+        );
+    }
+    assert_pane_gone_warning(&server, &concise, &pane, "launch concise");
+    drop(config);
+
+    let config = AgentsConfig::new();
+    let state = install_step_fault(&config, PlacementStep::Measurement, StepFault::PaneGone);
+    let raw = server.cli_env_path(
+        &["launch", "--cmd", "sleep 600", "--format", "raw"],
+        config.xdg(),
+        config.xdg(),
+    );
+    raw.assert_success("launch raw, pane gone at measurement");
+    let pane = faulted_pane(&state, "launch raw");
+    assert_eq!(
+        raw.stdout,
+        format!("{pane}\n"),
+        "raw stdout must be exactly the pane id and a newline"
+    );
+    assert_pane_gone_warning(&server, &raw, &pane, "launch raw");
+}
+
+/// Acceptance: the pane gone at registration — `launch --name <n>` exits 0 with the
+/// same result and reports `name` as `<n>`; without `--name` it reports the derived
+/// name.
+#[cfg(feature = "test-fixtures")]
+#[test]
+fn launch_succeeds_and_reports_the_chosen_name_when_the_pane_is_gone_at_registration() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+
+    let config = AgentsConfig::new();
+    let state = install_step_fault(&config, PlacementStep::Registration, StepFault::PaneGone);
+    let name = format!("gone-at-registration-{}", std::process::id());
+    let named = server.cli_env_path(
+        &[
+            "launch",
+            "--cmd",
+            "sleep 600",
+            "--name",
+            &name,
+            "--format",
+            "json",
+        ],
+        config.xdg(),
+        config.xdg(),
+    );
+    let payload = assert_pane_gone_json(
+        &server,
+        &named,
+        &state,
+        "launch --name, gone at registration",
+    );
+    assert_eq!(
+        payload.get("name").and_then(|value| value.as_str()),
+        Some(name.as_str()),
+        "name must be the --name value; stdout: {}",
+        named.stdout
+    );
+    drop(config);
+
+    let config = AgentsConfig::new();
+    let state = install_step_fault(&config, PlacementStep::Registration, StepFault::PaneGone);
+    let derived = server.cli_env_path(
+        &["launch", "--cmd", "sleep 600", "--format", "json"],
+        config.xdg(),
+        config.xdg(),
+    );
+    let payload = assert_pane_gone_json(&server, &derived, &state, "launch, gone at registration");
+    let name = payload
+        .get("name")
+        .and_then(|value| value.as_str())
+        .unwrap_or_else(|| panic!("JSON must carry name; stdout: {}", derived.stdout));
+    let suffix = name
+        .strip_prefix("sleep-")
+        .unwrap_or_else(|| panic!("name must be derived from `sleep`; got {name:?}"));
+    assert!(
+        suffix.len() == 4 && suffix.chars().all(|c| c.is_ascii_hexdigit()),
+        "name must be the derived sleep-<4 hex digits>; got {name:?}"
+    );
+}
+
+/// Make the caller's window owned: one flagless launch registers a pane in it, so the
+/// next flagless launch tiles it.
+#[cfg(feature = "test-fixtures")]
+fn own_the_harness_window(server: &IsolatedTmuxServer) {
+    launch_flagless_json(server, "sleep 600");
+}
+
+/// Acceptance: in an owned window, the pane gone at retile — a flagless `launch`
+/// exits 0 with the pane-gone result.
+#[cfg(feature = "test-fixtures")]
+#[test]
+fn flagless_launch_succeeds_when_the_pane_is_gone_at_retile() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    own_the_harness_window(&server);
+    let config = AgentsConfig::new();
+    let state = install_step_fault(&config, PlacementStep::Retile, StepFault::PaneGone);
+
+    let out = server.cli_env_path(
+        &["launch", "--cmd", "sleep 600", "--format", "json"],
+        config.xdg(),
+        config.xdg(),
+    );
+
+    assert_pane_gone_json(
+        &server,
+        &out,
+        &state,
+        "flagless launch, pane gone at retile",
+    );
+}
+
+/// Acceptance: in an owned window, the pane gone at the `@tt-tiled` marker step — a
+/// flagless `launch` exits 0 with the pane-gone result.
+#[cfg(feature = "test-fixtures")]
+#[test]
+fn flagless_launch_succeeds_when_the_pane_is_gone_at_the_tiled_marker() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    own_the_harness_window(&server);
+    let config = AgentsConfig::new();
+    let state = install_step_fault(&config, PlacementStep::Marker, StepFault::PaneGone);
+
+    let out = server.cli_env_path(
+        &["launch", "--cmd", "sleep 600", "--format", "json"],
+        config.xdg(),
+        config.xdg(),
+    );
+
+    assert_pane_gone_json(
+        &server,
+        &out,
+        &state,
+        "flagless launch, pane gone at marker",
+    );
+}
+
+/// Acceptance: the pane gone at measurement — `spawn-agent --format json` exits 0 with
+/// the pane-gone result.
+#[cfg(feature = "test-fixtures")]
+#[test]
+fn spawn_agent_json_succeeds_without_geometry_when_the_pane_is_gone_at_measurement() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    let config = fake_tui_agent_config();
+    let state = install_step_fault(&config, PlacementStep::Measurement, StepFault::PaneGone);
+
+    let out = server.cli_env_path(
+        &["spawn-agent", "tt-fake-tui", "--format", "json"],
+        config.xdg(),
+        config.xdg(),
+    );
+
+    let payload = assert_pane_gone_json(
+        &server,
+        &out,
+        &state,
+        "spawn-agent, pane gone at measurement",
+    );
+    assert_eq!(
+        payload.get("agent").and_then(|value| value.as_str()),
+        Some("tt-fake-tui"),
+        "spawn-agent JSON keeps its other fields; stdout: {}",
+        out.stdout
+    );
+}
+
+/// Run `launch --format json` with `fault` at `step` while the pane stays alive, and
+/// assert it fails.
+#[cfg(feature = "test-fixtures")]
+fn assert_launch_fails_with_live_pane_fault(step: PlacementStep, fault: StepFault) {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    let config = AgentsConfig::new();
+    let state = install_step_fault(&config, step, fault);
+
+    let out = server.cli_env_path(
+        &["launch", "--cmd", "sleep 600", "--format", "json"],
+        config.xdg(),
+        config.xdg(),
+    );
+
+    let pane = faulted_pane(&state, &format!("{fault:?} at {step:?}"));
+    assert!(
+        all_pane_ids(&server).contains(&pane),
+        "{fault:?} at {step:?}: the pane must still exist"
+    );
+    assert_ne!(
+        out.status, 0,
+        "{fault:?} at {step:?} with the pane alive must fail launch; stdout: {} stderr: {}",
+        out.stdout, out.stderr
+    );
+}
+
+/// Acceptance: a live pane whose measurement output cannot be parsed fails `launch`.
+#[cfg(feature = "test-fixtures")]
+#[test]
+fn launch_fails_when_the_measurement_output_cannot_be_parsed() {
+    assert_launch_fails_with_live_pane_fault(
+        PlacementStep::Measurement,
+        StepFault::UnparsableOutput,
+    );
+}
+
+/// Acceptance: an injected measurement error with the pane alive fails `launch`.
+#[cfg(feature = "test-fixtures")]
+#[test]
+fn launch_fails_on_an_injected_measurement_error_with_the_pane_alive() {
+    assert_launch_fails_with_live_pane_fault(PlacementStep::Measurement, StepFault::InjectedError);
+}
+
+/// Acceptance: an injected registration error with the pane alive fails `launch`.
+#[cfg(feature = "test-fixtures")]
+#[test]
+fn launch_fails_on_an_injected_registration_error_with_the_pane_alive() {
+    assert_launch_fails_with_live_pane_fault(PlacementStep::Registration, StepFault::InjectedError);
+}
+
+// ---------------------------------------------------------------------------
+// ISSUE-260801-1310-06 — kill-time reclamation: `kill` retiles a window that carries
+// `@tt-tiled` and holds a pane this invocation owns, in the same tmux command
+// sequence as the removal, so the surviving panes reclaim the removed pane's space.
+//
+// "Retiled" means the remaining panes' geometry equals what an explicit
+// `select-layout tiled` of the same panes produces; "not retiled" means it differs.
+// Every fixture is built directly through tmux in tmux's tiled arrangement with five
+// or six panes, so tiled and untiled geometry differ after a kill.
+// ---------------------------------------------------------------------------
+
+/// How a reclamation fixture pane is registered.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FixturePane {
+    /// `@tt-name` and `@tt-cwd` set to the fixture's owned cwd.
+    Owned,
+    /// `@tt-name` and a `@tt-cwd` of another project.
+    ForeignCwd,
+    /// No registration at all.
+    Unregistered,
+}
+
+/// The `@tt-cwd` of a fixture pane registered from another project.
+const FOREIGN_PROJECT_CWD: &str = "/nonexistent/other-project";
+
+/// A tiled fixture window: its id and its panes in pane order (row-major).
+struct TiledFixture {
+    window: String,
+    panes: Vec<String>,
+}
+
+/// A new window in the harness session holding one pane per `layout` entry in tmux's
+/// tiled arrangement, registered as `layout` says against the harness cwd, carrying
+/// `@tt-tiled` when `marked`.
+fn tiled_fixture(
+    server: &IsolatedTmuxServer,
+    layout: &[FixturePane],
+    marked: bool,
+) -> TiledFixture {
+    tiled_fixture_in(server, layout, marked, &harness_cwd(), "sleep 600")
+}
+
+/// [`tiled_fixture`] with every pane started in `owned_cwd`, `Owned` panes recording
+/// it as `@tt-cwd`, and the first pane running `first_cmd`.
+fn tiled_fixture_in(
+    server: &IsolatedTmuxServer,
+    layout: &[FixturePane],
+    marked: bool,
+    owned_cwd: &str,
+    first_cmd: &str,
+) -> TiledFixture {
+    let session = format!("={HARNESS_SESSION}:");
+    let first = server.tmux(&[
+        "new-window",
+        "-d",
+        "-t",
+        &session,
+        "-c",
+        owned_cwd,
+        "-P",
+        "-F",
+        "#{pane_id}",
+        first_cmd,
+    ]);
+    first.assert_success("fixture: create a window");
+    let first = first.stdout.trim().to_owned();
+    let window = window_of(server, &first);
+    for _ in 1..layout.len() {
+        server
+            .tmux(&[
+                "split-window",
+                "-d",
+                "-t",
+                &window,
+                "-c",
+                owned_cwd,
+                "sleep",
+                "600",
+            ])
+            .assert_success("fixture: split the window");
+        server
+            .tmux(&["select-layout", "-t", &window, "tiled"])
+            .assert_success("fixture: tile the window");
+    }
+    let panes: Vec<String> = window_rects(server, &window)
+        .into_iter()
+        .map(|rect| rect.0)
+        .collect();
+    assert_eq!(panes.len(), layout.len(), "fixture: pane count");
+    assert_eq!(panes[0], first, "fixture: the first pane keeps index 0");
+    for (index, (pane, kind)) in panes.iter().zip(layout).enumerate() {
+        let name = format!("reclaim-{}-{index}", window.trim_start_matches('@'));
+        match kind {
+            FixturePane::Owned => register_name_and_cwd(server, pane, &name, owned_cwd),
+            FixturePane::ForeignCwd => {
+                register_name_and_cwd(server, pane, &name, FOREIGN_PROJECT_CWD)
+            }
+            FixturePane::Unregistered => {}
+        }
+    }
+    if marked {
+        server
+            .tmux(&["set-option", "-w", "-t", &window, TILED_MARKER, "1"])
+            .assert_success("fixture: mark the window tiled");
+    }
+    TiledFixture { window, panes }
+}
+
+/// `n` owned fixture panes.
+fn owned_panes(n: usize) -> Vec<FixturePane> {
+    vec![FixturePane::Owned; n]
+}
+
+/// Assert `window` is not retiled: an explicit `select-layout tiled` of its panes
+/// changes some pane's rectangle.
+fn assert_not_retiled(server: &IsolatedTmuxServer, window: &str, ctx: &str) {
+    let placed = window_rects(server, window);
+    server
+        .tmux(&["select-layout", "-t", window, "tiled"])
+        .assert_success("explicit select-layout tiled");
+    let tiled = window_rects(server, window);
+    assert_ne!(
+        placed, tiled,
+        "{ctx}: the window must not be in tmux's tiled arrangement"
+    );
+}
+
+/// `tmux-tools kill --target <pane>` plus `extra`; asserts exit 0 and that the pane
+/// left the server.
+fn kill_and_assert_gone(server: &IsolatedTmuxServer, pane: &str, extra: &[&str]) -> CmdOutput {
+    let mut args = vec!["kill", "--target", pane];
+    args.extend_from_slice(extra);
+    let out = server.cli(&args);
+    out.assert_success(&format!("kill --target {pane} {extra:?}"));
+    assert!(
+        !all_pane_ids(server).contains(&pane.to_owned()),
+        "kill --target {pane} must remove the pane"
+    );
+    out
+}
+
+/// Acceptance: in a marked, owned window of six tiled panes, killing any two panes
+/// leaves four panes each at least 40 rows tall.
+#[test]
+fn kill_of_any_two_panes_of_six_leaves_four_panes_at_least_forty_rows_tall() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    for first in 0..6 {
+        for second in first + 1..6 {
+            let fixture = tiled_fixture(&server, &owned_panes(6), true);
+            kill_and_assert_gone(&server, &fixture.panes[first], &[]);
+            kill_and_assert_gone(&server, &fixture.panes[second], &[]);
+            let rects = window_rects(&server, &fixture.window);
+            assert_eq!(rects.len(), 4, "panes {first} and {second}: four remain");
+            assert!(
+                rects.iter().all(|rect| rect.4 >= 40),
+                "killing panes {first} and {second}: every remaining pane must be at least \
+                 40 rows tall: {rects:?}"
+            );
+        }
+    }
+}
+
+/// Acceptance: in a marked, owned window of six tiled panes, killing one pane outside
+/// the last row retiles the window.
+#[test]
+fn kill_of_a_pane_outside_the_last_row_of_six_retiles_the_window() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    let probe = tiled_fixture(&server, &owned_panes(6), true);
+    let rects = window_rects(&server, &probe.window);
+    let last_row_top = rects.iter().map(|rect| rect.2).max().unwrap();
+    let outside_last_row: Vec<usize> = (0..rects.len())
+        .filter(|&index| rects[index].2 < last_row_top)
+        .collect();
+    assert_eq!(outside_last_row.len(), 4, "fixture: three rows of two");
+
+    for index in outside_last_row {
+        let fixture = tiled_fixture(&server, &owned_panes(6), true);
+        kill_and_assert_gone(&server, &fixture.panes[index], &[]);
+        assert_retiled(
+            &server,
+            &fixture.window,
+            &format!("kill of pane {index} of six"),
+        );
+    }
+}
+
+/// Acceptance: of two windows that differ only in `@tt-tiled`, each holding owned
+/// panes, killing the corresponding pane retiles only the marked window.
+#[test]
+fn kill_retiles_only_the_marked_one_of_two_owned_windows() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    let marked = tiled_fixture(&server, &owned_panes(5), true);
+    let unmarked = tiled_fixture(&server, &owned_panes(5), false);
+
+    kill_and_assert_gone(&server, &marked.panes[0], &[]);
+    kill_and_assert_gone(&server, &unmarked.panes[0], &[]);
+
+    assert_retiled(&server, &marked.window, "kill in the marked window");
+    assert_not_retiled(&server, &unmarked.window, "kill in the unmarked window");
+}
+
+/// Acceptance: a marked window whose only owned pane is the target is retiled when
+/// that pane is killed: ownership is read before the pane and its options vanish.
+#[test]
+fn kill_of_the_only_owned_pane_retiles_its_marked_window() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    let mut layout = vec![FixturePane::Unregistered; 5];
+    layout[0] = FixturePane::Owned;
+    let fixture = tiled_fixture(&server, &layout, true);
+
+    kill_and_assert_gone(&server, &fixture.panes[0], &[]);
+
+    assert_retiled(&server, &fixture.window, "kill of the only owned pane");
+}
+
+/// Acceptance: `kill --any` of an unowned target in a marked window holding an owned
+/// sibling retiles the window.
+#[test]
+fn kill_any_of_an_unowned_target_beside_an_owned_sibling_retiles_the_window() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    let mut layout = vec![FixturePane::Unregistered; 5];
+    layout[1] = FixturePane::Owned;
+    let fixture = tiled_fixture(&server, &layout, true);
+
+    kill_and_assert_gone(&server, &fixture.panes[0], &["--any"]);
+
+    assert_retiled(&server, &fixture.window, "kill --any of an unowned target");
+}
+
+/// Acceptance: `kill --any` in a marked window whose panes carry a foreign `@tt-cwd`
+/// does not retile it; the control window, differing only in `@tt-cwd`, is retiled.
+#[test]
+fn kill_any_does_not_retile_a_foreign_cwd_window_but_retiles_its_owned_control() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    let foreign = tiled_fixture(&server, &[FixturePane::ForeignCwd; 5], true);
+    let control = tiled_fixture(&server, &owned_panes(5), true);
+
+    kill_and_assert_gone(&server, &foreign.panes[0], &["--any"]);
+    kill_and_assert_gone(&server, &control.panes[0], &["--any"]);
+
+    assert_not_retiled(&server, &foreign.window, "kill --any in the foreign window");
+    assert_retiled(&server, &control.window, "kill --any in the control window");
+}
+
+/// Acceptance: a process in one pane of a marked, owned five-pane window that runs
+/// `kill --force` on its own pane is hung up with it, and the remaining panes are
+/// still retiled.
+#[test]
+fn kill_force_of_the_callers_own_pane_retiles_the_remaining_panes() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    // The pane process runs from this cwd and the fixture records it as `@tt-cwd`; it
+    // is canonical so the kill's own cwd reads back the same.
+    let cwd = std::fs::canonicalize(harness_cwd())
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    let go = server.tmpdir().join("self-kill-go");
+    let quote = |value: &str| format!("'{}'", value.replace('\'', "'\\''"));
+    // Waits until the fixture is complete, then kills its own pane; prints the exit
+    // status and stays alive only if the kill did not take the pane.
+    let command = format!(
+        "while [ ! -e {go} ]; do sleep 0.05; done; {bin} kill --force --target \"$TMUX_PANE\"; \
+         echo kill-exit=$?; sleep 600",
+        go = quote(&go.to_string_lossy()),
+        bin = quote(BIN),
+    );
+    let fixture = tiled_fixture_in(&server, &owned_panes(5), true, &cwd, &command);
+    let caller = fixture.panes[0].clone();
+
+    std::fs::write(&go, "").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while all_pane_ids(&server).contains(&caller) {
+        if Instant::now() > deadline {
+            let screen = server.tmux(&["capture-pane", "-p", "-t", &caller]);
+            panic!(
+                "the pane's own kill --force must remove it; pane shows:\n{}",
+                screen.stdout
+            );
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+
+    assert_eq!(window_rects(&server, &fixture.window).len(), 4);
+    assert_retiled(
+        &server,
+        &fixture.window,
+        "kill --force of the caller's own pane",
+    );
+}
+
+/// Acceptance: killing the single, owned pane of a marked window exits 0, removes the
+/// window, and emits no error (no retile is attempted on a window that is gone).
+#[test]
+fn kill_of_the_last_pane_of_a_marked_window_removes_it_without_error() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    let fixture = tiled_fixture(&server, &[FixturePane::Owned], true);
+
+    let out = kill_and_assert_gone(&server, &fixture.panes[0], &[]);
+
+    assert_eq!(out.stderr, "", "kill of the last pane must emit no error");
+    let windows = server.tmux(&["list-windows", "-a", "-F", "#{window_id}"]);
+    windows.assert_success("list windows");
+    assert!(
+        !windows.stdout.lines().any(|line| line == fixture.window),
+        "the window {} must be gone: {}",
+        fixture.window,
+        windows.stdout
+    );
+}
+
+/// Acceptance: a retiling kill prints exactly what `kill` printed before, in every
+/// format, and nothing on stderr.
+#[test]
+fn retiling_kill_output_is_unchanged_in_every_format() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    for format in ["concise", "json", "raw"] {
+        let fixture = tiled_fixture(&server, &owned_panes(5), true);
+        let pane = fixture.panes[0].clone();
+        let name = registered_name(&server, &pane);
+
+        let out = kill_and_assert_gone(&server, &pane, &["--format", format]);
+
+        let expected = match format {
+            "concise" => format!("killed pane={pane} name={name}\n"),
+            "json" => format!("{{\"pane_id\":\"{pane}\",\"name\":\"{name}\",\"agent\":null}}\n"),
+            _ => format!("{pane}\n"),
+        };
+        assert_eq!(out.stdout, expected, "kill --format {format} stdout");
+        assert_eq!(out.stderr, "", "kill --format {format} stderr");
+        assert_retiled(&server, &fixture.window, &format!("kill --format {format}"));
+    }
+}
+
+/// Acceptance: in a marked, owned window the safety guards still deny an unowned and a
+/// foreign-cwd target without `--any`, with the unchanged messages, and neither the
+/// pane nor the window's geometry changes.
+#[test]
+fn kill_denials_in_a_marked_owned_window_are_unchanged_and_touch_nothing() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    let mut layout = owned_panes(5);
+    layout[0] = FixturePane::Unregistered;
+    layout[1] = FixturePane::ForeignCwd;
+    let fixture = tiled_fixture(&server, &layout, true);
+    let before = window_rects(&server, &fixture.window);
+
+    let unowned = &fixture.panes[0];
+    let out = server.cli(&["kill", "--target", unowned]);
+    assert_ne!(out.status, 0, "kill of an unowned pane without --any");
+    assert!(
+        out.stderr.contains(&format!(
+            "refusing to kill pane {unowned} not created by tmux-tools (no @tt-name or \
+             @tt-agent set); pass --any to override"
+        )),
+        "stderr: {}",
+        out.stderr
+    );
+    assert_eq!(out.stdout, "");
+
+    let foreign = &fixture.panes[1];
+    let out = server.cli(&["kill", "--target", foreign]);
+    assert_ne!(out.status, 0, "kill of a foreign-cwd pane without --any");
+    assert!(
+        out.stderr.contains(&format!(
+            "refusing to kill pane {foreign} owned by another cwd ({FOREIGN_PROJECT_CWD}); \
+             pass --any to override"
+        )),
+        "stderr: {}",
+        out.stderr
+    );
+    assert_eq!(out.stdout, "");
+
+    assert_eq!(
+        window_rects(&server, &fixture.window),
+        before,
+        "a denied kill must leave every pane and its geometry as it was"
+    );
+}
+
+/// The core window guard names which guard failed: the marker, or ownership.
+#[test]
+fn core_window_guard_reports_which_guard_failed() {
+    use tmux_tools_core::layout::{window_guard, WindowGuard};
+
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    let cwd = harness_cwd();
+    let mut one_owned = vec![FixturePane::Unregistered; 3];
+    one_owned[2] = FixturePane::Owned;
+    let cases = [
+        (tiled_fixture(&server, &one_owned, true), WindowGuard::Holds),
+        (
+            tiled_fixture(&server, &owned_panes(3), false),
+            WindowGuard::MarkerAbsent,
+        ),
+        (
+            tiled_fixture(&server, &[FixturePane::ForeignCwd; 3], false),
+            WindowGuard::MarkerAbsent,
+        ),
+        (
+            tiled_fixture(
+                &server,
+                &[FixturePane::ForeignCwd, FixturePane::Unregistered],
+                true,
+            ),
+            WindowGuard::NoOwnedPane,
+        ),
+    ];
+    for (fixture, expected) in cases {
+        for target in [&fixture.window, &fixture.panes[0]] {
+            let guard = tmux_tools_core::with_invocation(server.core_invocation(), || {
+                window_guard(target, Some(&cwd))
+            })
+            .expect("the window guard must read the window");
+            assert_eq!(guard, expected, "window guard for {target}");
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ISSUE-260801-1310-07 — overflow relocation: a tiled placement that leaves its window
+// below the effective floor moves the new pane to an eligible marked window of the
+// target window's session that has room, or to a fresh marked window there, retiles
+// the origin, keeps focus, and reports `relocated` and the final window.
+//
+// Every scenario runs `tt-fake-tui` as a registry agent whose floor is 140x21, so on
+// the 280x82 server a tiled window holds two of its panes (280x41 over 280x40) and a
+// third breaches (139 columns); a 70% horizontal split of a full-width pane (83
+// columns) and a vertical split of a 41-row pane (20 rows) breach as well. These cases
+// carry no "tmux not on PATH" skip: when the behavior or tmux is absent they fail.
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "test-fixtures")]
+mod overflow_relocation {
+    use super::*;
+
+    /// The agent every overflow scenario spawns (and registers on agent fixture panes).
+    const AGENT: &str = "tt-fake-tui";
+
+    /// The floor's width: a third tiled pane on the 280-column server is 139 wide.
+    const MIN_COLS: u64 = 140;
+
+    /// The registry: `tt-fake-tui` with an agent-level floor of 140x21, which binds to
+    /// its one surface.
+    fn floor_config() -> AgentsConfig {
+        let config = AgentsConfig::new();
+        config.write_agents_toml(&format!(
+            r#"
+[tt-fake-tui]
+binary = "{fake}"
+min_cols = 140
+min_rows = 21
+
+[tt-fake-tui.access.default]
+args = []
+"#,
+            fake = FAKE_TUI_BIN
+        ));
+        config
+    }
+
+    /// How an overflow fixture pane is registered.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum Pane {
+        /// `@tt-name` and `@tt-cwd` (the harness cwd): owned, no floor.
+        Owned,
+        /// [`Pane::Owned`] plus `@tt-agent tt-fake-tui`: owned, with the 140x21 floor.
+        OwnedAgent,
+        /// No registration: not owned.
+        Unregistered,
+    }
+
+    /// A fixture window: its id and its panes in pane order.
+    struct Window {
+        id: String,
+        panes: Vec<String>,
+    }
+
+    /// A marked, owned window of two agent panes: full, so one more tiled pane breaches.
+    const FULL: [Pane; 2] = [Pane::OwnedAgent, Pane::OwnedAgent];
+    /// A marked, owned window of one agent pane: room for one more.
+    const ROOMY: [Pane; 1] = [Pane::OwnedAgent];
+
+    /// A new detached 280x82 session `name` whose first window is a fixture window
+    /// (see [`fill_window`]).
+    fn session_with_window(
+        server: &IsolatedTmuxServer,
+        name: &str,
+        layout: &[Pane],
+        marked: bool,
+    ) -> Window {
+        let out = server.tmux(&[
+            "new-session",
+            "-d",
+            "-s",
+            name,
+            "-x",
+            SERVER_WIDTH,
+            "-y",
+            SERVER_HEIGHT,
+            "-P",
+            "-F",
+            "#{pane_id}",
+            "sleep",
+            "600",
+        ]);
+        out.assert_success(&format!("fixture: create session {name}"));
+        fill_window(server, out.stdout.trim(), layout, marked)
+    }
+
+    /// A new detached fixture window at the next index of session `name`.
+    fn add_window(
+        server: &IsolatedTmuxServer,
+        name: &str,
+        layout: &[Pane],
+        marked: bool,
+    ) -> Window {
+        let target = format!("={name}:");
+        let out = server.tmux(&[
+            "new-window",
+            "-d",
+            "-t",
+            &target,
+            "-P",
+            "-F",
+            "#{pane_id}",
+            "sleep",
+            "600",
+        ]);
+        out.assert_success(&format!("fixture: add a window to {name}"));
+        fill_window(server, out.stdout.trim(), layout, marked)
+    }
+
+    /// Split the window of `first` into one pane per `layout` entry in tmux's tiled
+    /// arrangement, register each as `layout` says, and mark it `@tt-tiled` when
+    /// `marked`.
+    fn fill_window(
+        server: &IsolatedTmuxServer,
+        first: &str,
+        layout: &[Pane],
+        marked: bool,
+    ) -> Window {
+        let id = window_of(server, first);
+        assert_eq!(
+            (
+                tmux_format(server, &id, "#{window_width}"),
+                tmux_format(server, &id, "#{window_height}")
+            ),
+            (SERVER_WIDTH.to_owned(), SERVER_HEIGHT.to_owned()),
+            "fixture: the window must be 280x82"
+        );
+        for _ in 1..layout.len() {
+            server
+                .tmux(&["split-window", "-d", "-t", &id, "sleep", "600"])
+                .assert_success("fixture: split the window");
+            server
+                .tmux(&["select-layout", "-t", &id, "tiled"])
+                .assert_success("fixture: tile the window");
+        }
+        let panes: Vec<String> = window_rects(server, &id)
+            .into_iter()
+            .map(|rect| rect.0)
+            .collect();
+        assert_eq!(panes.len(), layout.len(), "fixture: pane count");
+        for (pane, kind) in panes.iter().zip(layout) {
+            register(server, pane, *kind);
+        }
+        if marked {
+            server
+                .tmux(&["set-option", "-w", "-t", &id, TILED_MARKER, "1"])
+                .assert_success("fixture: mark the window tiled");
+        }
+        Window { id, panes }
+    }
+
+    fn register(server: &IsolatedTmuxServer, pane: &str, kind: Pane) {
+        if kind == Pane::Unregistered {
+            return;
+        }
+        let name = format!("ovf-{}", pane.trim_start_matches('%'));
+        register_name_and_cwd(server, pane, &name, &harness_cwd());
+        if kind == Pane::OwnedAgent {
+            register_agent_directly(server, pane, AGENT);
+        }
+    }
+
+    /// Which spawning verb places the pane.
+    #[derive(Clone, Copy, Debug)]
+    enum Verb {
+        Launch,
+        SpawnAgent,
+    }
+
+    /// Place a pane with `verb` from the harness pane, `--target <target>` and `extra`,
+    /// in `format`, with the floor registry.
+    fn place(
+        server: &IsolatedTmuxServer,
+        config: &AgentsConfig,
+        verb: Verb,
+        target: &str,
+        format: &str,
+        extra: &[&str],
+    ) -> CmdOutput {
+        let mut args = match verb {
+            Verb::Launch => vec!["launch", "--cmd", "sleep 600"],
+            Verb::SpawnAgent => vec!["spawn-agent", AGENT, "--bare"],
+        };
+        args.extend(["--target", target, "--format", format]);
+        args.extend_from_slice(extra);
+        server.cli_env(&args, config.xdg())
+    }
+
+    /// What a spawning verb reported.
+    #[derive(Debug)]
+    struct Reported {
+        pane: String,
+        relocated: Option<bool>,
+        window_id: Option<String>,
+        min_pane_cols: Option<u64>,
+        min_pane_rows: Option<u64>,
+        below_floor: Option<bool>,
+    }
+
+    fn reported_from_payload(payload: &serde_json::Value) -> Reported {
+        Reported {
+            pane: payload["pane_id"]
+                .as_str()
+                .expect("JSON must carry pane_id")
+                .to_owned(),
+            relocated: payload.get("relocated").and_then(|v| v.as_bool()),
+            window_id: payload
+                .get("window_id")
+                .and_then(|v| v.as_str())
+                .map(str::to_owned),
+            min_pane_cols: payload.get("min_pane_cols").and_then(|v| v.as_u64()),
+            min_pane_rows: payload.get("min_pane_rows").and_then(|v| v.as_u64()),
+            below_floor: payload.get("below_floor").and_then(|v| v.as_bool()),
+        }
+    }
+
+    /// What a successful spawning verb reported in `json` or `concise`.
+    fn reported(out: &CmdOutput, format: &str, ctx: &str) -> Reported {
+        out.assert_success(ctx);
+        match format {
+            "json" => reported_from_payload(&json_payload(out, ctx)),
+            "concise" => Reported {
+                pane: concise_field(out, "pane")
+                    .unwrap_or_else(|| panic!("{ctx}: concise must carry pane=: {}", out.stdout)),
+                relocated: concise_field(out, "relocated").map(|v| v == "true"),
+                window_id: concise_field(out, "window_id"),
+                min_pane_cols: concise_field(out, "min_pane_cols").map(|v| v.parse().unwrap()),
+                min_pane_rows: concise_field(out, "min_pane_rows").map(|v| v.parse().unwrap()),
+                below_floor: concise_field(out, "below_floor").map(|v| v == "true"),
+            },
+            other => panic!("unexpected format {other}"),
+        }
+    }
+
+    /// Assert the placement moved its pane out of `origin`: `relocated` is true, and
+    /// the reported `window_id` is the pane's window as tmux reports it, not `origin`.
+    /// Returns the reported window id.
+    fn assert_relocated_from(
+        server: &IsolatedTmuxServer,
+        reported: &Reported,
+        origin: &str,
+        ctx: &str,
+    ) -> String {
+        assert_eq!(
+            reported.relocated,
+            Some(true),
+            "{ctx}: relocated must be true: {reported:?}"
+        );
+        let window = reported
+            .window_id
+            .clone()
+            .unwrap_or_else(|| panic!("{ctx}: window_id must be reported: {reported:?}"));
+        assert_ne!(window, origin, "{ctx}: the pane must leave the origin");
+        assert_eq!(
+            window_of(server, &reported.pane),
+            window,
+            "{ctx}: window_id must be the window the pane is in"
+        );
+        window
+    }
+
+    /// Assert a placement stayed in `target` below its floor: `relocated` false,
+    /// `below_floor` true, and the target's `window_id`.
+    fn assert_stayed_below_floor(
+        server: &IsolatedTmuxServer,
+        reported: &Reported,
+        target: &Window,
+        ctx: &str,
+    ) {
+        assert_eq!(reported.relocated, Some(false), "{ctx}: {reported:?}");
+        assert_eq!(reported.below_floor, Some(true), "{ctx}: {reported:?}");
+        assert_eq!(
+            reported.window_id.as_deref(),
+            Some(target.id.as_str()),
+            "{ctx}: window_id must be the target's"
+        );
+        assert_eq!(
+            window_of(server, &reported.pane),
+            target.id,
+            "{ctx}: the pane must stay in the target"
+        );
+    }
+
+    /// Assert `window`'s `#{window_layout}` equals what `select-layout tiled` of its
+    /// panes produces.
+    fn assert_layout_tiled(server: &IsolatedTmuxServer, window: &str, ctx: &str) {
+        let placed = tmux_format(server, window, "#{window_layout}");
+        server
+            .tmux(&["select-layout", "-t", window, "tiled"])
+            .assert_success("explicit select-layout tiled");
+        assert_eq!(
+            tmux_format(server, window, "#{window_layout}"),
+            placed,
+            "{ctx}: window {window} must be in tmux's tiled layout"
+        );
+    }
+
+    fn window_ids(server: &IsolatedTmuxServer, session: &str) -> Vec<String> {
+        let target = format!("={session}");
+        let out = server.tmux(&["list-windows", "-t", &target, "-F", "#{window_id}"]);
+        out.assert_success(&format!("list windows of {session}"));
+        out.stdout.lines().map(str::to_owned).collect()
+    }
+
+    fn pane_count(server: &IsolatedTmuxServer, window: &str) -> usize {
+        window_rects(server, window).len()
+    }
+
+    /// The session's current window: `display -p -t =<session>: '#{window_id}'` (the
+    /// `:` makes the target the session; without it tmux prints nothing here).
+    fn current_window(server: &IsolatedTmuxServer, session: &str) -> String {
+        let window = tmux_format(server, &format!("={session}:"), "#{window_id}");
+        assert!(
+            window.starts_with('@'),
+            "session {session} must report its current window: {window:?}"
+        );
+        window
+    }
+
+    /// `spawn-agent --target <target> --format json` through the fake `tmux` in
+    /// `config`'s directory.
+    fn spawn_through_wrapper(
+        server: &IsolatedTmuxServer,
+        config: &AgentsConfig,
+        target: &str,
+    ) -> CmdOutput {
+        server.cli_env_path(
+            &[
+                "spawn-agent",
+                AGENT,
+                "--bare",
+                "--target",
+                target,
+                "--format",
+                "json",
+            ],
+            config.xdg(),
+            config.xdg(),
+        )
+    }
+
+    /// Acceptance: a breaching placement into an owned `@tt-tiled` window with no other
+    /// window in its session moves the new pane to a different window and retiles the
+    /// origin's surviving panes.
+    #[test]
+    fn breaching_spawn_agent_with_no_other_window_moves_out_and_retiles_the_origin() {
+        let _serial = serial_guard();
+        let server = IsolatedTmuxServer::start_inside();
+        let config = floor_config();
+        let origin = session_with_window(&server, "ovf-alone", &FULL, true);
+        assert_eq!(
+            window_ids(&server, "ovf-alone"),
+            std::slice::from_ref(&origin.id)
+        );
+
+        let out = place(
+            &server,
+            &config,
+            Verb::SpawnAgent,
+            &origin.panes[0],
+            "json",
+            &[],
+        );
+        let reported = reported(&out, "json", "spawn-agent into a full window");
+
+        assert_relocated_from(&server, &reported, &origin.id, "no other window");
+        assert_eq!(
+            pane_count(&server, &origin.id),
+            2,
+            "the origin keeps its survivors"
+        );
+        assert_layout_tiled(&server, &origin.id, "the origin after the move");
+    }
+
+    /// Acceptance: a breaching placement joins the session's eligible marked window
+    /// with room, and the session gains no window.
+    #[test]
+    fn breaching_spawn_agent_joins_an_eligible_window_with_room() {
+        let _serial = serial_guard();
+        let server = IsolatedTmuxServer::start_inside();
+        let config = floor_config();
+        let origin = session_with_window(&server, "ovf-join", &FULL, true);
+        let roomy = add_window(&server, "ovf-join", &ROOMY, true);
+        let before = window_ids(&server, "ovf-join");
+
+        let out = place(
+            &server,
+            &config,
+            Verb::SpawnAgent,
+            &origin.panes[0],
+            "json",
+            &[],
+        );
+        let reported = reported(&out, "json", "spawn-agent with a roomy candidate");
+
+        let window = assert_relocated_from(&server, &reported, &origin.id, "roomy candidate");
+        assert_eq!(window, roomy.id, "the pane must join the eligible window");
+        assert_eq!(
+            window_ids(&server, "ovf-join"),
+            before,
+            "the session must gain no window"
+        );
+    }
+
+    /// Acceptance: candidates are tried in ascending index; the lowest breaches with
+    /// one more pane, so the pane moves on to the middle one, and the rejected one is
+    /// restored to its layout.
+    #[test]
+    fn breaching_spawn_agent_tries_candidates_in_index_order_and_restores_a_rejected_one() {
+        let _serial = serial_guard();
+        let server = IsolatedTmuxServer::start_inside();
+        let config = floor_config();
+        let origin = session_with_window(&server, "ovf-order", &FULL, true);
+        let lowest = add_window(&server, "ovf-order", &FULL, true);
+        let middle = add_window(&server, "ovf-order", &ROOMY, true);
+        let highest = add_window(&server, "ovf-order", &ROOMY, true);
+        let lowest_layout = tmux_format(&server, &lowest.id, "#{window_layout}");
+
+        let out = place(
+            &server,
+            &config,
+            Verb::SpawnAgent,
+            &origin.panes[0],
+            "json",
+            &[],
+        );
+        let reported = reported(&out, "json", "spawn-agent with three candidates");
+
+        let window = assert_relocated_from(&server, &reported, &origin.id, "three candidates");
+        assert_eq!(
+            window, middle.id,
+            "the pane must land in the middle candidate"
+        );
+        assert_eq!(
+            tmux_format(&server, &lowest.id, "#{window_layout}"),
+            lowest_layout,
+            "the rejected candidate must be retiled back to its layout"
+        );
+        assert_eq!(
+            pane_count(&server, &highest.id),
+            1,
+            "the highest candidate is not needed"
+        );
+    }
+
+    /// Acceptance: with no candidate that has room, the pane lands in a fresh window of
+    /// the session, which carries `@tt-tiled`.
+    #[test]
+    fn breaching_spawn_agent_without_room_breaks_into_a_fresh_marked_window() {
+        let _serial = serial_guard();
+        let server = IsolatedTmuxServer::start_inside();
+        let config = floor_config();
+        let origin = session_with_window(&server, "ovf-fresh", &FULL, true);
+        let full = add_window(&server, "ovf-fresh", &FULL, true);
+        let before = window_ids(&server, "ovf-fresh");
+
+        let out = place(
+            &server,
+            &config,
+            Verb::SpawnAgent,
+            &origin.panes[0],
+            "json",
+            &[],
+        );
+        let reported = reported(&out, "json", "spawn-agent without room");
+
+        let window = assert_relocated_from(&server, &reported, &origin.id, "no room");
+        assert!(
+            !before.contains(&window),
+            "the pane must land in a window that did not exist: {window} in {before:?}"
+        );
+        let marker = server.tmux(&["show-options", "-w", "-t", &window, TILED_MARKER]);
+        marker.assert_success("show-options -w @tt-tiled");
+        assert!(
+            !marker.stdout.trim().is_empty(),
+            "the fresh window must carry @tt-tiled"
+        );
+        assert_eq!(
+            pane_count(&server, &full.id),
+            2,
+            "the full candidate keeps its panes"
+        );
+    }
+
+    /// One relocating `spawn-agent --format json`, into a fresh session's full origin
+    /// (its current window): with a roomy candidate when `join`, with none otherwise.
+    /// Returns the session name, the origin, the candidate, the payload and the
+    /// session's current window before the placement.
+    fn relocating_spawn(
+        server: &IsolatedTmuxServer,
+        config: &AgentsConfig,
+        join: bool,
+    ) -> (String, Window, Option<Window>, serde_json::Value, String) {
+        let session = if join {
+            "ovf-move-join"
+        } else {
+            "ovf-move-break"
+        };
+        let origin = session_with_window(server, session, &FULL, true);
+        let roomy = join.then(|| add_window(server, session, &ROOMY, true));
+        server
+            .tmux(&["select-window", "-t", &origin.id])
+            .assert_success("make the origin the session's current window");
+        let current = current_window(server, session);
+        let out = place(
+            server,
+            config,
+            Verb::SpawnAgent,
+            &origin.panes[0],
+            "json",
+            &[],
+        );
+        let payload = json_payload(&out, &format!("relocating spawn-agent (join: {join})"));
+        (session.to_owned(), origin, roomy, payload, current)
+    }
+
+    fn move_name(join: bool) -> &'static str {
+        if join {
+            "join-pane"
+        } else {
+            "break-pane"
+        }
+    }
+
+    /// Acceptance: a move by `join-pane` and one by `break-pane` each report
+    /// `relocated: true` and a window other than the target's, leave the session's
+    /// current window as it was, and keep the pane's registration.
+    #[test]
+    fn relocation_keeps_focus_and_the_moved_panes_registration() {
+        let _serial = serial_guard();
+        let server = IsolatedTmuxServer::start_inside();
+        let config = floor_config();
+        for join in [true, false] {
+            let ctx = format!("relocation by {}", move_name(join));
+            let (session, origin, roomy, payload, current) =
+                relocating_spawn(&server, &config, join);
+            let reported = reported_from_payload(&payload);
+
+            let window = assert_relocated_from(&server, &reported, &origin.id, &ctx);
+            if let Some(roomy) = roomy {
+                assert_eq!(window, roomy.id, "{ctx}: must join the roomy candidate");
+            }
+            assert_eq!(
+                current_window(&server, &session),
+                current,
+                "{ctx}: the session's current window must not change"
+            );
+            let options = pane_user_options(&server, &reported.pane);
+            let option = |key: &str| {
+                options
+                    .iter()
+                    .find(|(k, _)| k == key)
+                    .map(|(_, v)| v.clone())
+                    .unwrap_or_else(|| {
+                        panic!("{ctx}: the moved pane must carry {key}: {options:?}")
+                    })
+            };
+            assert_eq!(
+                Some(option("@tt-name").as_str()),
+                payload["name"].as_str(),
+                "{ctx}: @tt-name"
+            );
+            assert_eq!(option("@tt-agent"), AGENT, "{ctx}: @tt-agent");
+            let surface = payload["surface"].as_str().expect("JSON carries surface");
+            assert!(!surface.is_empty(), "{ctx}: a resolved surface");
+            assert_eq!(option("@tt-surface"), surface, "{ctx}: @tt-surface");
+            assert_eq!(option("@tt-cwd"), harness_cwd(), "{ctx}: @tt-cwd");
+        }
+    }
+
+    /// Acceptance: after a move by `join-pane` and one by `break-pane`, the reported
+    /// minima are the smallest pane width and height of the reported window as tmux
+    /// reads them, and `below_floor` is false.
+    #[test]
+    fn relocated_landing_reports_the_final_windows_measured_geometry() {
+        let _serial = serial_guard();
+        let server = IsolatedTmuxServer::start_inside();
+        let config = floor_config();
+        for join in [true, false] {
+            let ctx = format!("geometry after {}", move_name(join));
+            let (_, origin, _, payload, _) = relocating_spawn(&server, &config, join);
+            let reported = reported_from_payload(&payload);
+
+            let window = assert_relocated_from(&server, &reported, &origin.id, &ctx);
+            let (tmux_window, cols, rows) = tmux_landing(&server, &reported.pane);
+            assert_eq!(tmux_window, window, "{ctx}");
+            assert_eq!(reported.min_pane_cols, Some(cols), "{ctx}: min_pane_cols");
+            assert_eq!(reported.min_pane_rows, Some(rows), "{ctx}: min_pane_rows");
+            assert_eq!(reported.below_floor, Some(false), "{ctx}: below_floor");
+        }
+    }
+
+    /// Acceptance: with `--target` in a session other than the caller's, the pane
+    /// relocates within the target's session, never into the caller's eligible window.
+    #[test]
+    fn relocation_stays_in_the_target_windows_session() {
+        let _serial = serial_guard();
+        let server = IsolatedTmuxServer::start_inside();
+        let config = floor_config();
+        // The caller (the harness pane) is in the harness session, which gets an
+        // eligible marked window with room.
+        let callers = add_window(&server, HARNESS_SESSION, &ROOMY, true);
+        let origin = session_with_window(&server, "ovf-other", &FULL, true);
+        assert_eq!(
+            tmux_format(&server, server.pane(), "#{session_name}"),
+            HARNESS_SESSION
+        );
+
+        let out = place(
+            &server,
+            &config,
+            Verb::SpawnAgent,
+            &origin.panes[0],
+            "json",
+            &[],
+        );
+        let reported = reported(&out, "json", "spawn-agent into another session");
+
+        let window = assert_relocated_from(&server, &reported, &origin.id, "other session");
+        assert_eq!(
+            tmux_format(&server, &window, "#{session_name}"),
+            "ovf-other",
+            "the pane must stay in the target window's session"
+        );
+        assert_eq!(
+            pane_count(&server, &callers.id),
+            1,
+            "the caller's eligible window is untouched"
+        );
+    }
+
+    /// Acceptance: both verbs report `relocated` and the final `window_id` in `concise`
+    /// and `json`, after a breach and without one.
+    #[test]
+    fn both_verbs_report_relocated_and_the_final_window_in_concise_and_json() {
+        let _serial = serial_guard();
+        let server = IsolatedTmuxServer::start_inside();
+        let config = floor_config();
+        let mut n = 0;
+        for verb in [Verb::Launch, Verb::SpawnAgent] {
+            for format in ["json", "concise"] {
+                n += 1;
+                let ctx = format!("{verb:?} --format {format}");
+
+                let full = session_with_window(&server, &format!("ovf-r{n}"), &FULL, true);
+                let out = place(&server, &config, verb, &full.panes[0], format, &[]);
+                let breached = reported(&out, format, &format!("{ctx}, breaching"));
+                assert_relocated_from(&server, &breached, &full.id, &format!("{ctx}, breaching"));
+
+                let roomy = session_with_window(&server, &format!("ovf-s{n}"), &ROOMY, true);
+                let out = place(&server, &config, verb, &roomy.panes[0], format, &[]);
+                let stayed = reported(&out, format, &format!("{ctx}, roomy"));
+                assert_eq!(stayed.relocated, Some(false), "{ctx}, roomy: {stayed:?}");
+                assert_eq!(
+                    stayed.window_id.as_deref(),
+                    Some(roomy.id.as_str()),
+                    "{ctx}, roomy: window_id must be the target's"
+                );
+            }
+        }
+    }
+
+    /// Acceptance: an explicit `--split v` into an owned window, and a first placement
+    /// into a window not owned before the split, stay below the floor in place, even
+    /// with an eligible window with room in the session.
+    #[test]
+    fn opt_out_and_unowned_placements_stay_below_floor_in_the_target() {
+        let _serial = serial_guard();
+        let server = IsolatedTmuxServer::start_inside();
+        let config = floor_config();
+
+        // Two stacked 41- and 40-row panes: a vertical split of the first leaves 20 rows.
+        let owned = session_with_window(&server, "ovf-split-v", &FULL, true);
+        let roomy = add_window(&server, "ovf-split-v", &ROOMY, true);
+        let out = place(
+            &server,
+            &config,
+            Verb::SpawnAgent,
+            &owned.panes[0],
+            "json",
+            &["--split", "v"],
+        );
+        let split_v = reported(&out, "json", "spawn-agent --split v");
+        assert_stayed_below_floor(&server, &split_v, &owned, "--split v");
+        assert_eq!(
+            pane_count(&server, &roomy.id),
+            1,
+            "--split v: nothing joined"
+        );
+
+        let unowned = session_with_window(&server, "ovf-unowned", &[Pane::Unregistered], false);
+        let roomy = add_window(&server, "ovf-unowned", &ROOMY, true);
+        let out = place(
+            &server,
+            &config,
+            Verb::SpawnAgent,
+            &unowned.panes[0],
+            "json",
+            &[],
+        );
+        let first = reported(&out, "json", "first placement into an unowned window");
+        assert_stayed_below_floor(&server, &first, &unowned, "unowned window");
+        assert_eq!(pane_count(&server, &roomy.id), 1, "unowned: nothing joined");
+    }
+
+    /// Acceptance: a window already below its floor before the placement is not
+    /// repaired: the new pane leaves, and `status` still reports the origin below.
+    #[test]
+    fn an_over_full_origin_loses_only_the_new_pane_and_stays_below_floor() {
+        let _serial = serial_guard();
+        let server = IsolatedTmuxServer::start_inside();
+        let config = floor_config();
+        let origin = session_with_window(&server, "ovf-over", &[Pane::OwnedAgent; 3], true);
+        assert_layout_tiled(&server, &origin.id, "the over-full origin before");
+        let (_, cols, _) = tmux_landing(&server, &origin.panes[0]);
+        assert!(
+            cols < MIN_COLS,
+            "the origin must be below {MIN_COLS} columns before: {cols}"
+        );
+
+        let out = place(
+            &server,
+            &config,
+            Verb::SpawnAgent,
+            &origin.panes[0],
+            "json",
+            &[],
+        );
+        let reported = reported(&out, "json", "spawn-agent into an over-full window");
+        assert_relocated_from(&server, &reported, &origin.id, "over-full origin");
+        assert_eq!(
+            pane_count(&server, &origin.id),
+            3,
+            "only the new pane leaves"
+        );
+
+        let status = server.cli_env(
+            &["status", "--target", &origin.panes[0], "--format", "json"],
+            config.xdg(),
+        );
+        let payload = json_payload(&status, "status of the origin");
+        assert!(
+            json_below_floor(&payload, "status of the origin"),
+            "status must report the origin below floor: {}",
+            status.stdout
+        );
+    }
+
+    /// Acceptance: a candidate tmux refuses to join (its active pane has no space for a
+    /// new pane) is a rejected trial, and the pane joins the next candidate with room.
+    #[test]
+    fn a_refused_join_is_a_rejected_trial_and_the_search_goes_on() {
+        let _serial = serial_guard();
+        let server = IsolatedTmuxServer::start_inside();
+        let config = floor_config();
+        let origin = session_with_window(&server, "ovf-refuse", &FULL, true);
+        // The lowest candidate: an owned, marked window whose active pane is one row
+        // tall, so `join-pane` (a split of that pane) has no space.
+        let refusing = add_window(&server, "ovf-refuse", &ROOMY, true);
+        let tiny = server.tmux(&[
+            "split-window",
+            "-d",
+            "-v",
+            "-l",
+            "1",
+            "-t",
+            &refusing.panes[0],
+            "-P",
+            "-F",
+            "#{pane_id}",
+            "sleep",
+            "600",
+        ]);
+        tiny.assert_success("fixture: a one-row pane");
+        let tiny = tiny.stdout.trim().to_owned();
+        register(&server, &tiny, Pane::Owned);
+        server
+            .tmux(&["select-pane", "-t", &tiny])
+            .assert_success("fixture: make the one-row pane active");
+        let roomy = add_window(&server, "ovf-refuse", &ROOMY, true);
+        // Not tiled: a join that succeeded and was then rejected would retile it.
+        let refusing_layout = tmux_format(&server, &refusing.id, "#{window_layout}");
+
+        let out = place(
+            &server,
+            &config,
+            Verb::SpawnAgent,
+            &origin.panes[0],
+            "json",
+            &[],
+        );
+        let reported = reported(&out, "json", "spawn-agent past a refusing candidate");
+
+        let window = assert_relocated_from(&server, &reported, &origin.id, "refused join");
+        assert_eq!(window, roomy.id, "the pane must join the next candidate");
+        assert_eq!(
+            pane_count(&server, &refusing.id),
+            2,
+            "the refusing candidate's pane count must not change"
+        );
+        assert_eq!(
+            tmux_format(&server, &refusing.id, "#{window_layout}"),
+            refusing_layout,
+            "the refused join must leave the candidate as it was"
+        );
+    }
+
+    /// A fake `tmux` that, on the first `join-pane`, records its `-s` pane in `state`,
+    /// kills that pane, and passes the call to real tmux.
+    fn tmux_wrapper_killing_the_joined_pane(state: &std::path::Path) -> String {
+        format!(
+            "#!/bin/sh\n\
+             REAL='{real}'\n\
+             STATE='{state}'\n\
+             if [ \"$1\" = join-pane ] && [ ! -e \"$STATE\" ]; then\n\
+             \tsource=\n\
+             \tprev=\n\
+             \tfor arg in \"$@\"; do\n\
+             \t\t[ \"$prev\" = -s ] && source=$arg\n\
+             \t\tprev=$arg\n\
+             \tdone\n\
+             \tprintf '%s\\n' \"$source\" > \"$STATE\"\n\
+             \t\"$REAL\" kill-pane -t \"$source\" || exit 99\n\
+             fi\n\
+             exec \"$REAL\" \"$@\"\n",
+            real = real_tmux_path(),
+            state = state.display(),
+        )
+    }
+
+    /// A fake `tmux` that refuses every `break-pane` (recording each in `state`) and
+    /// passes every other call to real tmux.
+    fn tmux_wrapper_refusing_break_pane(state: &std::path::Path) -> String {
+        format!(
+            "#!/bin/sh\n\
+             REAL='{real}'\n\
+             STATE='{state}'\n\
+             if [ \"$1\" = break-pane ]; then\n\
+             \tprintf '%s\\n' refused >> \"$STATE\"\n\
+             \tprintf '%s\\n' 'injected break-pane refusal' >&2\n\
+             \texit 1\n\
+             fi\n\
+             exec \"$REAL\" \"$@\"\n",
+            real = real_tmux_path(),
+            state = state.display(),
+        )
+    }
+
+    /// Acceptance: the new pane killed when its `join-pane` runs gives the pane-gone
+    /// result with `relocated: false`.
+    #[test]
+    fn a_pane_gone_at_join_gives_the_pane_gone_result_not_relocated() {
+        let _serial = serial_guard();
+        let server = IsolatedTmuxServer::start_inside();
+        let config = floor_config();
+        let origin = session_with_window(&server, "ovf-gone", &FULL, true);
+        add_window(&server, "ovf-gone", &ROOMY, true);
+        let state = config.xdg().join("join-fault-fired");
+        config.write_executable("tmux", &tmux_wrapper_killing_the_joined_pane(&state));
+
+        let out = spawn_through_wrapper(&server, &config, &origin.panes[0]);
+
+        let payload = assert_pane_gone_json(&server, &out, &state, "pane gone at join-pane");
+        assert_eq!(
+            payload.get("relocated").and_then(|v| v.as_bool()),
+            Some(false),
+            "relocated must be false: {}",
+            out.stdout
+        );
+        assert_eq!(
+            out.stderr.lines().count(),
+            1,
+            "stderr must be exactly one warning line: {:?}",
+            out.stderr
+        );
+    }
+
+    /// Acceptance: a `break-pane` that fails while the pane exists leaves the pane in
+    /// the origin, reported below floor and not relocated, with exit 0.
+    #[test]
+    fn a_failed_break_pane_leaves_the_pane_in_the_origin_below_floor() {
+        let _serial = serial_guard();
+        let server = IsolatedTmuxServer::start_inside();
+        let config = floor_config();
+        let origin = session_with_window(&server, "ovf-nobreak", &FULL, true);
+        let state = config.xdg().join("break-refused");
+        config.write_executable("tmux", &tmux_wrapper_refusing_break_pane(&state));
+
+        let out = spawn_through_wrapper(&server, &config, &origin.panes[0]);
+
+        let reported = reported(&out, "json", "spawn-agent with break-pane refused");
+        assert!(
+            state.exists(),
+            "the placement must have attempted break-pane"
+        );
+        assert_stayed_below_floor(&server, &reported, &origin, "break-pane refused");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ISSUE-260802-0205-01 — `rebalance` retiles one window through the tool, under the
+// window guard `kill` uses (`@tt-tiled` present, an owned pane in the window), and
+// reports the window's measured geometry and floor verdict.
+//
+// "Retiled" means the window's pane geometry equals what an explicit
+// `select-layout tiled` of the same panes produces; "ragged" means it differs from
+// that geometry. These cases carry no "tmux not on PATH" skip: when the behavior or
+// tmux is absent they fail.
+// ---------------------------------------------------------------------------
+
+/// Assert `window` is ragged: an explicit `select-layout tiled` of its panes changes
+/// some pane's rectangle. The window's arrangement is restored after the probe.
+fn assert_ragged(server: &IsolatedTmuxServer, window: &str, ctx: &str) {
+    let layout = tmux_format(server, window, "#{window_layout}");
+    let ragged = window_rects(server, window);
+    server
+        .tmux(&["select-layout", "-t", window, "tiled"])
+        .assert_success("probe: explicit select-layout tiled");
+    let tiled = window_rects(server, window);
+    server
+        .tmux(&["select-layout", "-t", window, &layout])
+        .assert_success("probe: restore the ragged layout");
+    assert_eq!(
+        window_rects(server, window),
+        ragged,
+        "{ctx}: the probe must restore the ragged arrangement"
+    );
+    assert_ne!(
+        ragged, tiled,
+        "{ctx}: the window must not be in tmux's tiled arrangement"
+    );
+}
+
+/// Make the window of `pane` ragged with a raw `tmux split-window -h` of `pane`, and
+/// assert it is. Returns the window id.
+fn make_ragged(server: &IsolatedTmuxServer, pane: &str) -> String {
+    let window = window_of(server, pane);
+    server
+        .tmux(&["split-window", "-h", "-d", "-t", pane, "sleep", "600"])
+        .assert_success("make the window ragged by a raw split");
+    assert_ragged(server, &window, "fixture: after a raw split");
+    window
+}
+
+/// A [`tiled_fixture`] window made ragged by a raw `tmux split-window`.
+fn ragged_fixture(
+    server: &IsolatedTmuxServer,
+    layout: &[FixturePane],
+    marked: bool,
+) -> TiledFixture {
+    let fixture = tiled_fixture(server, layout, marked);
+    make_ragged(server, &fixture.panes[0]);
+    fixture
+}
+
+/// A marked window of two owned panes, made ragged by a raw split.
+fn ragged_owned_marked(server: &IsolatedTmuxServer) -> TiledFixture {
+    ragged_fixture(server, &owned_panes(2), true)
+}
+
+/// A ragged window without `@tt-tiled` holding owned panes.
+fn ragged_owned_unmarked(server: &IsolatedTmuxServer) -> TiledFixture {
+    ragged_fixture(server, &owned_panes(2), false)
+}
+
+/// A ragged, marked window in which no pane is owned for the harness cwd.
+fn ragged_unowned_marked(server: &IsolatedTmuxServer) -> TiledFixture {
+    ragged_fixture(
+        server,
+        &[FixturePane::ForeignCwd, FixturePane::Unregistered],
+        true,
+    )
+}
+
+/// `tmux-tools rebalance --target <target> --format <format>`.
+fn rebalance_cli(server: &IsolatedTmuxServer, target: &str, format: &str) -> CmdOutput {
+    server.cli(&["rebalance", "--target", target, "--format", format])
+}
+
+/// Assert `rebalance` of `window` exited 0 and left it retiled.
+fn assert_rebalanced(server: &IsolatedTmuxServer, out: &CmdOutput, window: &str, ctx: &str) {
+    out.assert_success(ctx);
+    assert_retiled(server, window, ctx);
+}
+
+/// Rebalance `fixture` (ragged); assert a non-zero exit and every pane's geometry
+/// unchanged. Returns the refusal's stderr.
+fn assert_rebalance_refused(
+    server: &IsolatedTmuxServer,
+    fixture: &TiledFixture,
+    ctx: &str,
+) -> String {
+    let before = window_rects(server, &fixture.window);
+    let out = rebalance_cli(server, &fixture.window, "concise");
+    assert_ne!(
+        out.status, 0,
+        "{ctx}: rebalance must refuse; stdout: {:?}",
+        out.stdout
+    );
+    assert_eq!(
+        window_rects(server, &fixture.window),
+        before,
+        "{ctx}: a refused rebalance must leave every pane's geometry unchanged"
+    );
+    out.stderr
+}
+
+/// Acceptance: `tmux-tools rebalance --help` exits 0 and `tmux-tools --help` lists
+/// `rebalance`.
+#[test]
+fn rebalance_help_exits_zero_and_top_level_help_lists_it() {
+    let help = Command::new(BIN)
+        .args(["rebalance", "--help"])
+        .output()
+        .expect("run rebalance --help");
+    assert_eq!(
+        help.status.code(),
+        Some(0),
+        "rebalance --help must exit 0; stderr: {}",
+        String::from_utf8_lossy(&help.stderr)
+    );
+
+    let top = Command::new(BIN)
+        .arg("--help")
+        .output()
+        .expect("run --help");
+    assert!(top.status.success(), "tmux-tools --help must succeed");
+    let listed = String::from_utf8_lossy(&top.stdout);
+    assert!(
+        listed
+            .lines()
+            .any(|line| line.split_whitespace().next() == Some("rebalance")),
+        "tmux-tools --help must list rebalance: {listed}"
+    );
+}
+
+/// Acceptance: a marked, owned window made ragged by a raw `tmux split-window` is
+/// retiled by `rebalance`, with exit 0.
+#[test]
+fn rebalance_retiles_a_marked_owned_window_made_ragged_by_a_raw_split() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    let fixture = ragged_owned_marked(&server);
+
+    let out = rebalance_cli(&server, &fixture.window, "concise");
+
+    assert_rebalanced(
+        &server,
+        &out,
+        &fixture.window,
+        "rebalance of a ragged owned window",
+    );
+}
+
+/// Inside tmux with no selector, `rebalance` acts on the calling pane's window.
+#[test]
+fn rebalance_without_a_selector_inside_tmux_retiles_the_calling_panes_window() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    let window = window_of(&server, server.pane());
+    register_name_and_cwd(&server, server.pane(), "rb-caller", &harness_cwd());
+    server
+        .tmux(&["split-window", "-d", "-t", server.pane(), "sleep", "600"])
+        .assert_success("add a second pane");
+    server
+        .tmux(&["select-layout", "-t", &window, "tiled"])
+        .assert_success("tile the calling window");
+    server
+        .tmux(&["set-option", "-w", "-t", &window, TILED_MARKER, "1"])
+        .assert_success("mark the calling window tiled");
+    make_ragged(&server, server.pane());
+
+    let out = server.cli(&["rebalance", "--format", "raw"]);
+
+    assert_rebalanced(&server, &out, &window, "selector-less rebalance");
+    assert_eq!(out.stdout, format!("{window}\n"));
+}
+
+/// Acceptance: the reported `window_id`, `min_pane_cols` and `min_pane_rows` equal the
+/// window id and the minima `tmux list-panes` reports after the call, in `json` and
+/// `concise` (which also carries `below_floor`); `raw` is exactly the window id.
+#[test]
+fn rebalance_reports_the_retiled_window_id_and_minima_in_every_format() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+
+    let fixture = ragged_owned_marked(&server);
+    let json = rebalance_cli(&server, &fixture.window, "json");
+    let payload = json_payload(&json, "rebalance --format json");
+    let (window, cols, rows) = tmux_landing(&server, &fixture.panes[0]);
+    assert_eq!(window, fixture.window);
+    assert_eq!(
+        (
+            payload.get("window_id").and_then(|v| v.as_str()),
+            payload.get("min_pane_cols").and_then(|v| v.as_u64()),
+            payload.get("min_pane_rows").and_then(|v| v.as_u64()),
+        ),
+        (Some(window.as_str()), Some(cols), Some(rows)),
+        "rebalance json must report the window and the minima tmux lists: {}",
+        json.stdout
+    );
+    assert!(
+        !json_below_floor(&payload, "rebalance --format json"),
+        "a window without agent panes is never below floor: {}",
+        json.stdout
+    );
+    assert_retiled(&server, &fixture.window, "rebalance --format json");
+
+    let fixture = ragged_owned_marked(&server);
+    let concise = rebalance_cli(&server, &fixture.window, "concise");
+    concise.assert_success("rebalance --format concise");
+    let (window, cols, rows) = tmux_landing(&server, &fixture.panes[0]);
+    assert_eq!(
+        (
+            concise_field(&concise, "window_id"),
+            concise_field(&concise, "min_pane_cols"),
+            concise_field(&concise, "min_pane_rows"),
+            concise_field(&concise, "below_floor"),
+        ),
+        (
+            Some(window),
+            Some(cols.to_string()),
+            Some(rows.to_string()),
+            Some("false".to_owned()),
+        ),
+        "rebalance concise must carry the four fields: {}",
+        concise.stdout
+    );
+    assert_retiled(&server, &fixture.window, "rebalance --format concise");
+
+    let fixture = ragged_owned_marked(&server);
+    let raw = rebalance_cli(&server, &fixture.window, "raw");
+    raw.assert_success("rebalance --format raw");
+    assert_eq!(raw.stdout, format!("{}\n", fixture.window));
+    assert_retiled(&server, &fixture.window, "rebalance --format raw");
+}
+
+/// Acceptance: a ragged window without `@tt-tiled` that holds an owned pane is
+/// refused with its geometry unchanged; a ragged, marked, owned window is retiled.
+#[test]
+fn rebalance_refuses_an_unmarked_owned_window_and_retiles_a_marked_one() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    let unmarked = ragged_owned_unmarked(&server);
+    let marked = ragged_owned_marked(&server);
+
+    assert_rebalance_refused(&server, &unmarked, "rebalance of an unmarked window");
+    assert_ragged(&server, &unmarked.window, "the refused window");
+
+    let out = rebalance_cli(&server, &marked.window, "concise");
+    assert_rebalanced(
+        &server,
+        &out,
+        &marked.window,
+        "rebalance of the marked control",
+    );
+}
+
+/// Acceptance: a ragged, marked window in which no pane is owned for the invoking cwd
+/// is refused with its geometry unchanged; a ragged, marked, owned window is retiled.
+#[test]
+fn rebalance_refuses_a_marked_window_without_an_owned_pane_and_retiles_an_owned_one() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    let unowned = ragged_unowned_marked(&server);
+    let owned = ragged_owned_marked(&server);
+
+    assert_rebalance_refused(&server, &unowned, "rebalance of an unowned window");
+    assert_ragged(&server, &unowned.window, "the refused window");
+
+    let out = rebalance_cli(&server, &owned.window, "concise");
+    assert_rebalanced(
+        &server,
+        &out,
+        &owned.window,
+        "rebalance of the owned control",
+    );
+}
+
+/// Acceptance: the two refusals' diagnostics differ, and each names its guard.
+#[test]
+fn rebalance_refusal_diagnostics_differ_and_name_their_guard() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    let unmarked = ragged_owned_unmarked(&server);
+    let unowned = ragged_unowned_marked(&server);
+
+    let marker = assert_rebalance_refused(&server, &unmarked, "unmarked window");
+    let ownership = assert_rebalance_refused(&server, &unowned, "unowned window");
+
+    assert_ne!(marker, ownership, "the two refusals must be told apart");
+    assert!(
+        marker.contains(TILED_MARKER) && marker.contains("layout intent"),
+        "the marker refusal must name the layout-intent guard (@tt-tiled): {marker:?}"
+    );
+    assert!(
+        !marker.contains("ownership"),
+        "the marker refusal must not name the ownership guard: {marker:?}"
+    );
+    assert!(
+        ownership.contains("ownership"),
+        "the ownership refusal must name the ownership guard: {ownership:?}"
+    );
+    assert!(
+        !ownership.contains(TILED_MARKER) && !ownership.contains("layout intent"),
+        "the ownership refusal must not name the layout-intent guard: {ownership:?}"
+    );
+}
+
+/// Acceptance: outside tmux (`TMUX` unset, then empty) with no `--target`, `--session`
+/// or `--window`, `rebalance` exits non-zero and creates no session; outside tmux,
+/// `rebalance --session <S>` retiles a marked, owned, ragged window.
+#[test]
+fn rebalance_outside_tmux_needs_a_selector_and_creates_no_session() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_outside();
+    let sessions = || {
+        let out = server.tmux(&["list-sessions", "-F", "#{session_id} #{session_name}"]);
+        out.assert_success("list-sessions");
+        out.stdout
+    };
+    let before = sessions();
+    assert!(
+        !before.lines().any(|line| line.ends_with(" tmux-tools")),
+        "no managed session may exist before the runs: {before}"
+    );
+
+    let unset = server.cli(&["rebalance"]);
+    assert_ne!(
+        unset.status, 0,
+        "rebalance with TMUX unset and no selector must fail; stdout: {:?}",
+        unset.stdout
+    );
+    assert_eq!(sessions(), before, "TMUX unset: no session may be created");
+
+    let empty = server
+        .command_with_cli_env(BIN, &CliOptions::default())
+        .env("TMUX", "")
+        .arg("rebalance")
+        .output()
+        .expect("run rebalance with TMUX empty");
+    assert_ne!(
+        empty.status.code(),
+        Some(0),
+        "rebalance with TMUX empty and no selector must fail; stdout: {:?}",
+        String::from_utf8_lossy(&empty.stdout)
+    );
+    assert_eq!(sessions(), before, "TMUX empty: no session may be created");
+
+    let session = "rb-outside";
+    let first = server.tmux(&[
+        "new-session",
+        "-d",
+        "-s",
+        session,
+        "-x",
+        SERVER_WIDTH,
+        "-y",
+        SERVER_HEIGHT,
+        "-P",
+        "-F",
+        "#{pane_id}",
+        "sleep",
+        "600",
+    ]);
+    first.assert_success("create the scoped session");
+    let first = first.stdout.trim().to_owned();
+    let window = window_of(&server, &first);
+    server
+        .tmux(&["split-window", "-d", "-t", &first, "sleep", "600"])
+        .assert_success("add a second pane");
+    server
+        .tmux(&["select-layout", "-t", &window, "tiled"])
+        .assert_success("tile the scoped window");
+    register_name_and_cwd(&server, &first, "rb-outside-0", &harness_cwd());
+    server
+        .tmux(&["set-option", "-w", "-t", &window, TILED_MARKER, "1"])
+        .assert_success("mark the scoped window tiled");
+    make_ragged(&server, &first);
+
+    let out = server.cli(&["rebalance", "--session", session]);
+
+    assert_rebalanced(&server, &out, &window, "outside-tmux rebalance --session");
+}
+
+/// The registry the agent-pane `rebalance` criteria use: `tt-fake-tui` (the fixture
+/// binary) with one surface, `wide`, whose floor is 140x21. On the 280x82 server two
+/// tiled panes (280x41 over 280x40) meet it; four (139 or 140 columns) do not.
+#[cfg(feature = "test-fixtures")]
+fn rebalance_floor_config() -> AgentsConfig {
+    let config = AgentsConfig::new();
+    config.write_agents_toml(&format!(
+        r#"
+[tt-fake-tui]
+binary = "{fake}"
+default_surface = "wide"
+
+[tt-fake-tui.surfaces.wide]
+min_cols = 140
+min_rows = 21
+
+[tt-fake-tui.access.default]
+args = []
+"#,
+        fake = FAKE_TUI_BIN
+    ));
+    config
+}
+
+/// A marked window of `panes` owned panes whose first pane runs `tt-fake-tui`,
+/// registered as that agent on its `wide` surface, made ragged by a raw split.
+#[cfg(feature = "test-fixtures")]
+fn ragged_fake_tui_window(server: &IsolatedTmuxServer, panes: usize) -> TiledFixture {
+    let fixture = tiled_fixture_in(
+        server,
+        &owned_panes(panes),
+        true,
+        &harness_cwd(),
+        &shell_quote(FAKE_TUI_BIN),
+    );
+    let agent = &fixture.panes[0];
+    register_agent_directly(server, agent, "tt-fake-tui");
+    server
+        .tmux(&["set-option", "-p", "-t", agent, "@tt-surface", "wide"])
+        .assert_success("record the agent pane's surface");
+    make_ragged(server, agent);
+    fixture
+}
+
+/// Rebalance `fixture` with the floor registry in json; assert exit 0, a retiled
+/// window, no registry warning, and the `below_floor` verdict.
+#[cfg(feature = "test-fixtures")]
+fn assert_rebalance_verdict(server: &IsolatedTmuxServer, fixture: &TiledFixture, below: bool) {
+    let config = rebalance_floor_config();
+    let ctx = format!("rebalance --format json (expected below_floor {below})");
+    let out = server.cli_env(
+        &["rebalance", "--target", &fixture.window, "--format", "json"],
+        config.xdg(),
+    );
+    let payload = json_payload(&out, &ctx);
+    assert!(
+        !out.stderr.contains("warning"),
+        "{ctx}: the fixture registry must load cleanly: {:?}",
+        out.stderr
+    );
+    assert_retiled(server, &fixture.window, &ctx);
+    assert_eq!(
+        json_below_floor(&payload, &ctx),
+        below,
+        "{ctx}: {}",
+        out.stdout
+    );
+}
+
+/// Acceptance: a marked, owned window holding a `tt-fake-tui` agent pane whose surface
+/// floor its tiled pane cannot meet is rebalanced with exit 0 and `below_floor: true`.
+#[cfg(feature = "test-fixtures")]
+#[test]
+fn rebalance_reports_below_floor_when_the_tiled_agent_pane_cannot_meet_its_surface_floor() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    let fixture = ragged_fake_tui_window(&server, 3);
+
+    assert_rebalance_verdict(&server, &fixture, true);
+    let (_, cols, _) = tmux_landing(&server, &fixture.panes[0]);
+    assert!(
+        cols < 140,
+        "four tiled panes must be narrower than 140: {cols}"
+    );
+}
+
+/// Acceptance: a roomy marked, owned window holding a `tt-fake-tui` agent pane whose
+/// surface floor its tiled pane meets is rebalanced with exit 0 and
+/// `below_floor: false`.
+#[cfg(feature = "test-fixtures")]
+#[test]
+fn rebalance_reports_not_below_floor_when_the_tiled_agent_pane_meets_its_surface_floor() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    let fixture = ragged_fake_tui_window(&server, 1);
+    let (_, ragged_cols, _) = tmux_landing(&server, &fixture.panes[0]);
+    assert!(
+        ragged_cols < 140,
+        "the ragged window must start below the floor: {ragged_cols}"
+    );
+
+    assert_rebalance_verdict(&server, &fixture, false);
 }

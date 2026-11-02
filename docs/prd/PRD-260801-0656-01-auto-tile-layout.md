@@ -4,8 +4,8 @@ scale: epic
 stakes: internal
 gate: passed 2026-08-01
 contexts: [tmux-tools]
-terms: [Tile, Floor, Effective floor, Ceiling, Advisory floor, Overflow window, Layout intent, Ownership, Exited-agent pane, Pane registration, Agent profile, Readiness]
-issues: [ISSUE-260801-1310-01, ISSUE-260801-1310-02, ISSUE-260802-0628-01, ISSUE-260801-1310-03, ISSUE-260801-1310-04, ISSUE-260802-0128-01, ISSUE-260801-1310-05, ISSUE-260801-1310-06, ISSUE-260801-1310-07, ISSUE-260802-0205-01]
+terms: [Surface, Tile, Floor, Effective floor, Ceiling, Advisory floor, Overflow window, Layout intent, Ownership, Exited-agent pane, Pane registration, Agent profile, Readiness]
+issues: [ISSUE-260801-1310-01, ISSUE-260801-1310-02, ISSUE-260802-0628-01, ISSUE-260801-1310-03, ISSUE-260801-1310-04, ISSUE-260801-1310-05, ISSUE-261102-0012-01, ISSUE-260802-0128-01, ISSUE-260801-1310-06, ISSUE-260801-1310-07, ISSUE-260802-0205-01]
 contract:
   schema: planning-contracts.record.v1
   clauses: []
@@ -177,52 +177,65 @@ tmux stretches the final row across the full width (at 3 panes on a 280-column w
 139×40, 140×40, 280×41). The contract this epic offers is "tmux's `tiled` arrangement," not
 "every pane identical."
 
-### Floor: per agent, in the registry
+### Floor: per surface, in the registry
 
-Each agent profile gains optional `min_cols` and `min_rows` beside its `ready_regex`/
-`ready_lines`.
+Each surface gains optional `min_cols` and `min_rows` beside its `ready_regex`/`ready_lines`
+(ADR-260919-0146-01). A floor is a rendering-dependent behavior: it is measured against one
+rendering's readiness rules and does not transfer to another rendering of the same agent. Surface
+floors merge by name and field like the surface's other fields. Agent-level `min_cols`/`min_rows`
+written in the pre-surface `agents.toml` shape bind to the agent's pre-surface rendering, as
+agent-level readiness fields already do.
 
-Resolution is componentwise and reads the **resolved** profile — the builtin deep-merged with the
-user's `agents.toml` — so a partially configured profile is well defined:
+A pane's surface is resolved from `@tt-agent` and `@tt-surface` exactly as readiness resolves it: a
+recorded surface resolves to that surface, and an absent record resolves to the agent's
+`pre_surface_rendering`, never to the promotable `default_surface`.
+
+Resolution is componentwise and reads the **resolved** surface — the builtin deep-merged with the
+user's `agents.toml` — so a partially configured surface is well defined:
 
 | pane | floor |
 |---|---|
-| `@tt-agent` set, resolved profile declares both | the declared pair |
-| `@tt-agent` set, resolved profile declares one | declared value for that axis, the global default for the other |
-| `@tt-agent` set, resolved profile declares neither | the default pair |
-| `@tt-agent` set, agent absent from the registry | the default pair |
+| `@tt-agent` set, resolved surface declares both | the declared pair |
+| `@tt-agent` set, resolved surface declares one | declared value for that axis, the global default for the other |
+| `@tt-agent` set, resolved surface declares neither | the default pair |
+| `@tt-agent` set, agent absent from the registry, or `@tt-surface` names a surface the registry no longer has | the default pair |
 | no `@tt-agent` (plain `launch`, or a foreign pane) | contributes no floor — nothing to protect |
 
-Because the table reads the resolved profile, a user who overrides **one** axis of a seeded builtin
-keeps the builtin's other axis: setting `min_cols = 50` for `codex` leaves its `min_rows` at the
-shipped 9, not at the global default of 16. The per-field deep merge already produces this; the
+Because the table reads the resolved surface, a user who overrides **one** axis of a seeded builtin
+surface keeps the builtin's other axis: setting `min_cols = 50` on `codex`'s `default` surface leaves
+its `min_rows` at the shipped 9, not at the global default of 16. The per-field deep merge already produces this; the
 alternative — filling the unset axis from the global default — would silently raise `codex`'s height
 floor from 9 to 16 because someone tuned its width. The global default applies only where the
-resolved profile declares nothing at all for that axis.
+resolved surface declares nothing at all for that axis.
 
 Contributing a floor and being measured against one are different things. A pane with no agent
 contributes nothing to its window's effective floor, but it still occupies geometry, so it still
 counts when the window is measured — it can push an agent pane below the floor even though it has
 none of its own.
 
-Measured values seed the shipped profiles — `codex` 58×9, `cursor` 36×9, `claude` 26×16, each
-one step above the cliff in the Problem Statement. The default for everything else is **58×16**,
+Measured values seed the shipped surfaces — `codex` `default` 58×9, `cursor` `default` 36×9,
+`claude` `rich` 26×16, each one step above the cliff in the Problem Statement. `claude` `flat` and
+every other surface are unseeded and take the default. The 2026-08-01 measurement did not record the
+agent versions it ran against; the registry documentation says so, and `validated_version` does not
+cover floors. The default for everything else is **58×16**,
 the componentwise maximum of those. That default is an explicit assumption, not a measurement of
 any particular agent: it is the most conservative thing we can assert for a TUI nobody has tested,
 and it is documented as such.
 
 A window's **effective floor** is the componentwise maximum over the floors of the panes actually
 in it. In a mixed window — an orchestrator beside driven `cursor` and `codex` panes — this
-collapses to the strictest agent present.
+collapses to the strictest surface present.
 
 These values are *derived from* the readiness rules: `codex` fails at 56 columns because its
 status line wraps, `claude` fails at 14 rows because `ready_lines = 0` scans a pane that no longer
-shows the sentinel. Note the coupling is real but not enforced — the shipped builtins carry
-`ready_regex: None`, and the measured rules live in user configuration, which deep-merges
-independently. Changing `ready_regex` or `ready_lines` for an agent therefore invalidates its
-measured floor, and the registry documentation says so. (The coupling is uneven across the shipped
-profiles: `cursor` and `agy` ship a `ready_regex` in the builtins — `cursor` ships `ready_lines = 4`
-too — while `codex` and `claude` ship none and take their measured rules from user configuration.)
+shows the sentinel. Note the coupling is real but not enforced — readiness rules live on surfaces
+(ADR-260919-0146-01), and user configuration deep-merges over them independently. Changing
+`ready_regex` or `ready_lines` on the surface a floor was measured against therefore invalidates that
+floor, and the registry documentation says so. (The coupling is uneven across the shipped surfaces:
+`codex`, `cursor` and `agy` ship a `ready_regex` on their single `default` surface — `codex` with
+`ready_lines = 2`, `cursor` with `ready_lines = 4` — while neither `claude` surface ships one;
+`claude`'s floor was measured against the opt-in status-line pattern a user declares on its `rich`
+surface.)
 
 There is no per-invocation floor override. A flag would let one caller admit panes below the floor
 an existing pane was placed under, in a window they share, with no record of which floor applied to
@@ -275,8 +288,8 @@ the act that grants permission to reshape it. A window that was not ours before 
 the pane and is left un-retiled.
 
 Registration (`@tt-agent`, `@tt-cwd`, `@tt-name`) happens immediately after the split and **before**
-the retile, so the new pane carries its identity when geometry is measured. The pane's agent is also
-passed into `place` as an input, so its floor is known without reading it back.
+the retile, so the new pane carries its identity when geometry is measured. The pane's agent and
+resolved surface are also passed into `place` as inputs, so its floor is known without reading it back.
 
 An earlier design justified a weaker predicate by capturing the prior layout string for restoration.
 That is dropped: tmux refuses to apply a saved layout to a window holding more panes than when it was
@@ -295,7 +308,7 @@ A window this tool tiles carries a `@tt-tiled` window option. Transitions are ex
   window, and it is not an overflow destination.
 
 The marker is a **record of what the tool did, not a precondition for doing it.** It gates teardown
-(`kill`) and overflow-destination eligibility; it never gates placement. Placement-time tiling is
+(`kill`), the `rebalance` verb, and overflow-destination eligibility; it never gates placement. Placement-time tiling is
 gated by ownership alone — as it must be, since the very first tiling placement into a window
 necessarily finds no marker and is what sets one. The consequence is deliberate: after a
 `--split v` clears the marker, a later flagless placement into that owned window tiles it again and
@@ -340,10 +353,16 @@ it targets, because that is how the window records that a human took manual cont
 
 `--split window` keeps its meaning but is **currently broken** from inside tmux: the launch path
 passes the calling *pane* id to `new-window -t`, which tmux rejects with `can't specify pane here`.
-Since this epic makes that flag a documented opt-out, fixing it is in scope.
+Since this epic makes that flag a documented opt-out, fixing it is in scope, for the calling pane and
+for `--target <pane> --split window` and `--session`/`--window` with `--split window` and no `--target`,
+which share the defect, as does the new-window path of `--session`/`--window` without `--target`. The
+window is created in the destination session (the calling pane's, the target pane's, or the scoped
+session) for every session name tmux allows, including its default numeric names.
 
 Two destinations are unaffected by the tile default because they create a fresh window rather than
-splitting: the outside-tmux path, and `--session`/`--window` without `--target`. Both produce a
+splitting: the outside-tmux path, and `--session`/`--window` without `--target`. An explicit
+`--split tile` with `--session`/`--window` and no `--target` splits into the scoped window, as an
+explicit `h|v` does, and that window is then retiled under the ownership gate. Both produce a
 single-pane window, which is already at its own floor; tiling applies from the second pane onward if
 the window later becomes a target.
 
@@ -373,6 +392,12 @@ set. Without that step the new window would be invisible to every later overflow
 Freed capacity in the caller's own window needs no preference rule: that window is the split target
 and is always tried first.
 
+A refused `join-pane` while the new pane still exists is a rejected trial: the search continues to
+the next candidate or the fresh-window fallback. A failed `break-pane` while the new pane still exists
+leaves the pane in the window it is in, retiles that window, and reports it with exit 0 and
+`below_floor: true`; `relocated` is `true` only when that window is not the origin. Whether the new pane
+still exists is checked on the server (`list-panes -a`), never by matching tmux error text.
+
 The destination is reported, not selected.
 
 Relocating the new pane restores a window that *this spawn* pushed below the floor. It does not repair
@@ -384,6 +409,9 @@ a window that was already below it — see Accepted limits.
 the row count dropped, justified by "nothing changes geometrically otherwise" — that premise is false,
 because going from six panes to five converts three equal rows into two equal rows plus a full-width
 straggler. Retiling can only enlarge surviving panes, so it cannot breach the floor.
+
+The retile reaches tmux in the same command sequence as the kill, so it completes even when the
+killed pane is the caller's own (`kill --force`) and the invoking process is hung up with it.
 
 Killing the window's **last** pane is not a retile case: tmux destroys the window with the pane, so
 there is no window left to rearrange and no survivors to reclaim anything.
@@ -413,8 +441,10 @@ them rather than have sibling verbs import from each other.
 
 Its public surface is `place`, which takes the target and the incoming pane's agent identity and
 performs the snapshot-split-register-retile-measure-move sequence, returning where the pane landed;
-`rebalance`, which retiles a window and returns its measured geometry; and `floor_violations`, which
-reports panes below a given effective floor. The tmux calls and the overflow trial stay inside.
+`rebalance`, which retiles a window and returns its measured geometry; `floor_violations`, which
+reports panes below a given effective floor; and the kill-time removal operation, which sends the pane
+removal and, when the window guard holds, the retile to tmux as one command sequence (§ Reclamation on
+kill). The tmux calls and the overflow trial stay inside.
 
 The **ownership predicate is public in the core crate**, not layout-internal. Both the layout module
 (core) and the destructive verbs' safety evaluator (binary) must answer "is this pane ours"
@@ -424,18 +454,18 @@ Restating it is the duplication this shared definition exists to remove.
 
 Placing a clap-derived enum in the core crate is precedented — the output-format enum already lives
 there and is used directly as a CLI argument type — so this introduces no new dependency and no new
-pattern. The repo has no ADR directory and no ADR practice to respect; this PRD is the record of the
-decision, and an ADR home can be seeded later if the repo grows one.
+pattern. This PRD is the record of the decision.
 
 ### Persistent shape
 
 The epic introduces no new store. It reuses the existing tmux pane user-options (`@tt-name`,
 `@tt-agent`, `@tt-access`, `@tt-launched-at`, `@tt-cwd`) as the ownership source of truth. Which of
-them a pane carries depends on how it was made: `spawn-agent` writes agent and access, `launch` writes
-neither. `@tt-name`, `@tt-launched-at`, and `@tt-cwd` are written by both paths — `@tt-cwd`
+them a pane carries depends on how it was made: `spawn-agent` writes agent, access, and the surface
+record (`@tt-surface` always, `@tt-surface-unvalidated` when caller arguments follow — ADR-260919-0146-01),
+`launch` writes none of these. `@tt-name`, `@tt-launched-at`, and `@tt-cwd` are written by both paths — `@tt-cwd`
 unconditionally, independent of `--name`, failing open when the cwd is unreadable, which mirrors
 `safety.rs`'s own fail-open. It adds one **window** option (`@tt-tiled`) and two optional per-agent
-fields to the existing registry file (`min_cols`, `min_rows`). No database, no new file, no new
+per-surface fields to the existing registry file (`min_cols`, `min_rows`). No database, no new file, no new
 dependency.
 
 `@tt-name` is written on **every** pane this tool creates, not only when `--name` is passed. Absent
@@ -455,7 +485,8 @@ created without `--name` all four change from refusing ("not created by tmux-too
 blast radius is bounded on three sides: the verbs are strictly single-target — the epic adds no sweep
 and none exists today; `@tt-cwd` is still written, so the cross-cwd guard is untouched; and `--any`
 remains the only way past either check for genuinely foreign panes. What becomes reachable is one
-explicitly targeted pane, in the caller's own cwd, that this tool created.
+resolved pane — named by `--target`, or picked implicitly within the session or window the caller
+scoped — in the caller's own cwd, that this tool created.
 
 `send-enter` is worth naming separately, because "the destructive verbs" is the natural shorthand
 for this set and it hides a verb that submits input rather than destroying a pane. Two facts settle
@@ -480,7 +511,16 @@ smallest pane dimensions measured in the destination **window**, `window_id` is 
 
 Every field describes the window, never the individual pane, so a window whose effective floor is
 empty — no agent panes in it at all — still reports its measured minima, with `below_floor: false`.
-One rule for all cases, no per-pane exception and nothing conditionally omitted.
+One rule for all cases, no per-pane exception and nothing conditionally omitted, with one exception:
+when the new pane no longer exists at any placement step after the split (registration, retile,
+marker, measurement, and each relocation step: `join-pane`, candidate retile and measurement,
+`break-pane`, fallback tile and marker, origin retile), `launch` and `spawn-agent` exit 0, print the
+pane id, leave out `window_id`, `min_pane_cols`, `min_pane_rows` and `below_floor` in `concise` and
+`json`, and print one warning line on stderr. `name` reports the name chosen for the pane (`--name`,
+else the derived name), even when registration did not write it. `relocated` stays in the output: it is
+`true` only when a `join-pane` or `break-pane` of the new pane succeeded before the pane was gone, else
+`false`. Any other failure at those steps fails the verb, except a refused `join-pane` or a failed
+`break-pane` while the new pane still exists (see Placement and overflow).
 
 The reported names are deliberately distinct from the registry's `min_cols`/`min_rows`. Those are the
 floor an agent *requires*; these are the geometry a window *has*. Reusing one pair of identifiers for a
@@ -510,6 +550,12 @@ directions — 63 lines present only in this repo's `SKILL.md`, 88 only in the i
 `/Users/Shared/Data/work/Programming/ai/claude/user/skills/tmux-tools/SKILL.md`, which is what agents
 load via `~/.claude/skills/tmux-tools/`. **Both** are updated; leaving the loaded copy stale would
 actively teach agents that the old default still holds.
+
+The installed copy lives in the separate claude-settings repository
+(`/Users/Shared/Data/work/Programming/ai/claude`), and `~/.claude/skills` is a symlink into its live
+working tree, so an edit there is live for every agent at once. Its edits are therefore a **release
+step**: they are committed on an `agent/auto-tile-layout` branch in that repository and merged only
+after the tiled binary is installed.
 
 ### Accepted limits
 
@@ -545,6 +591,11 @@ more than a handful of tmux calls. The hot-loop verbs the README's argument is a
 become a complaint, the measurement to make is `hyperfine` against those two verbs with and without the
 retile — not a cold-start benchmark, which would measure the wrong thing.
 
+Every retile that changes a pane's width rewraps that pane's history, so a `prompt` in flight on a
+sibling pane loses the position of its history mark. This is not prevented — retiling is never deferred
+for in-flight prompts — and is reported instead: `prompt` reports the result incomplete when the pane's
+width changed between mark and settle (PRD-260918-0323-01 § P7, `ISSUE-261102-0012-01`).
+
 Panes whose agent has exited are held open by the keep-alive wrapper and count toward geometry like any
 other pane. They are not reclaimed automatically: doing so would destroy the crash output the wrapper
 exists to preserve. Driver skills already end by killing their pane.
@@ -564,8 +615,11 @@ test independently checks.
 
 ### Sequencing: the isolated-server harness blocks the pane-creating slices
 
-Pane-creating tests move onto a private server started as `tmux -L tt-tests-<pid> -f /dev/null` at a fixed
-280×82. Both flags matter: `-L` gives an independent socket so the suite cannot touch the developer's
+Pane-creating tests move onto a private server started as `tmux -L tt-tests-<pid>-<n> -f /dev/null` at a
+fixed 280×82, one server per test. The harness extends the existing `IsolatedTmuxServer` fixture
+(`tests/integration.rs`) rather than adding a second one: it gains the fixed size and an inside-tmux mode
+in which the CLI runs with `TMUX` and `TMUX_PANE` pointed at the private server, beside its current
+outside-tmux mode. Both flags matter: `-L` gives an independent socket so the suite cannot touch the developer's
 session, and `-f /dev/null` prevents the developer's `~/.tmux.conf` from being loaded — a global
 `tiled-layout-max-columns` would otherwise change the grid and make "deterministic geometry" false. (The
 suite header today names a *session* `ttests-<pid>`; this is a *socket*, hence the distinct name.)
@@ -592,7 +646,9 @@ session.
 
 ### How to run the suite, and what a surviving failure means
 
-Every slice in this epic closes with `cargo test --workspace`, run against an isolated tmux server.
+Every slice in this epic closes with `cargo test --workspace --features test-fixtures`, run against an
+isolated tmux server. The `test-fixtures` feature compiles the fixture-backed integration tests
+(PRD-260918-0323-01); without it they are compiled out.
 Both halves are load-bearing and neither is stylistic.
 
 `--workspace`: the repo is a two-member workspace (`members = [".", "core"]`) and cargo tests only the
@@ -665,8 +721,7 @@ helpers. These test the tool's own logic; they make no claim about tmux.
 ### Prior art
 
 The suite's serialization guard, per-pid unique naming, and RAII cleanup guards are the model for the new
-tests; the existing test that hand-builds a `TMUX` triple is the direct precedent for the private-server
-harness.
+tests; `IsolatedTmuxServer` is the harness being extended.
 
 ### Explicitly not built
 
@@ -717,14 +772,14 @@ and pinning them here would only create a second place to keep them correct.
 | problem/success | decided | ## Problem Statement · ## Solution |
 | scope boundary | decided | ## Out of Scope · § Settled at triage |
 | domain terms | decided | CONTEXT.md — glossary seeded for this epic; `contexts:`/`terms:` populated |
-| architecture shape | decided | § Module shape — this PRD is the record; repo has no ADR practice |
+| architecture shape | decided | § Module shape — this PRD is the record |
 | stack | n/a | brownfield — existing Rust/clap/anyhow/serde conventions ratified, no new dependencies |
 | data/schema | decided | § Persistent shape · § Ownership · § Layout intent |
 | contracts/integrations | decided | § Flags · § Placement and overflow · § Documentation · ## Testing Decisions § tmux-behavior tests |
 | UX | decided | § Flags · § Reporting surface · ## Solution (default change stated) |
 | testing/seams | decided | ## Testing Decisions |
 | NFRs | decided | § Accepted limits — the README's sub-10ms figure is binary startup, which this epic does not touch; added round-trips land on the two least frequent verbs |
-| ops envelope | n/a | installed from source; no CI or release pipeline. The out-of-repo doc copy is an edit target, not a release step |
+| ops envelope | decided | installed from source; no CI. The installed skill copy is a release step: merged in the claude-settings repository only after the tiled binary is installed (§ Documentation) |
 
 ## Further Notes
 

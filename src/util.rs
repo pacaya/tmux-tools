@@ -1,6 +1,7 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
+use tmux_tools_core::agents::Registry;
 
 pub fn rfc3339_utc_now() -> Result<String> {
     let elapsed = SystemTime::now().duration_since(UNIX_EPOCH)?;
@@ -31,4 +32,24 @@ fn civil_from_days(days_since_epoch: i64) -> (i32, u32, u32) {
     let year = year_of_era + era * 400 + if month <= 2 { 1 } else { 0 };
 
     (year as i32, month as u32, day as u32)
+}
+
+/// Load the agent registry for a verb that only needs its floors (`launch`, `status`).
+///
+/// Per-entry load warnings go to stderr as `spawn-agent` prints them. A user
+/// `agents.toml` that exists but cannot be read or parsed does not fail the verb: one
+/// warning line goes to stderr and the built-in registry is used alone.
+pub fn load_registry_for_floors() -> Registry {
+    let (registry, warnings, failure) = Registry::load_or_builtin();
+    if let Some(failure) = failure {
+        eprintln!(
+            "warning: agent registry {}: {}; using built-in floors",
+            failure.path.display(),
+            failure.error
+        );
+    }
+    for warning in &warnings {
+        eprintln!("warning: agent {}: {}", warning.agent, warning.detail);
+    }
+    registry
 }

@@ -6,6 +6,7 @@ pub mod kill;
 pub mod launch;
 pub mod list;
 pub mod prompt;
+pub mod rebalance;
 pub mod safety;
 pub mod send;
 pub mod send_enter;

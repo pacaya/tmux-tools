@@ -1,6 +1,7 @@
 pub mod agents;
 pub mod format;
 pub mod idle;
+pub mod layout;
 pub mod names;
 pub mod stream;
 pub mod target;

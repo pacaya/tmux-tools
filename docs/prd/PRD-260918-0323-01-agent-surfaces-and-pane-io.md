@@ -228,8 +228,10 @@ stated; either may be degraded, including both at once.
 - **Turn observation.** Whether `busy_regex` was observed between submission and settle is reported
   as its own field. It says the agent took the turn; it makes no claim about where content begins.
 - **Completeness.** A result is incomplete when the pane cannot supply everything after the anchor.
-  Two conditions qualify, and either alone is enough: the pane has no scrollback per P4's live
-  check, or history has evicted lines. Eviction is read from the pane's `history_collected`
+  Three conditions qualify, and any one alone is enough: the pane has no scrollback per P4's live
+  check, history has evicted lines, or the pane's width changed between the mark and settle (a width
+  change rewraps history, so the row-counted mark no longer locates the submission point). Width is
+  read at the mark and again at settle. Eviction is read from the pane's `history_collected`
   counter when the running tmux provides it: the counter is read at the mark and again at settle,
   and any increase is eviction. When the counter is unavailable, the pane counts as evicted whenever
   `history_size >= history_limit - history_limit / 10`. tmux frees the oldest tenth of history in
@@ -294,6 +296,8 @@ Representative scenarios, each independently observable at the primary seam:
 - `prompt` reports incomplete both when the fixture is on the alternate screen and when history has
   evicted lines, including together; eviction is detected on the counter path and on the floor
   path.
+- `prompt` reports incomplete when the pane's width changes between the mark and settle, and reports
+  complete for the same exchange when the width is unchanged.
 - `launch` or `spawn-agent` into a session tmux-tools did not create leaves that session's
   `history-limit` unchanged.
 - `spawn-agent` with a malformed resume identifier fails without creating a pane.

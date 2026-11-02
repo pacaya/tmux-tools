@@ -1,0 +1,34 @@
+{
+  "approval_id": "dispatch-20261102T012209Z",
+  "approval_object": "approval.json",
+  "approval_sha256": "02e5041c8cbeb7acea5b687601e5d60d3a2059f8ec917ae60456ce27dbe39ebb",
+  "entries": [
+    {
+      "approved_revision": "270dc22aff4afb9f45fcc30ff922c6d5c2504745",
+      "bytes": 6160,
+      "object": "objects/8626ac461a186ffae845a5398ff09d9d653284aec881bb8c38d7d766ddc97b9f.md",
+      "origin": {
+        "path": "docs/issues/ISSUE-260801-1310-03-fix-split-window-inside-tmux.md",
+        "repository": "tmux-tools",
+        "revision": "0add0dba5d473cec537fdf06f91c8e5b63307831"
+      },
+      "role": "issue",
+      "sha256": "8626ac461a186ffae845a5398ff09d9d653284aec881bb8c38d7d766ddc97b9f",
+      "target": "tmux-tools:ISSUE-260801-1310-03"
+    },
+    {
+      "approved_revision": "0add0dba5d473cec537fdf06f91c8e5b63307831",
+      "bytes": 56674,
+      "object": "objects/3b8142ee6d316689b26ed647da69b05c0433fb31490b3891a990da6d8e03d31b.md",
+      "origin": {
+        "path": "docs/prd/PRD-260801-0656-01-auto-tile-layout.md",
+        "repository": "tmux-tools",
+        "revision": "0add0dba5d473cec537fdf06f91c8e5b63307831"
+      },
+      "role": "source",
+      "sha256": "3b8142ee6d316689b26ed647da69b05c0433fb31490b3891a990da6d8e03d31b",
+      "target": "tmux-tools:PRD-260801-0656-01"
+    }
+  ],
+  "schema": "planning-contracts.bundle.v1"
+}

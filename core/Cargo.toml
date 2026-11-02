@@ -1,6 +1,6 @@
 [package]
 name = "tmux-tools-core"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 
 [dependencies]
@@ -14,6 +14,9 @@ xxhash-rust = { version = "0.8", features = ["xxh3"] }
 toml = "0.8"
 dirs = "5"
 tokio = { version = "1", features = ["full"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 tokio-test = "0.4"

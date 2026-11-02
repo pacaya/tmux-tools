@@ -1,0 +1,27 @@
+{
+  "approval_id": "dispatch-20261102T085229Z",
+  "impact_disposition": {
+    "checked_revisions": [
+      {
+        "revision": "c77abecb4d24599e9d42ead4348e3f876c13bb94",
+        "sha256": "0dcee5b6f122a46cbd5365c5a1592383fa0a1d21af25d085319b0a7367f711a6",
+        "target": "tmux-tools:PRD-260801-0656-01"
+      }
+    ],
+    "status": "accepted"
+  },
+  "issue": {
+    "revision": "561728f866abd0572c75141228295b39f53df7cb",
+    "sha256": "ceb8769b341f0da5373f75613ed2109e81ec9b9b208426a0061870c97c244f93",
+    "target": "tmux-tools:ISSUE-261102-0329-01"
+  },
+  "resolution_mode": "canonical",
+  "schema": "planning-contracts.revision.v2",
+  "sources": [
+    {
+      "revision": "c77abecb4d24599e9d42ead4348e3f876c13bb94",
+      "sha256": "0dcee5b6f122a46cbd5365c5a1592383fa0a1d21af25d085319b0a7367f711a6",
+      "target": "tmux-tools:PRD-260801-0656-01"
+    }
+  ]
+}

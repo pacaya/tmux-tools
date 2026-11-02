@@ -1,0 +1,34 @@
+{
+  "approval_id": "dispatch-20261102T101725Z",
+  "approval_object": "approval.json",
+  "approval_sha256": "482d527f42acbfee60739156810378775443644830631bec89cccab02c7776eb",
+  "entries": [
+    {
+      "approved_revision": "9561f614bd4479ce1918de2ed376e825e4d8e511",
+      "bytes": 5770,
+      "object": "objects/843fde82a1e47de5014aad2e4dfaab849e18df0a70911103a846207b3dfff3d4.md",
+      "origin": {
+        "path": "docs/issues/ISSUE-260801-1310-06-kill-time-reclamation.md",
+        "repository": "tmux-tools",
+        "revision": "7cf54c42e192fa734ea6772fc3fe95661bbdc057"
+      },
+      "role": "issue",
+      "sha256": "843fde82a1e47de5014aad2e4dfaab849e18df0a70911103a846207b3dfff3d4",
+      "target": "tmux-tools:ISSUE-260801-1310-06"
+    },
+    {
+      "approved_revision": "7cf54c42e192fa734ea6772fc3fe95661bbdc057",
+      "bytes": 58060,
+      "object": "objects/6245f1af652dccd090184f3ce45cd3d141991c91e36b8e0170c5b99466ab5a0a.md",
+      "origin": {
+        "path": "docs/prd/PRD-260801-0656-01-auto-tile-layout.md",
+        "repository": "tmux-tools",
+        "revision": "7cf54c42e192fa734ea6772fc3fe95661bbdc057"
+      },
+      "role": "source",
+      "sha256": "6245f1af652dccd090184f3ce45cd3d141991c91e36b8e0170c5b99466ab5a0a",
+      "target": "tmux-tools:PRD-260801-0656-01"
+    }
+  ],
+  "schema": "planning-contracts.bundle.v1"
+}

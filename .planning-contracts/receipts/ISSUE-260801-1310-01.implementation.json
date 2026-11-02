@@ -1,0 +1,17 @@
+{
+  "issue": {
+    "revision": "b4d70cd8ba9004c16962ef02978dd2b75322d642",
+    "sha256": "2b037e7b21b1a4185ff0141f74f6482b7095b4d0b613d33b710aeb20402837ac",
+    "target": "tmux-tools:ISSUE-260801-1310-01"
+  },
+  "receipt_id": "receipt-20261102T0141Z",
+  "resolution_mode": "canonical",
+  "schema": "planning-contracts.implementation-receipt.v2",
+  "sources": [
+    {
+      "revision": "03e4116e1f0fcc008be6c5dcecb3f8acc2cbb12f",
+      "sha256": "3b8142ee6d316689b26ed647da69b05c0433fb31490b3891a990da6d8e03d31b",
+      "target": "tmux-tools:PRD-260801-0656-01"
+    }
+  ]
+}

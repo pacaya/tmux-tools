@@ -1,0 +1,34 @@
+{
+  "approval_id": "dispatch-20261102T070315Z",
+  "approval_object": "approval.json",
+  "approval_sha256": "190d11eab98b6a075f8e9956ad01f9a0e228b93ffe7ad48072c593f57f87511b",
+  "entries": [
+    {
+      "approved_revision": "b98a82c03d044950e06bc6ba1f492ca19a5b3667",
+      "bytes": 13088,
+      "object": "objects/040458c002875544c061cfc1e3ea224751d3e1e4c268ee475f156cbc2d7af41f.md",
+      "origin": {
+        "path": "docs/issues/ISSUE-260802-0128-01-tile-default-and-layout-intent.md",
+        "repository": "tmux-tools",
+        "revision": "b27cb06beadf6112a8b8cd11439848e04ab23134"
+      },
+      "role": "issue",
+      "sha256": "040458c002875544c061cfc1e3ea224751d3e1e4c268ee475f156cbc2d7af41f",
+      "target": "tmux-tools:ISSUE-260802-0128-01"
+    },
+    {
+      "approved_revision": "b27cb06beadf6112a8b8cd11439848e04ab23134",
+      "bytes": 56674,
+      "object": "objects/3b8142ee6d316689b26ed647da69b05c0433fb31490b3891a990da6d8e03d31b.md",
+      "origin": {
+        "path": "docs/prd/PRD-260801-0656-01-auto-tile-layout.md",
+        "repository": "tmux-tools",
+        "revision": "b27cb06beadf6112a8b8cd11439848e04ab23134"
+      },
+      "role": "source",
+      "sha256": "3b8142ee6d316689b26ed647da69b05c0433fb31490b3891a990da6d8e03d31b",
+      "target": "tmux-tools:PRD-260801-0656-01"
+    }
+  ],
+  "schema": "planning-contracts.bundle.v1"
+}

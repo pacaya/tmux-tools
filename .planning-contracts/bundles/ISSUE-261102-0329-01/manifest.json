@@ -1,0 +1,34 @@
+{
+  "approval_id": "dispatch-20261102T085229Z",
+  "approval_object": "approval.json",
+  "approval_sha256": "e9b0d55dca7cf6cebc183db737415714cf707f8401c21eba2b4159e93cbd7257",
+  "entries": [
+    {
+      "approved_revision": "561728f866abd0572c75141228295b39f53df7cb",
+      "bytes": 4793,
+      "object": "objects/ceb8769b341f0da5373f75613ed2109e81ec9b9b208426a0061870c97c244f93.md",
+      "origin": {
+        "path": "docs/issues/ISSUE-261102-0329-01-launch-pane-gone-before-measure.md",
+        "repository": "tmux-tools",
+        "revision": "c77abecb4d24599e9d42ead4348e3f876c13bb94"
+      },
+      "role": "issue",
+      "sha256": "ceb8769b341f0da5373f75613ed2109e81ec9b9b208426a0061870c97c244f93",
+      "target": "tmux-tools:ISSUE-261102-0329-01"
+    },
+    {
+      "approved_revision": "c77abecb4d24599e9d42ead4348e3f876c13bb94",
+      "bytes": 57172,
+      "object": "objects/0dcee5b6f122a46cbd5365c5a1592383fa0a1d21af25d085319b0a7367f711a6.md",
+      "origin": {
+        "path": "docs/prd/PRD-260801-0656-01-auto-tile-layout.md",
+        "repository": "tmux-tools",
+        "revision": "c77abecb4d24599e9d42ead4348e3f876c13bb94"
+      },
+      "role": "source",
+      "sha256": "0dcee5b6f122a46cbd5365c5a1592383fa0a1d21af25d085319b0a7367f711a6",
+      "target": "tmux-tools:PRD-260801-0656-01"
+    }
+  ],
+  "schema": "planning-contracts.bundle.v1"
+}

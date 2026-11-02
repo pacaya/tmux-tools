@@ -7,9 +7,9 @@ mod util;
 
 use crate::cmd::{
     capture::CaptureArgs, escape::EscapeArgs, execute::ExecuteArgs, interrupt::InterruptArgs,
-    kill::KillArgs, launch::LaunchArgs, list::ListArgs, prompt::PromptArgs, send::SendArgs,
-    send_enter::SendEnterArgs, spawn_agent::SpawnAgentArgs, status::StatusArgs,
-    wait_idle::WaitIdleArgs,
+    kill::KillArgs, launch::LaunchArgs, list::ListArgs, prompt::PromptArgs,
+    rebalance::RebalanceArgs, send::SendArgs, send_enter::SendEnterArgs,
+    spawn_agent::SpawnAgentArgs, status::StatusArgs, wait_idle::WaitIdleArgs,
 };
 
 #[derive(Debug, Parser)]
@@ -39,6 +39,7 @@ enum Commands {
     Escape(EscapeArgs),
     List(ListArgs),
     Status(StatusArgs),
+    Rebalance(RebalanceArgs),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -105,6 +106,7 @@ fn main() -> Result<()> {
         Commands::Escape(args) => crate::cmd::escape::run(&args)?,
         Commands::List(args) => crate::cmd::list::run(&args)?,
         Commands::Status(args) => crate::cmd::status::run(&args)?,
+        Commands::Rebalance(args) => crate::cmd::rebalance::run(&args)?,
     }
 
     Ok(())
