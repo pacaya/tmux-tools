@@ -1,0 +1,21 @@
+{
+  "approval_id": "dispatch-20261102T131159Z",
+  "approval_object": "approval.json",
+  "approval_sha256": "fcebf3e8f5ad8e521b670b741fbcea0e72bedb25d8ca19adf2a8687bb9983b5d",
+  "entries": [
+    {
+      "approved_revision": "dec2667f3e6eb73dd6ece519d605cb8d59bf9f0d",
+      "bytes": 2239,
+      "object": "objects/997b1d0e4fbab0931a4d9bdeb48a353a09c4dc9776b54e4810405ee0703a08d6.md",
+      "origin": {
+        "path": "docs/issues/ISSUE-261102-0802-01-agents-temp-file-path-collision.md",
+        "repository": "tmux-tools",
+        "revision": "5c96e6cba835d982b79d221552dd9e506367487a"
+      },
+      "role": "issue",
+      "sha256": "997b1d0e4fbab0931a4d9bdeb48a353a09c4dc9776b54e4810405ee0703a08d6",
+      "target": "tmux-tools:ISSUE-261102-0802-01"
+    }
+  ],
+  "schema": "planning-contracts.bundle.v1"
+}
