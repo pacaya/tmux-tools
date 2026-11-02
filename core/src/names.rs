@@ -64,6 +64,25 @@ pub struct Registered {
     pub surface_unvalidated: bool,
 }
 
+/// The single ownership rule: is this pane ours?
+///
+/// A pane is owned when `@tt-name` or `@tt-agent` is set and, when both the
+/// recorded `@tt-cwd` and `current_cwd` are known, they match. An absent cwd on
+/// either side passes (fail-open for panes registered before `@tt-cwd`, and
+/// for callers that cannot read their own cwd). No other registration field
+/// affects the answer.
+///
+/// Every "is this pane ours" decision goes through here — the destructive
+/// verbs' safety evaluator and pane layout alike.
+pub fn pane_is_owned(registered: &Registered, current_cwd: Option<&str>) -> bool {
+    let registered_by_us = registered.name.is_some() || registered.agent.is_some();
+    let cwd_matches = match (registered.cwd.as_deref(), current_cwd) {
+        (Some(recorded), Some(current)) => recorded == current,
+        _ => true,
+    };
+    registered_by_us && cwd_matches
+}
+
 pub fn get(pane_id: &str, key: &str) -> Result<Option<String>> {
     let format = format!("#{{{key}}}");
     let args = ["display", "-p", "-t", pane_id, format.as_str()];
@@ -233,5 +252,53 @@ mod tests {
     fn parse_handles_empty_output() {
         let matches = parse_panes_with_name("", "anything");
         assert!(matches.is_empty());
+    }
+
+    fn registration(name: Option<&str>, agent: Option<&str>, cwd: Option<&str>) -> Registered {
+        Registered {
+            name: name.map(str::to_owned),
+            agent: agent.map(str::to_owned),
+            access: None,
+            launched_at: None,
+            cwd: cwd.map(str::to_owned),
+            surface: None,
+            surface_unvalidated: false,
+        }
+    }
+
+    #[test]
+    fn pane_is_owned_via_agent_alone_without_recorded_cwd() {
+        let reg = registration(None, Some("codex"), None);
+        assert!(pane_is_owned(&reg, Some("/work")));
+    }
+
+    #[test]
+    fn pane_is_owned_via_name_alone_without_recorded_cwd() {
+        let reg = registration(Some("shell"), None, None);
+        assert!(pane_is_owned(&reg, Some("/work")));
+    }
+
+    #[test]
+    fn pane_is_owned_when_recorded_cwd_matches_current() {
+        let reg = registration(Some("shell"), None, Some("/work"));
+        assert!(pane_is_owned(&reg, Some("/work")));
+    }
+
+    #[test]
+    fn pane_is_owned_when_current_cwd_unknown() {
+        let reg = registration(Some("shell"), None, Some("/work"));
+        assert!(pane_is_owned(&reg, None));
+    }
+
+    #[test]
+    fn pane_is_not_owned_without_name_or_agent_even_when_cwd_matches() {
+        let reg = registration(None, None, Some("/work"));
+        assert!(!pane_is_owned(&reg, Some("/work")));
+    }
+
+    #[test]
+    fn pane_is_not_owned_when_recorded_cwd_differs_from_current() {
+        let reg = registration(Some("shell"), None, Some("/other"));
+        assert!(!pane_is_owned(&reg, Some("/work")));
     }
 }

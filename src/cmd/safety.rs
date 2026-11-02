@@ -6,10 +6,11 @@
 //!    pane (`$TMUX_PANE`), the verb refuses unless `--force` is passed. This
 //!    prevents accidental self-kill / self-interrupt of the user's own pane.
 //!
-//! 2. **Ownership + cwd guard.** Destructive verbs only act on panes
-//!    created by tmux-tools (those with `@tt-name` or `@tt-agent` set) and,
-//!    when `@tt-cwd` is recorded, only on panes whose recorded cwd matches
-//!    the current cwd. `--any` overrides both checks.
+//! 2. **Ownership + cwd guard.** Destructive verbs only act on panes the
+//!    core predicate [`names::pane_is_owned`] reports as owned: created by
+//!    tmux-tools (`@tt-name` or `@tt-agent` set) and, when `@tt-cwd` is
+//!    recorded, with a recorded cwd matching the current cwd. `--any`
+//!    overrides both checks.
 //!
 //! Both flags default to off and are independent: `--force` lets you act on
 //! the calling pane; `--any` lets you act on cross-cwd or non-owned panes.
@@ -53,27 +54,26 @@ pub fn evaluate(input: &SafetyInput<'_>) -> Verdict {
         }
     }
 
-    // Ownership check (must have @tt-name or @tt-agent).
-    let owned = input.registered.name.is_some() || input.registered.agent.is_some();
-    if !owned && !input.any {
+    // Both remaining checks are the core ownership predicate; it is asked
+    // twice only to pick the denial message. With no current cwd it answers
+    // from the registration alone ("created by tmux-tools"); with the real
+    // cwd it is the full ownership answer.
+    let created_by_tmux_tools = names::pane_is_owned(input.registered, None);
+    if !created_by_tmux_tools && !input.any {
         return Verdict::Deny(format!(
             "refusing to {} pane {} not created by tmux-tools (no @tt-name or @tt-agent set); pass --any to override",
             input.verb, input.target_pane
         ));
     }
 
-    // Cwd-scope check (only when @tt-cwd was recorded).
-    if owned {
-        if let (Some(pane_cwd), Some(current)) =
-            (input.registered.cwd.as_deref(), input.current_cwd)
-        {
-            if pane_cwd != current && !input.any {
-                return Verdict::Deny(format!(
-                    "refusing to {} pane {} owned by another cwd ({}); pass --any to override",
-                    input.verb, input.target_pane, pane_cwd
-                ));
-            }
-        }
+    // Cwd-scope check: created by tmux-tools, but under another cwd.
+    let owned = names::pane_is_owned(input.registered, input.current_cwd);
+    if created_by_tmux_tools && !owned && !input.any {
+        let recorded_cwd = input.registered.cwd.as_deref().unwrap_or_default();
+        return Verdict::Deny(format!(
+            "refusing to {} pane {} owned by another cwd ({}); pass --any to override",
+            input.verb, input.target_pane, recorded_cwd
+        ));
     }
 
     Verdict::Allow

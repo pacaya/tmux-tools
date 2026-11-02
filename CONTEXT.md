@@ -77,6 +77,6 @@ the whole glossary.
 
 ## Ownership
 
-**Ownership** [service] — the predicate deciding whether a pane is this tool's: `@tt-name` or `@tt-agent` present, and where both the pane's `@tt-cwd` and the current working directory are known, they match; absence on either side passes. The rule is stable; what changes is the evidence it reads — once every created pane registers a name ([[Pane registration]]), the first clause holds for all of them, including a `launch` with no flags, which today it does not. _Avoid_: managed, ours, created-by. ↔ src/cmd/safety.rs (inline in the safety evaluator today; moving to a shared public predicate in core, with the evaluator delegating to it — *planned, PRD-260801-0656-01 · ISSUE-260801-1310-02*)
+**Ownership** [service] — the predicate deciding whether a pane is this tool's: `@tt-name` or `@tt-agent` present, and where both the pane's `@tt-cwd` and the current working directory are known, they match; absence on either side passes. The rule is stable; what changes is the evidence it reads — once every created pane registers a name ([[Pane registration]]), the first clause holds for all of them, including a `launch` with no flags, which today it does not. _Avoid_: managed, ours, created-by. ↔ core/src/names.rs `pane_is_owned` (public in core; the safety evaluator in src/cmd/safety.rs delegates to it — PRD-260801-0656-01 · ISSUE-260801-1310-02)
 
 **@tt-cwd** [VO] — the working directory of the invocation that *created* a pane — run identity, not where the agent works. _Avoid_: agent cwd, working directory. ↔ core/src/names.rs
