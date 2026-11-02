@@ -1,0 +1,34 @@
+{
+  "approval_id": "dispatch-20261102T113955Z",
+  "approval_object": "approval.json",
+  "approval_sha256": "e4ec724d1625f491dc0734853c93865d0c78f1d01e9e3f81aacc3ee481d0f4d4",
+  "entries": [
+    {
+      "approved_revision": "948df8d38e10b10b53a51368cb88979a9c847b67",
+      "bytes": 7971,
+      "object": "objects/57c6c27e6c55daf69857c08e0c0b90571d79560d36cb2bfa8a20c0a2ff090c43.md",
+      "origin": {
+        "path": "docs/issues/ISSUE-260802-0205-01-rebalance-verb.md",
+        "repository": "tmux-tools",
+        "revision": "a2bdbe22905feb7a03d037cd48001596eda50e07"
+      },
+      "role": "issue",
+      "sha256": "57c6c27e6c55daf69857c08e0c0b90571d79560d36cb2bfa8a20c0a2ff090c43",
+      "target": "tmux-tools:ISSUE-260802-0205-01"
+    },
+    {
+      "approved_revision": "a2bdbe22905feb7a03d037cd48001596eda50e07",
+      "bytes": 58060,
+      "object": "objects/6245f1af652dccd090184f3ce45cd3d141991c91e36b8e0170c5b99466ab5a0a.md",
+      "origin": {
+        "path": "docs/prd/PRD-260801-0656-01-auto-tile-layout.md",
+        "repository": "tmux-tools",
+        "revision": "a2bdbe22905feb7a03d037cd48001596eda50e07"
+      },
+      "role": "source",
+      "sha256": "6245f1af652dccd090184f3ce45cd3d141991c91e36b8e0170c5b99466ab5a0a",
+      "target": "tmux-tools:PRD-260801-0656-01"
+    }
+  ],
+  "schema": "planning-contracts.bundle.v1"
+}
