@@ -1,0 +1,21 @@
+{
+  "approval_id": "dispatch-20261102T072848Z",
+  "approval_object": "approval.json",
+  "approval_sha256": "2873c3bda8a0f370d94977026efa9e81d805271c8a2f2ae4a2c7c5f58a206737",
+  "entries": [
+    {
+      "approved_revision": "b058a5be0298b65421bf86042d0c42989b9de6d3",
+      "bytes": 2493,
+      "object": "objects/6627df68e880a862b1e0b8501496375bb0abfb06d280a59fe72cf055c0403f6a.md",
+      "origin": {
+        "path": "docs/issues/ISSUE-261102-0157-01-floors-status-raw-test-window-rename.md",
+        "repository": "tmux-tools",
+        "revision": "0452c6c4afb5f86a1fd1d9528df6ac92f3d2939a"
+      },
+      "role": "issue",
+      "sha256": "6627df68e880a862b1e0b8501496375bb0abfb06d280a59fe72cf055c0403f6a",
+      "target": "tmux-tools:ISSUE-261102-0157-01"
+    }
+  ],
+  "schema": "planning-contracts.bundle.v1"
+}
