@@ -2,7 +2,7 @@
 id: ISSUE-260802-0628-01
 kind: issue
 category: enhancement
-status: needs-triage
+status: ready-for-agent
 brief_contract: agent-brief.v3
 context: tmux-tools
 summary: every pane this tool creates registers @tt-name, auto-derived from the command when --name is absent
