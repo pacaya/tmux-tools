@@ -2,7 +2,7 @@
 id: ISSUE-260801-1310-03
 kind: issue
 category: bug
-status: needs-triage
+status: ready-for-agent
 brief_contract: agent-brief.v3
 context: tmux-tools
 summary: new-window placements must land in the caller's, the target's, or the scoped session for every session name, including numeric ones
