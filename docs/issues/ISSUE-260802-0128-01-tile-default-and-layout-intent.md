@@ -2,7 +2,7 @@
 id: ISSUE-260802-0128-01
 kind: issue
 category: enhancement
-status: needs-triage
+status: ready-for-agent
 brief_contract: agent-brief.v3
 context: tmux-tools
 summary: Make tile the default placement inside tmux — ownership-gated retile, the @tt-tiled layout-intent marker, sizing opt-outs, and the documentation change
@@ -54,6 +54,7 @@ contract:
 - **Retile and in-flight prompts.** A retile is never deferred or suppressed for a `prompt` in flight on a pane in the window. ISSUE-261102-0012-01 owns the incomplete report for that case.
 - **Layout module.** `place` gains the retile stage. The layout module gains a `rebalance` operation that retiles a window and returns its measured geometry.
 - **Output.** Every placement, tiled or opted out, prints `window_id`, `min_pane_cols`, and `min_pane_rows` in `concise` and `json`, measured after the retile. `raw` output is unchanged: the pane id only.
+- **Existing tests.** An existing test whose setup needs the flagless 70% split into an owned window switches that placement to the explicit opt-out `--split h --size 70` and keeps the verdict it asserts now.
 - **Help text.** `launch --help` and `spawn-agent --help` list `tile` among the `--split` values. They no longer say that a horizontal split is the implicit default inside tmux.
 - **Documentation.** README.md, the repo SKILL.md, and the installed copy at `/Users/Shared/Data/work/Programming/ai/claude/user/skills/tmux-tools/SKILL.md` state plainly that the default changed. They describe the tiled default, the first-pane rule, the sizing opt-outs (`--split h`, `--split v`, `--size N` alone, and `--split window`), and the rejection of `--split tile --size N`. The repo SKILL.md and the installed copy also state that `launch`, `spawn-agent` and `status` report `below_floor` for the window, and that floors are set per surface (`min_cols`/`min_rows`) in `agents.toml`. The doc comment on the flags-to-layout resolution (in `src/` or `core/src/` after ISSUE-260801-1310-04) states the tiled default.
 
