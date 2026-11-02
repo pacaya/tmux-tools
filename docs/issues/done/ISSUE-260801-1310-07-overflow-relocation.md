@@ -2,7 +2,7 @@
 id: ISSUE-260801-1310-07
 kind: issue
 category: enhancement
-status: ready-for-agent
+status: done
 brief_contract: agent-brief.v3
 context: tmux-tools
 summary: Relocate a pane to another window when placing it would push its origin below the effective floor

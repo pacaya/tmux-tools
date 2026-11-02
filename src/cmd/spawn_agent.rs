@@ -10,7 +10,7 @@ use tmux_tools_core::{
 
 use crate::{
     cmd::launch::{
-        concise_window_fields, destination, invoking_cwd, warn_if_unmeasured, wrap_keep_open,
+        concise_landing_fields, destination, invoking_cwd, warn_if_unmeasured, wrap_keep_open,
         WindowJson,
     },
     util::rfc3339_utc_now,
@@ -62,6 +62,7 @@ struct SpawnAgentJson<'a> {
     binary: &'a str,
     argv: &'a [String],
     launched_at: &'a str,
+    relocated: bool,
     #[serde(flatten)]
     window: Option<WindowJson<'a>>,
 }
@@ -182,7 +183,7 @@ fn render_output(
             surface,
             landing.name,
             landing.pane_id,
-            concise_window_fields(landing)
+            concise_landing_fields(landing)
         ),
         Format::Json => {
             let output = SpawnAgentJson {
@@ -194,6 +195,7 @@ fn render_output(
                 binary,
                 argv,
                 launched_at,
+                relocated: landing.relocated,
                 window: WindowJson::of(landing),
             };
             println!("{}", serde_json::to_string(&output)?);

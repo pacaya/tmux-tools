@@ -38,6 +38,7 @@ struct LaunchJson<'a> {
     name: &'a str,
     pane_id: &'a str,
     launched_at: &'a str,
+    relocated: bool,
     #[serde(flatten)]
     window: Option<WindowJson<'a>>,
 }
@@ -63,10 +64,11 @@ impl<'a> WindowJson<'a> {
     }
 }
 
-/// The landing window's fields of the spawning verbs' concise line, each preceded by
-/// a space; empty when the pane was gone before its window was measured.
-pub(crate) fn concise_window_fields(landing: &Landing) -> String {
-    landing
+/// The landing's fields of the spawning verbs' concise line, each preceded by a space:
+/// `relocated`, then the landing window's fields, which are left out when the pane was
+/// gone before its window was measured.
+pub(crate) fn concise_landing_fields(landing: &Landing) -> String {
+    let window = landing
         .window
         .as_ref()
         .map(|window| {
@@ -75,7 +77,8 @@ pub(crate) fn concise_window_fields(landing: &Landing) -> String {
                 window.window_id, window.min_pane_cols, window.min_pane_rows, window.below_floor
             )
         })
-        .unwrap_or_default()
+        .unwrap_or_default();
+    format!(" relocated={}{window}", landing.relocated)
 }
 
 /// Warn on stderr, once, when the pane was gone before its window was measured.
@@ -166,7 +169,7 @@ fn render_output(args: &LaunchArgs, landing: &Landing, launched_at: &str) -> Res
             "name={} pane={}{}",
             landing.name,
             landing.pane_id,
-            concise_window_fields(landing)
+            concise_landing_fields(landing)
         ),
         Format::Raw => println!("{}", landing.pane_id),
         Format::Json => {
@@ -174,6 +177,7 @@ fn render_output(args: &LaunchArgs, landing: &Landing, launched_at: &str) -> Res
                 name: &landing.name,
                 pane_id: &landing.pane_id,
                 launched_at,
+                relocated: landing.relocated,
                 window: WindowJson::of(landing),
             };
             println!("{}", serde_json::to_string(&output)?);

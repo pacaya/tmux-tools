@@ -4,10 +4,12 @@
 //! pane goes, snapshots the ownership of the window it will split, creates it (split
 //! or new window), writes its whole registration, retiles the window when the
 //! snapshot made it eligible (or clears [`TILED_MARKER`] for explicit sizing), and
-//! then measures the window it landed in, returning a [`Landing`]. When the new pane
-//! no longer exists at one of those steps after the split, placement stops there and
-//! the [`Landing`] carries no window. The verbs build the command and the
-//! registration; they never create a pane themselves.
+//! then measures the window it landed in. When that tiled window is below its
+//! effective floor, the new pane is relocated by trial (see [`place`]). It returns a
+//! [`Landing`]: the window the pane finally landed in. When the new pane no longer
+//! exists at one of those steps after the split, placement stops there and the
+//! [`Landing`] carries no window. The verbs build the command and the registration;
+//! they never create a pane themselves.
 //! [`rebalance`] retiles a window and returns its measured geometry.
 //!
 //! It owns the window guard and kill-time reclamation: [`window_guard`] answers
@@ -20,7 +22,8 @@
 //! and the agent registry, [`effective_floor`] combines a window's, and
 //! [`floor_violations`] / [`below_floor`] give the verdict. Those are pure over measured
 //! geometry; [`place`] and [`inspect`] measure and apply them. The floor is advisory:
-//! nothing here relocates or refuses a pane.
+//! only the pane a tiled placement creates is relocated; nothing here refuses a pane
+//! or repairs a window that is already below its floor.
 
 use anyhow::{anyhow, Context, Result};
 use std::env;
@@ -199,10 +202,15 @@ pub struct Landing {
     /// The `@tt-name` chosen for the pane: the `--name` value, else the derived name.
     /// It is the name written, unless the pane was gone before registration wrote it.
     pub name: String,
-    /// The window the pane landed in, measured, with its floor verdict. `None` when
-    /// the pane no longer existed at a placement step after the split (registration,
-    /// retile, marker or measurement), so the window was not measured.
+    /// The window the pane finally landed in, measured, with its floor verdict. `None`
+    /// when the pane no longer existed at a placement step after the split
+    /// (registration, retile, marker, measurement, or a relocation step), so the window
+    /// was not measured.
     pub window: Option<WindowReport>,
+    /// Whether a floor breach moved the pane out of the window it was split into: a
+    /// `join-pane` or `break-pane` of it succeeded (and, with a window, it landed in a
+    /// window other than that one).
+    pub relocated: bool,
 }
 
 /// A window's measured geometry and floor verdict, as [`inspect`] reports it.
@@ -356,12 +364,19 @@ fn apply_new_pane_registration(
 ///
 /// A pane created in a new window gets no layout step: the window holds only it.
 ///
+/// When the window was retiled ([`Layout::Tile`] into an eligible window) and the
+/// measurement shows it below its effective floor, the new pane is relocated within
+/// the session of that window (the origin); see [`relocate`]. Every other placement —
+/// explicit sizing, a window not owned before the split, a new window — stays where it
+/// was created, whatever its verdict.
+///
 /// The pane's name is chosen before anything is written on it. When a tmux call at a
-/// step after the split (registration, retile, marker, measurement) exits non-zero
-/// and the new pane no longer exists on the server, the remaining steps are skipped
-/// and the [`Landing`] carries that name and no window. Every other failure at those
-/// steps — the pane still exists, the call could not run, or its output cannot be
-/// parsed — is an error.
+/// step after the split (registration, retile, marker, measurement, or a relocation
+/// step) exits non-zero and the new pane no longer exists on the server, the
+/// remaining steps are skipped and the [`Landing`] carries that name and no window.
+/// Every other failure at those steps — the pane still exists, the call could not run,
+/// or its output cannot be parsed — is an error, except the refused `join-pane` and the
+/// failed `break-pane` that [`relocate`] tolerates.
 pub fn place(
     command: &str,
     destination: &Destination<'_>,
@@ -417,11 +432,222 @@ pub fn place(
         geometry.report(registry)
     });
 
+    // Only a placement that tiled its window is relocated: explicit sizing and a window
+    // that was not owned before the split keep the pane (`tile` is false for both).
+    let (window, relocated) = match window {
+        Some(report) if tile && report.below_floor => {
+            let relocation = relocate(&pane_id, &report.window_id, registration, registry)?;
+            (relocation.window, relocation.relocated)
+        }
+        window => (window, false),
+    };
+
     Ok(Landing {
         pane_id,
         name,
         window,
+        relocated,
     })
+}
+
+/// Where [`relocate`] left the new pane.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct Relocation {
+    /// The window the pane finally landed in, measured; `None` when the pane was gone.
+    window: Option<WindowReport>,
+    /// Whether a `join-pane` or `break-pane` of the pane succeeded.
+    relocated: bool,
+}
+
+/// Move the new pane `pane_id` out of `origin`, the window it was split into and that
+/// it pushed below its effective floor, and retile `origin` after it leaves.
+///
+/// Candidates are the other windows of the origin's session that pass the window guard
+/// ([`overflow_candidates`]), judged before any pane is joined, in ascending window
+/// index. Each is tried: `join-pane -d` the pane into it, retile it, and measure it
+/// against its effective floor including the new pane. The first that is not below its
+/// floor keeps the pane. One that is moves the pane on and is retiled again once the
+/// pane has left it. A refused `join-pane` while the pane still exists is a rejected
+/// trial: nothing moved, and the search goes on.
+///
+/// When no candidate keeps the pane, `break-pane -d` moves it into a new window of the
+/// origin's session, which is tiled and marked [`TILED_MARKER`]. A failed `break-pane`
+/// while the pane still exists leaves it where it is (the origin, or the last rejected
+/// candidate); that window is retiled and reported.
+///
+/// No step selects a window. Pane options travel with the pane, so nothing is
+/// re-registered. When a step fails and the pane is gone, the remaining steps are
+/// skipped and the relocation carries no window; any other failure is an error.
+fn relocate(
+    pane_id: &str,
+    origin: &str,
+    registration: &Registration<'_>,
+    registry: &Registry,
+) -> Result<Relocation> {
+    let gone = |relocated| {
+        Ok(Relocation {
+            window: None,
+            relocated,
+        })
+    };
+    // Measure the window the pane is in now; no window when the pane is gone.
+    let landed = |relocated| -> Result<Relocation> {
+        Ok(Relocation {
+            window: landing_report(pane_id, registration.agent.as_ref(), registry)?,
+            relocated,
+        })
+    };
+
+    let Some(session) = unless_pane_gone(pane_id, session_of(pane_id))? else {
+        return gone(false);
+    };
+    let windows = session_windows(&session)?;
+    let candidates = overflow_candidates(&windows, origin, registration.cwd);
+
+    // Whether a move succeeded, and the window the pane is in.
+    let mut moved = false;
+    let mut current = origin.to_owned();
+    for candidate in candidates {
+        match move_step(pane_id, join_pane(pane_id, candidate))? {
+            MoveStep::Moved => {}
+            MoveStep::PaneGone => return gone(moved),
+            MoveStep::Refused => continue,
+        }
+        moved = true;
+        let left = std::mem::replace(&mut current, candidate.to_owned());
+        if unless_pane_gone(pane_id, retile(pane_id))?.is_none()
+            || unless_pane_gone(pane_id, retile(&left))?.is_none()
+        {
+            return gone(moved);
+        }
+        let trial = landed(moved)?;
+        match &trial.window {
+            Some(report) if report.below_floor => {}
+            _ => return Ok(trial),
+        }
+    }
+
+    match move_step(pane_id, break_pane(pane_id, &session))? {
+        MoveStep::Moved => {
+            moved = true;
+            if unless_pane_gone(pane_id, retile(pane_id))?.is_none()
+                || unless_pane_gone(pane_id, set_tiled_marker(pane_id))?.is_none()
+                || unless_pane_gone(pane_id, retile(&current))?.is_none()
+            {
+                return gone(moved);
+            }
+        }
+        MoveStep::PaneGone => return gone(moved),
+        MoveStep::Refused => {
+            if unless_pane_gone(pane_id, retile(pane_id))?.is_none() {
+                return gone(moved);
+            }
+        }
+    }
+    landed(moved)
+}
+
+/// Measure the window `pane_id` (the new pane) is in and give its floor verdict, with
+/// the new pane's floor taken from `agent`. `None` when the pane is gone.
+fn landing_report(
+    pane_id: &str,
+    agent: Option<&AgentRegistration<'_>>,
+    registry: &Registry,
+) -> Result<Option<WindowReport>> {
+    let Some(output) = unless_pane_gone(pane_id, read_measurement(pane_id))? else {
+        return Ok(None);
+    };
+    let mut geometry = parse_measurement(pane_id, &output)?;
+    apply_new_pane_registration(&mut geometry.panes, pane_id, agent);
+    Ok(Some(geometry.report(registry)))
+}
+
+/// The outcome of a `join-pane` or `break-pane` of the new pane.
+enum MoveStep {
+    Moved,
+    /// The call exited non-zero and the pane is no longer on the server.
+    PaneGone,
+    /// The call exited non-zero and the pane still exists: it did not move.
+    Refused,
+}
+
+/// Classify a move of `pane_id` as [`unless_pane_gone`] classifies a step, except that
+/// a failed call while the pane still exists is [`MoveStep::Refused`] rather than an
+/// error. A failure that is not a tmux exit, or whose pane existence cannot be read,
+/// is the move's own error.
+fn move_step(pane_id: &str, step: Result<()>) -> Result<MoveStep> {
+    match step {
+        Ok(()) => Ok(MoveStep::Moved),
+        Err(error) if error.downcast_ref::<tmux::CommandFailed>().is_some() => {
+            match pane_exists(pane_id) {
+                Ok(true) => Ok(MoveStep::Refused),
+                Ok(false) => Ok(MoveStep::PaneGone),
+                Err(_) => Err(error),
+            }
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// The `#{session_id}` of the session `target` is in.
+fn session_of(target: &str) -> Result<String> {
+    let session = tmux::run_checked(&["display-message", "-p", "-t", target, "#{session_id}"])
+        .with_context(|| format!("cannot read the session of {target}"))?
+        .trim()
+        .to_owned();
+    if session.is_empty() {
+        return Err(anyhow!("tmux reported no session id for {target}"));
+    }
+    Ok(session)
+}
+
+/// What the window guard reads about every window of `session` (a session id), each by
+/// [`read_window_state`].
+fn session_windows(session: &str) -> Result<Vec<WindowState>> {
+    let output = tmux::run_checked(&["list-windows", "-t", session, "-F", "#{window_id}"])
+        .with_context(|| format!("cannot list the windows of session {session}"))?;
+    output
+        .lines()
+        .map(str::trim)
+        .filter(|window_id| !window_id.is_empty())
+        .map(read_window_state)
+        .collect()
+}
+
+/// The overflow candidates among `windows` (one session's): every window other than
+/// `origin` on which the window guard holds against `current_cwd` — it carries
+/// [`TILED_MARKER`] and holds a pane this invocation owns — in ascending window index.
+fn overflow_candidates<'a>(
+    windows: &'a [WindowState],
+    origin: &str,
+    current_cwd: Option<&str>,
+) -> Vec<&'a str> {
+    let mut candidates: Vec<&WindowState> = windows
+        .iter()
+        .filter(|window| window.window_id != origin && window.guard(current_cwd).holds())
+        .collect();
+    candidates.sort_by_key(|window| window.index);
+    candidates
+        .into_iter()
+        .map(|window| window.window_id.as_str())
+        .collect()
+}
+
+/// `join-pane -d` `pane_id` into `window_id`, splitting its active pane; the window is
+/// not selected.
+fn join_pane(pane_id: &str, window_id: &str) -> Result<()> {
+    tmux::run_checked(&["join-pane", "-d", "-s", pane_id, "-t", window_id])
+        .with_context(|| format!("cannot join pane {pane_id} into window {window_id}"))?;
+    Ok(())
+}
+
+/// `break-pane -d` `pane_id` into a new window of `session` (a session id); the window
+/// is not selected.
+fn break_pane(pane_id: &str, session: &str) -> Result<()> {
+    let destination = format!("{session}:");
+    tmux::run_checked(&["break-pane", "-d", "-s", pane_id, "-t", &destination])
+        .with_context(|| format!("cannot break pane {pane_id} into a new window of {session}"))?;
+    Ok(())
 }
 
 /// The placement steps after the split: write the registration on `pane_id`, apply
@@ -598,6 +824,8 @@ fn removal_args(pane_id: &str, window_id: &str, retile: bool) -> Vec<String> {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct WindowState {
     window_id: String,
+    /// The window's index in its session, the order of the overflow search.
+    index: u32,
     /// Whether the window carries [`TILED_MARKER`].
     marked: bool,
     /// The registration of every pane in the window, as the ownership predicate reads it.
@@ -628,23 +856,39 @@ fn guard_verdict(
     }
 }
 
-/// Read the window that `target` is in: its id, then its marker and its panes'
-/// registrations by that id.
+/// Read the window that `target` is in: its id and index, then its marker and its
+/// panes' registrations by that id.
 fn read_window_state(target: &str) -> Result<WindowState> {
-    let window_id = tmux::run_checked(&["display-message", "-p", "-t", target, "#{window_id}"])
-        .with_context(|| format!("cannot read the window of {target}"))?
-        .trim()
-        .to_owned();
-    if window_id.is_empty() {
-        return Err(anyhow!("tmux reported no window id for {target}"));
-    }
+    let format = format!("#{{window_id}}{FIELD_SEP}#{{window_index}}");
+    let output = tmux::run_checked(&["display-message", "-p", "-t", target, &format])
+        .with_context(|| format!("cannot read the window of {target}"))?;
+    let (window_id, index) = parse_window_identity(&output)
+        .with_context(|| format!("cannot read the window of {target}"))?;
     let marked = tiled_marker_present(&window_id)?;
     let panes = read_ownership_snapshot(&window_id)?;
     Ok(WindowState {
         window_id,
+        index,
         marked,
         panes,
     })
+}
+
+/// Parse a window's id and index, separated by [`FIELD_SEP`].
+fn parse_window_identity(output: &str) -> Result<(String, u32)> {
+    let line = output.trim_end_matches(['\r', '\n']);
+    let Some((window_id, index)) = line.split_once(FIELD_SEP) else {
+        return Err(anyhow!("unexpected tmux window line {line:?}"));
+    };
+    let window_id = window_id.trim();
+    if window_id.is_empty() {
+        return Err(anyhow!("tmux reported no window id in {line:?}"));
+    }
+    let index = index
+        .trim()
+        .parse()
+        .map_err(|_| anyhow!("unexpected window index {index:?}"))?;
+    Ok((window_id.to_owned(), index))
 }
 
 /// Whether the window that `target` is in carries [`TILED_MARKER`] itself (a global
@@ -1315,6 +1559,85 @@ mod tests {
         // No recorded cwd, or no current cwd: the predicate passes on registration.
         assert!(guard_verdict(true, &[registered(Some("old"), None)], Some("/work")).holds());
         assert!(guard_verdict(true, &[registered(Some("x"), Some("/other"))], None).holds());
+    }
+
+    // -- Overflow candidates (ISSUE-260801-1310-07) -----------------------------------
+
+    fn window(id: &str, index: u32, marked: bool, panes: Vec<names::Registered>) -> WindowState {
+        WindowState {
+            window_id: id.to_owned(),
+            index,
+            marked,
+            panes,
+        }
+    }
+
+    fn owned() -> names::Registered {
+        registered(Some("ours"), Some("/work"))
+    }
+
+    #[test]
+    fn overflow_candidates_exclude_unmarked_unowned_and_origin_windows() {
+        let windows = [
+            // The origin, marked and owned: never its own destination.
+            window("@1", 1, true, vec![owned()]),
+            // Unmarked, though owned.
+            window("@2", 2, false, vec![owned()]),
+            // Marked, but its only panes are unregistered or from another cwd.
+            window(
+                "@3",
+                3,
+                true,
+                vec![
+                    registered(None, None),
+                    registered(Some("x"), Some("/other")),
+                ],
+            ),
+            // Marked and owned: the one candidate.
+            window("@4", 4, true, vec![registered(None, None), owned()]),
+        ];
+        assert_eq!(overflow_candidates(&windows, "@1", Some("/work")), ["@4"]);
+    }
+
+    #[test]
+    fn overflow_candidates_are_in_ascending_window_index() {
+        // Listed out of index order, with ids whose order differs from the indexes.
+        let windows = [
+            window("@7", 5, true, vec![owned()]),
+            window("@2", 0, true, vec![owned()]),
+            window("@9", 9, true, vec![owned()]),
+            window("@3", 2, true, vec![owned()]),
+            window("@1", 1, false, vec![owned()]),
+        ];
+        assert_eq!(
+            overflow_candidates(&windows, "@3", Some("/work")),
+            ["@2", "@7", "@9"]
+        );
+    }
+
+    #[test]
+    fn overflow_candidates_judge_ownership_as_the_window_guard_does() {
+        // No recorded cwd passes, as the ownership predicate fails open.
+        let windows = [
+            window("@1", 1, true, vec![registered(Some("old"), None)]),
+            window("@2", 2, true, vec![registered(Some("x"), Some("/other"))]),
+        ];
+        assert_eq!(overflow_candidates(&windows, "@0", Some("/work")), ["@1"]);
+        // An unreadable current cwd passes every registered pane.
+        assert_eq!(overflow_candidates(&windows, "@0", None), ["@1", "@2"]);
+        assert!(overflow_candidates(&[], "@0", Some("/work")).is_empty());
+    }
+
+    #[test]
+    fn window_identity_parses_id_and_index() {
+        let sep = FIELD_SEP.to_string();
+        assert_eq!(
+            parse_window_identity(&format!("@4{sep}12\n")).unwrap(),
+            ("@4".to_owned(), 12)
+        );
+        assert!(parse_window_identity("@4\n").is_err());
+        assert!(parse_window_identity(&format!("{sep}1\n")).is_err());
+        assert!(parse_window_identity(&format!("@4{sep}x\n")).is_err());
     }
 
     #[test]

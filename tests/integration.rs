@@ -10973,3 +10973,907 @@ fn core_window_guard_reports_which_guard_failed() {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// ISSUE-260801-1310-07 — overflow relocation: a tiled placement that leaves its window
+// below the effective floor moves the new pane to an eligible marked window of the
+// target window's session that has room, or to a fresh marked window there, retiles
+// the origin, keeps focus, and reports `relocated` and the final window.
+//
+// Every scenario runs `tt-fake-tui` as a registry agent whose floor is 140x21, so on
+// the 280x82 server a tiled window holds two of its panes (280x41 over 280x40) and a
+// third breaches (139 columns); a 70% horizontal split of a full-width pane (83
+// columns) and a vertical split of a 41-row pane (20 rows) breach as well. These cases
+// carry no "tmux not on PATH" skip: when the behavior or tmux is absent they fail.
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "test-fixtures")]
+mod overflow_relocation {
+    use super::*;
+
+    /// The agent every overflow scenario spawns (and registers on agent fixture panes).
+    const AGENT: &str = "tt-fake-tui";
+
+    /// The floor's width: a third tiled pane on the 280-column server is 139 wide.
+    const MIN_COLS: u64 = 140;
+
+    /// The registry: `tt-fake-tui` with an agent-level floor of 140x21, which binds to
+    /// its one surface.
+    fn floor_config() -> AgentsConfig {
+        let config = AgentsConfig::new();
+        config.write_agents_toml(&format!(
+            r#"
+[tt-fake-tui]
+binary = "{fake}"
+min_cols = 140
+min_rows = 21
+
+[tt-fake-tui.access.default]
+args = []
+"#,
+            fake = FAKE_TUI_BIN
+        ));
+        config
+    }
+
+    /// How an overflow fixture pane is registered.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum Pane {
+        /// `@tt-name` and `@tt-cwd` (the harness cwd): owned, no floor.
+        Owned,
+        /// [`Pane::Owned`] plus `@tt-agent tt-fake-tui`: owned, with the 140x21 floor.
+        OwnedAgent,
+        /// No registration: not owned.
+        Unregistered,
+    }
+
+    /// A fixture window: its id and its panes in pane order.
+    struct Window {
+        id: String,
+        panes: Vec<String>,
+    }
+
+    /// A marked, owned window of two agent panes: full, so one more tiled pane breaches.
+    const FULL: [Pane; 2] = [Pane::OwnedAgent, Pane::OwnedAgent];
+    /// A marked, owned window of one agent pane: room for one more.
+    const ROOMY: [Pane; 1] = [Pane::OwnedAgent];
+
+    /// A new detached 280x82 session `name` whose first window is a fixture window
+    /// (see [`fill_window`]).
+    fn session_with_window(
+        server: &IsolatedTmuxServer,
+        name: &str,
+        layout: &[Pane],
+        marked: bool,
+    ) -> Window {
+        let out = server.tmux(&[
+            "new-session",
+            "-d",
+            "-s",
+            name,
+            "-x",
+            SERVER_WIDTH,
+            "-y",
+            SERVER_HEIGHT,
+            "-P",
+            "-F",
+            "#{pane_id}",
+            "sleep",
+            "600",
+        ]);
+        out.assert_success(&format!("fixture: create session {name}"));
+        fill_window(server, out.stdout.trim(), layout, marked)
+    }
+
+    /// A new detached fixture window at the next index of session `name`.
+    fn add_window(
+        server: &IsolatedTmuxServer,
+        name: &str,
+        layout: &[Pane],
+        marked: bool,
+    ) -> Window {
+        let target = format!("={name}:");
+        let out = server.tmux(&[
+            "new-window",
+            "-d",
+            "-t",
+            &target,
+            "-P",
+            "-F",
+            "#{pane_id}",
+            "sleep",
+            "600",
+        ]);
+        out.assert_success(&format!("fixture: add a window to {name}"));
+        fill_window(server, out.stdout.trim(), layout, marked)
+    }
+
+    /// Split the window of `first` into one pane per `layout` entry in tmux's tiled
+    /// arrangement, register each as `layout` says, and mark it `@tt-tiled` when
+    /// `marked`.
+    fn fill_window(
+        server: &IsolatedTmuxServer,
+        first: &str,
+        layout: &[Pane],
+        marked: bool,
+    ) -> Window {
+        let id = window_of(server, first);
+        assert_eq!(
+            (
+                tmux_format(server, &id, "#{window_width}"),
+                tmux_format(server, &id, "#{window_height}")
+            ),
+            (SERVER_WIDTH.to_owned(), SERVER_HEIGHT.to_owned()),
+            "fixture: the window must be 280x82"
+        );
+        for _ in 1..layout.len() {
+            server
+                .tmux(&["split-window", "-d", "-t", &id, "sleep", "600"])
+                .assert_success("fixture: split the window");
+            server
+                .tmux(&["select-layout", "-t", &id, "tiled"])
+                .assert_success("fixture: tile the window");
+        }
+        let panes: Vec<String> = window_rects(server, &id)
+            .into_iter()
+            .map(|rect| rect.0)
+            .collect();
+        assert_eq!(panes.len(), layout.len(), "fixture: pane count");
+        for (pane, kind) in panes.iter().zip(layout) {
+            register(server, pane, *kind);
+        }
+        if marked {
+            server
+                .tmux(&["set-option", "-w", "-t", &id, TILED_MARKER, "1"])
+                .assert_success("fixture: mark the window tiled");
+        }
+        Window { id, panes }
+    }
+
+    fn register(server: &IsolatedTmuxServer, pane: &str, kind: Pane) {
+        if kind == Pane::Unregistered {
+            return;
+        }
+        let name = format!("ovf-{}", pane.trim_start_matches('%'));
+        register_name_and_cwd(server, pane, &name, &harness_cwd());
+        if kind == Pane::OwnedAgent {
+            register_agent_directly(server, pane, AGENT);
+        }
+    }
+
+    /// Which spawning verb places the pane.
+    #[derive(Clone, Copy, Debug)]
+    enum Verb {
+        Launch,
+        SpawnAgent,
+    }
+
+    /// Place a pane with `verb` from the harness pane, `--target <target>` and `extra`,
+    /// in `format`, with the floor registry.
+    fn place(
+        server: &IsolatedTmuxServer,
+        config: &AgentsConfig,
+        verb: Verb,
+        target: &str,
+        format: &str,
+        extra: &[&str],
+    ) -> CmdOutput {
+        let mut args = match verb {
+            Verb::Launch => vec!["launch", "--cmd", "sleep 600"],
+            Verb::SpawnAgent => vec!["spawn-agent", AGENT, "--bare"],
+        };
+        args.extend(["--target", target, "--format", format]);
+        args.extend_from_slice(extra);
+        server.cli_env(&args, config.xdg())
+    }
+
+    /// What a spawning verb reported.
+    #[derive(Debug)]
+    struct Reported {
+        pane: String,
+        relocated: Option<bool>,
+        window_id: Option<String>,
+        min_pane_cols: Option<u64>,
+        min_pane_rows: Option<u64>,
+        below_floor: Option<bool>,
+    }
+
+    fn reported_from_payload(payload: &serde_json::Value) -> Reported {
+        Reported {
+            pane: payload["pane_id"]
+                .as_str()
+                .expect("JSON must carry pane_id")
+                .to_owned(),
+            relocated: payload.get("relocated").and_then(|v| v.as_bool()),
+            window_id: payload
+                .get("window_id")
+                .and_then(|v| v.as_str())
+                .map(str::to_owned),
+            min_pane_cols: payload.get("min_pane_cols").and_then(|v| v.as_u64()),
+            min_pane_rows: payload.get("min_pane_rows").and_then(|v| v.as_u64()),
+            below_floor: payload.get("below_floor").and_then(|v| v.as_bool()),
+        }
+    }
+
+    /// What a successful spawning verb reported in `json` or `concise`.
+    fn reported(out: &CmdOutput, format: &str, ctx: &str) -> Reported {
+        out.assert_success(ctx);
+        match format {
+            "json" => reported_from_payload(&json_payload(out, ctx)),
+            "concise" => Reported {
+                pane: concise_field(out, "pane")
+                    .unwrap_or_else(|| panic!("{ctx}: concise must carry pane=: {}", out.stdout)),
+                relocated: concise_field(out, "relocated").map(|v| v == "true"),
+                window_id: concise_field(out, "window_id"),
+                min_pane_cols: concise_field(out, "min_pane_cols").map(|v| v.parse().unwrap()),
+                min_pane_rows: concise_field(out, "min_pane_rows").map(|v| v.parse().unwrap()),
+                below_floor: concise_field(out, "below_floor").map(|v| v == "true"),
+            },
+            other => panic!("unexpected format {other}"),
+        }
+    }
+
+    /// Assert the placement moved its pane out of `origin`: `relocated` is true, and
+    /// the reported `window_id` is the pane's window as tmux reports it, not `origin`.
+    /// Returns the reported window id.
+    fn assert_relocated_from(
+        server: &IsolatedTmuxServer,
+        reported: &Reported,
+        origin: &str,
+        ctx: &str,
+    ) -> String {
+        assert_eq!(
+            reported.relocated,
+            Some(true),
+            "{ctx}: relocated must be true: {reported:?}"
+        );
+        let window = reported
+            .window_id
+            .clone()
+            .unwrap_or_else(|| panic!("{ctx}: window_id must be reported: {reported:?}"));
+        assert_ne!(window, origin, "{ctx}: the pane must leave the origin");
+        assert_eq!(
+            window_of(server, &reported.pane),
+            window,
+            "{ctx}: window_id must be the window the pane is in"
+        );
+        window
+    }
+
+    /// Assert a placement stayed in `target` below its floor: `relocated` false,
+    /// `below_floor` true, and the target's `window_id`.
+    fn assert_stayed_below_floor(
+        server: &IsolatedTmuxServer,
+        reported: &Reported,
+        target: &Window,
+        ctx: &str,
+    ) {
+        assert_eq!(reported.relocated, Some(false), "{ctx}: {reported:?}");
+        assert_eq!(reported.below_floor, Some(true), "{ctx}: {reported:?}");
+        assert_eq!(
+            reported.window_id.as_deref(),
+            Some(target.id.as_str()),
+            "{ctx}: window_id must be the target's"
+        );
+        assert_eq!(
+            window_of(server, &reported.pane),
+            target.id,
+            "{ctx}: the pane must stay in the target"
+        );
+    }
+
+    /// Assert `window`'s `#{window_layout}` equals what `select-layout tiled` of its
+    /// panes produces.
+    fn assert_layout_tiled(server: &IsolatedTmuxServer, window: &str, ctx: &str) {
+        let placed = tmux_format(server, window, "#{window_layout}");
+        server
+            .tmux(&["select-layout", "-t", window, "tiled"])
+            .assert_success("explicit select-layout tiled");
+        assert_eq!(
+            tmux_format(server, window, "#{window_layout}"),
+            placed,
+            "{ctx}: window {window} must be in tmux's tiled layout"
+        );
+    }
+
+    fn window_ids(server: &IsolatedTmuxServer, session: &str) -> Vec<String> {
+        let target = format!("={session}");
+        let out = server.tmux(&["list-windows", "-t", &target, "-F", "#{window_id}"]);
+        out.assert_success(&format!("list windows of {session}"));
+        out.stdout.lines().map(str::to_owned).collect()
+    }
+
+    fn pane_count(server: &IsolatedTmuxServer, window: &str) -> usize {
+        window_rects(server, window).len()
+    }
+
+    /// The session's current window: `display -p -t =<session>: '#{window_id}'` (the
+    /// `:` makes the target the session; without it tmux prints nothing here).
+    fn current_window(server: &IsolatedTmuxServer, session: &str) -> String {
+        let window = tmux_format(server, &format!("={session}:"), "#{window_id}");
+        assert!(
+            window.starts_with('@'),
+            "session {session} must report its current window: {window:?}"
+        );
+        window
+    }
+
+    /// `spawn-agent --target <target> --format json` through the fake `tmux` in
+    /// `config`'s directory.
+    fn spawn_through_wrapper(
+        server: &IsolatedTmuxServer,
+        config: &AgentsConfig,
+        target: &str,
+    ) -> CmdOutput {
+        server.cli_env_path(
+            &[
+                "spawn-agent",
+                AGENT,
+                "--bare",
+                "--target",
+                target,
+                "--format",
+                "json",
+            ],
+            config.xdg(),
+            config.xdg(),
+        )
+    }
+
+    /// Acceptance: a breaching placement into an owned `@tt-tiled` window with no other
+    /// window in its session moves the new pane to a different window and retiles the
+    /// origin's surviving panes.
+    #[test]
+    fn breaching_spawn_agent_with_no_other_window_moves_out_and_retiles_the_origin() {
+        let _serial = serial_guard();
+        let server = IsolatedTmuxServer::start_inside();
+        let config = floor_config();
+        let origin = session_with_window(&server, "ovf-alone", &FULL, true);
+        assert_eq!(
+            window_ids(&server, "ovf-alone"),
+            std::slice::from_ref(&origin.id)
+        );
+
+        let out = place(
+            &server,
+            &config,
+            Verb::SpawnAgent,
+            &origin.panes[0],
+            "json",
+            &[],
+        );
+        let reported = reported(&out, "json", "spawn-agent into a full window");
+
+        assert_relocated_from(&server, &reported, &origin.id, "no other window");
+        assert_eq!(
+            pane_count(&server, &origin.id),
+            2,
+            "the origin keeps its survivors"
+        );
+        assert_layout_tiled(&server, &origin.id, "the origin after the move");
+    }
+
+    /// Acceptance: a breaching placement joins the session's eligible marked window
+    /// with room, and the session gains no window.
+    #[test]
+    fn breaching_spawn_agent_joins_an_eligible_window_with_room() {
+        let _serial = serial_guard();
+        let server = IsolatedTmuxServer::start_inside();
+        let config = floor_config();
+        let origin = session_with_window(&server, "ovf-join", &FULL, true);
+        let roomy = add_window(&server, "ovf-join", &ROOMY, true);
+        let before = window_ids(&server, "ovf-join");
+
+        let out = place(
+            &server,
+            &config,
+            Verb::SpawnAgent,
+            &origin.panes[0],
+            "json",
+            &[],
+        );
+        let reported = reported(&out, "json", "spawn-agent with a roomy candidate");
+
+        let window = assert_relocated_from(&server, &reported, &origin.id, "roomy candidate");
+        assert_eq!(window, roomy.id, "the pane must join the eligible window");
+        assert_eq!(
+            window_ids(&server, "ovf-join"),
+            before,
+            "the session must gain no window"
+        );
+    }
+
+    /// Acceptance: candidates are tried in ascending index; the lowest breaches with
+    /// one more pane, so the pane moves on to the middle one, and the rejected one is
+    /// restored to its layout.
+    #[test]
+    fn breaching_spawn_agent_tries_candidates_in_index_order_and_restores_a_rejected_one() {
+        let _serial = serial_guard();
+        let server = IsolatedTmuxServer::start_inside();
+        let config = floor_config();
+        let origin = session_with_window(&server, "ovf-order", &FULL, true);
+        let lowest = add_window(&server, "ovf-order", &FULL, true);
+        let middle = add_window(&server, "ovf-order", &ROOMY, true);
+        let highest = add_window(&server, "ovf-order", &ROOMY, true);
+        let lowest_layout = tmux_format(&server, &lowest.id, "#{window_layout}");
+
+        let out = place(
+            &server,
+            &config,
+            Verb::SpawnAgent,
+            &origin.panes[0],
+            "json",
+            &[],
+        );
+        let reported = reported(&out, "json", "spawn-agent with three candidates");
+
+        let window = assert_relocated_from(&server, &reported, &origin.id, "three candidates");
+        assert_eq!(
+            window, middle.id,
+            "the pane must land in the middle candidate"
+        );
+        assert_eq!(
+            tmux_format(&server, &lowest.id, "#{window_layout}"),
+            lowest_layout,
+            "the rejected candidate must be retiled back to its layout"
+        );
+        assert_eq!(
+            pane_count(&server, &highest.id),
+            1,
+            "the highest candidate is not needed"
+        );
+    }
+
+    /// Acceptance: with no candidate that has room, the pane lands in a fresh window of
+    /// the session, which carries `@tt-tiled`.
+    #[test]
+    fn breaching_spawn_agent_without_room_breaks_into_a_fresh_marked_window() {
+        let _serial = serial_guard();
+        let server = IsolatedTmuxServer::start_inside();
+        let config = floor_config();
+        let origin = session_with_window(&server, "ovf-fresh", &FULL, true);
+        let full = add_window(&server, "ovf-fresh", &FULL, true);
+        let before = window_ids(&server, "ovf-fresh");
+
+        let out = place(
+            &server,
+            &config,
+            Verb::SpawnAgent,
+            &origin.panes[0],
+            "json",
+            &[],
+        );
+        let reported = reported(&out, "json", "spawn-agent without room");
+
+        let window = assert_relocated_from(&server, &reported, &origin.id, "no room");
+        assert!(
+            !before.contains(&window),
+            "the pane must land in a window that did not exist: {window} in {before:?}"
+        );
+        let marker = server.tmux(&["show-options", "-w", "-t", &window, TILED_MARKER]);
+        marker.assert_success("show-options -w @tt-tiled");
+        assert!(
+            !marker.stdout.trim().is_empty(),
+            "the fresh window must carry @tt-tiled"
+        );
+        assert_eq!(
+            pane_count(&server, &full.id),
+            2,
+            "the full candidate keeps its panes"
+        );
+    }
+
+    /// One relocating `spawn-agent --format json`, into a fresh session's full origin
+    /// (its current window): with a roomy candidate when `join`, with none otherwise.
+    /// Returns the session name, the origin, the candidate, the payload and the
+    /// session's current window before the placement.
+    fn relocating_spawn(
+        server: &IsolatedTmuxServer,
+        config: &AgentsConfig,
+        join: bool,
+    ) -> (String, Window, Option<Window>, serde_json::Value, String) {
+        let session = if join {
+            "ovf-move-join"
+        } else {
+            "ovf-move-break"
+        };
+        let origin = session_with_window(server, session, &FULL, true);
+        let roomy = join.then(|| add_window(server, session, &ROOMY, true));
+        server
+            .tmux(&["select-window", "-t", &origin.id])
+            .assert_success("make the origin the session's current window");
+        let current = current_window(server, session);
+        let out = place(
+            server,
+            config,
+            Verb::SpawnAgent,
+            &origin.panes[0],
+            "json",
+            &[],
+        );
+        let payload = json_payload(&out, &format!("relocating spawn-agent (join: {join})"));
+        (session.to_owned(), origin, roomy, payload, current)
+    }
+
+    fn move_name(join: bool) -> &'static str {
+        if join {
+            "join-pane"
+        } else {
+            "break-pane"
+        }
+    }
+
+    /// Acceptance: a move by `join-pane` and one by `break-pane` each report
+    /// `relocated: true` and a window other than the target's, leave the session's
+    /// current window as it was, and keep the pane's registration.
+    #[test]
+    fn relocation_keeps_focus_and_the_moved_panes_registration() {
+        let _serial = serial_guard();
+        let server = IsolatedTmuxServer::start_inside();
+        let config = floor_config();
+        for join in [true, false] {
+            let ctx = format!("relocation by {}", move_name(join));
+            let (session, origin, roomy, payload, current) =
+                relocating_spawn(&server, &config, join);
+            let reported = reported_from_payload(&payload);
+
+            let window = assert_relocated_from(&server, &reported, &origin.id, &ctx);
+            if let Some(roomy) = roomy {
+                assert_eq!(window, roomy.id, "{ctx}: must join the roomy candidate");
+            }
+            assert_eq!(
+                current_window(&server, &session),
+                current,
+                "{ctx}: the session's current window must not change"
+            );
+            let options = pane_user_options(&server, &reported.pane);
+            let option = |key: &str| {
+                options
+                    .iter()
+                    .find(|(k, _)| k == key)
+                    .map(|(_, v)| v.clone())
+                    .unwrap_or_else(|| {
+                        panic!("{ctx}: the moved pane must carry {key}: {options:?}")
+                    })
+            };
+            assert_eq!(
+                Some(option("@tt-name").as_str()),
+                payload["name"].as_str(),
+                "{ctx}: @tt-name"
+            );
+            assert_eq!(option("@tt-agent"), AGENT, "{ctx}: @tt-agent");
+            let surface = payload["surface"].as_str().expect("JSON carries surface");
+            assert!(!surface.is_empty(), "{ctx}: a resolved surface");
+            assert_eq!(option("@tt-surface"), surface, "{ctx}: @tt-surface");
+            assert_eq!(option("@tt-cwd"), harness_cwd(), "{ctx}: @tt-cwd");
+        }
+    }
+
+    /// Acceptance: after a move by `join-pane` and one by `break-pane`, the reported
+    /// minima are the smallest pane width and height of the reported window as tmux
+    /// reads them, and `below_floor` is false.
+    #[test]
+    fn relocated_landing_reports_the_final_windows_measured_geometry() {
+        let _serial = serial_guard();
+        let server = IsolatedTmuxServer::start_inside();
+        let config = floor_config();
+        for join in [true, false] {
+            let ctx = format!("geometry after {}", move_name(join));
+            let (_, origin, _, payload, _) = relocating_spawn(&server, &config, join);
+            let reported = reported_from_payload(&payload);
+
+            let window = assert_relocated_from(&server, &reported, &origin.id, &ctx);
+            let (tmux_window, cols, rows) = tmux_landing(&server, &reported.pane);
+            assert_eq!(tmux_window, window, "{ctx}");
+            assert_eq!(reported.min_pane_cols, Some(cols), "{ctx}: min_pane_cols");
+            assert_eq!(reported.min_pane_rows, Some(rows), "{ctx}: min_pane_rows");
+            assert_eq!(reported.below_floor, Some(false), "{ctx}: below_floor");
+        }
+    }
+
+    /// Acceptance: with `--target` in a session other than the caller's, the pane
+    /// relocates within the target's session, never into the caller's eligible window.
+    #[test]
+    fn relocation_stays_in_the_target_windows_session() {
+        let _serial = serial_guard();
+        let server = IsolatedTmuxServer::start_inside();
+        let config = floor_config();
+        // The caller (the harness pane) is in the harness session, which gets an
+        // eligible marked window with room.
+        let callers = add_window(&server, HARNESS_SESSION, &ROOMY, true);
+        let origin = session_with_window(&server, "ovf-other", &FULL, true);
+        assert_eq!(
+            tmux_format(&server, server.pane(), "#{session_name}"),
+            HARNESS_SESSION
+        );
+
+        let out = place(
+            &server,
+            &config,
+            Verb::SpawnAgent,
+            &origin.panes[0],
+            "json",
+            &[],
+        );
+        let reported = reported(&out, "json", "spawn-agent into another session");
+
+        let window = assert_relocated_from(&server, &reported, &origin.id, "other session");
+        assert_eq!(
+            tmux_format(&server, &window, "#{session_name}"),
+            "ovf-other",
+            "the pane must stay in the target window's session"
+        );
+        assert_eq!(
+            pane_count(&server, &callers.id),
+            1,
+            "the caller's eligible window is untouched"
+        );
+    }
+
+    /// Acceptance: both verbs report `relocated` and the final `window_id` in `concise`
+    /// and `json`, after a breach and without one.
+    #[test]
+    fn both_verbs_report_relocated_and_the_final_window_in_concise_and_json() {
+        let _serial = serial_guard();
+        let server = IsolatedTmuxServer::start_inside();
+        let config = floor_config();
+        let mut n = 0;
+        for verb in [Verb::Launch, Verb::SpawnAgent] {
+            for format in ["json", "concise"] {
+                n += 1;
+                let ctx = format!("{verb:?} --format {format}");
+
+                let full = session_with_window(&server, &format!("ovf-r{n}"), &FULL, true);
+                let out = place(&server, &config, verb, &full.panes[0], format, &[]);
+                let breached = reported(&out, format, &format!("{ctx}, breaching"));
+                assert_relocated_from(&server, &breached, &full.id, &format!("{ctx}, breaching"));
+
+                let roomy = session_with_window(&server, &format!("ovf-s{n}"), &ROOMY, true);
+                let out = place(&server, &config, verb, &roomy.panes[0], format, &[]);
+                let stayed = reported(&out, format, &format!("{ctx}, roomy"));
+                assert_eq!(stayed.relocated, Some(false), "{ctx}, roomy: {stayed:?}");
+                assert_eq!(
+                    stayed.window_id.as_deref(),
+                    Some(roomy.id.as_str()),
+                    "{ctx}, roomy: window_id must be the target's"
+                );
+            }
+        }
+    }
+
+    /// Acceptance: an explicit `--split v` into an owned window, and a first placement
+    /// into a window not owned before the split, stay below the floor in place, even
+    /// with an eligible window with room in the session.
+    #[test]
+    fn opt_out_and_unowned_placements_stay_below_floor_in_the_target() {
+        let _serial = serial_guard();
+        let server = IsolatedTmuxServer::start_inside();
+        let config = floor_config();
+
+        // Two stacked 41- and 40-row panes: a vertical split of the first leaves 20 rows.
+        let owned = session_with_window(&server, "ovf-split-v", &FULL, true);
+        let roomy = add_window(&server, "ovf-split-v", &ROOMY, true);
+        let out = place(
+            &server,
+            &config,
+            Verb::SpawnAgent,
+            &owned.panes[0],
+            "json",
+            &["--split", "v"],
+        );
+        let split_v = reported(&out, "json", "spawn-agent --split v");
+        assert_stayed_below_floor(&server, &split_v, &owned, "--split v");
+        assert_eq!(
+            pane_count(&server, &roomy.id),
+            1,
+            "--split v: nothing joined"
+        );
+
+        let unowned = session_with_window(&server, "ovf-unowned", &[Pane::Unregistered], false);
+        let roomy = add_window(&server, "ovf-unowned", &ROOMY, true);
+        let out = place(
+            &server,
+            &config,
+            Verb::SpawnAgent,
+            &unowned.panes[0],
+            "json",
+            &[],
+        );
+        let first = reported(&out, "json", "first placement into an unowned window");
+        assert_stayed_below_floor(&server, &first, &unowned, "unowned window");
+        assert_eq!(pane_count(&server, &roomy.id), 1, "unowned: nothing joined");
+    }
+
+    /// Acceptance: a window already below its floor before the placement is not
+    /// repaired: the new pane leaves, and `status` still reports the origin below.
+    #[test]
+    fn an_over_full_origin_loses_only_the_new_pane_and_stays_below_floor() {
+        let _serial = serial_guard();
+        let server = IsolatedTmuxServer::start_inside();
+        let config = floor_config();
+        let origin = session_with_window(&server, "ovf-over", &[Pane::OwnedAgent; 3], true);
+        assert_layout_tiled(&server, &origin.id, "the over-full origin before");
+        let (_, cols, _) = tmux_landing(&server, &origin.panes[0]);
+        assert!(
+            cols < MIN_COLS,
+            "the origin must be below {MIN_COLS} columns before: {cols}"
+        );
+
+        let out = place(
+            &server,
+            &config,
+            Verb::SpawnAgent,
+            &origin.panes[0],
+            "json",
+            &[],
+        );
+        let reported = reported(&out, "json", "spawn-agent into an over-full window");
+        assert_relocated_from(&server, &reported, &origin.id, "over-full origin");
+        assert_eq!(
+            pane_count(&server, &origin.id),
+            3,
+            "only the new pane leaves"
+        );
+
+        let status = server.cli_env(
+            &["status", "--target", &origin.panes[0], "--format", "json"],
+            config.xdg(),
+        );
+        let payload = json_payload(&status, "status of the origin");
+        assert!(
+            json_below_floor(&payload, "status of the origin"),
+            "status must report the origin below floor: {}",
+            status.stdout
+        );
+    }
+
+    /// Acceptance: a candidate tmux refuses to join (its active pane has no space for a
+    /// new pane) is a rejected trial, and the pane joins the next candidate with room.
+    #[test]
+    fn a_refused_join_is_a_rejected_trial_and_the_search_goes_on() {
+        let _serial = serial_guard();
+        let server = IsolatedTmuxServer::start_inside();
+        let config = floor_config();
+        let origin = session_with_window(&server, "ovf-refuse", &FULL, true);
+        // The lowest candidate: an owned, marked window whose active pane is one row
+        // tall, so `join-pane` (a split of that pane) has no space.
+        let refusing = add_window(&server, "ovf-refuse", &ROOMY, true);
+        let tiny = server.tmux(&[
+            "split-window",
+            "-d",
+            "-v",
+            "-l",
+            "1",
+            "-t",
+            &refusing.panes[0],
+            "-P",
+            "-F",
+            "#{pane_id}",
+            "sleep",
+            "600",
+        ]);
+        tiny.assert_success("fixture: a one-row pane");
+        let tiny = tiny.stdout.trim().to_owned();
+        register(&server, &tiny, Pane::Owned);
+        server
+            .tmux(&["select-pane", "-t", &tiny])
+            .assert_success("fixture: make the one-row pane active");
+        let roomy = add_window(&server, "ovf-refuse", &ROOMY, true);
+        // Not tiled: a join that succeeded and was then rejected would retile it.
+        let refusing_layout = tmux_format(&server, &refusing.id, "#{window_layout}");
+
+        let out = place(
+            &server,
+            &config,
+            Verb::SpawnAgent,
+            &origin.panes[0],
+            "json",
+            &[],
+        );
+        let reported = reported(&out, "json", "spawn-agent past a refusing candidate");
+
+        let window = assert_relocated_from(&server, &reported, &origin.id, "refused join");
+        assert_eq!(window, roomy.id, "the pane must join the next candidate");
+        assert_eq!(
+            pane_count(&server, &refusing.id),
+            2,
+            "the refusing candidate's pane count must not change"
+        );
+        assert_eq!(
+            tmux_format(&server, &refusing.id, "#{window_layout}"),
+            refusing_layout,
+            "the refused join must leave the candidate as it was"
+        );
+    }
+
+    /// A fake `tmux` that, on the first `join-pane`, records its `-s` pane in `state`,
+    /// kills that pane, and passes the call to real tmux.
+    fn tmux_wrapper_killing_the_joined_pane(state: &std::path::Path) -> String {
+        format!(
+            "#!/bin/sh\n\
+             REAL='{real}'\n\
+             STATE='{state}'\n\
+             if [ \"$1\" = join-pane ] && [ ! -e \"$STATE\" ]; then\n\
+             \tsource=\n\
+             \tprev=\n\
+             \tfor arg in \"$@\"; do\n\
+             \t\t[ \"$prev\" = -s ] && source=$arg\n\
+             \t\tprev=$arg\n\
+             \tdone\n\
+             \tprintf '%s\\n' \"$source\" > \"$STATE\"\n\
+             \t\"$REAL\" kill-pane -t \"$source\" || exit 99\n\
+             fi\n\
+             exec \"$REAL\" \"$@\"\n",
+            real = real_tmux_path(),
+            state = state.display(),
+        )
+    }
+
+    /// A fake `tmux` that refuses every `break-pane` (recording each in `state`) and
+    /// passes every other call to real tmux.
+    fn tmux_wrapper_refusing_break_pane(state: &std::path::Path) -> String {
+        format!(
+            "#!/bin/sh\n\
+             REAL='{real}'\n\
+             STATE='{state}'\n\
+             if [ \"$1\" = break-pane ]; then\n\
+             \tprintf '%s\\n' refused >> \"$STATE\"\n\
+             \tprintf '%s\\n' 'injected break-pane refusal' >&2\n\
+             \texit 1\n\
+             fi\n\
+             exec \"$REAL\" \"$@\"\n",
+            real = real_tmux_path(),
+            state = state.display(),
+        )
+    }
+
+    /// Acceptance: the new pane killed when its `join-pane` runs gives the pane-gone
+    /// result with `relocated: false`.
+    #[test]
+    fn a_pane_gone_at_join_gives_the_pane_gone_result_not_relocated() {
+        let _serial = serial_guard();
+        let server = IsolatedTmuxServer::start_inside();
+        let config = floor_config();
+        let origin = session_with_window(&server, "ovf-gone", &FULL, true);
+        add_window(&server, "ovf-gone", &ROOMY, true);
+        let state = config.xdg().join("join-fault-fired");
+        config.write_executable("tmux", &tmux_wrapper_killing_the_joined_pane(&state));
+
+        let out = spawn_through_wrapper(&server, &config, &origin.panes[0]);
+
+        let payload = assert_pane_gone_json(&server, &out, &state, "pane gone at join-pane");
+        assert_eq!(
+            payload.get("relocated").and_then(|v| v.as_bool()),
+            Some(false),
+            "relocated must be false: {}",
+            out.stdout
+        );
+        assert_eq!(
+            out.stderr.lines().count(),
+            1,
+            "stderr must be exactly one warning line: {:?}",
+            out.stderr
+        );
+    }
+
+    /// Acceptance: a `break-pane` that fails while the pane exists leaves the pane in
+    /// the origin, reported below floor and not relocated, with exit 0.
+    #[test]
+    fn a_failed_break_pane_leaves_the_pane_in_the_origin_below_floor() {
+        let _serial = serial_guard();
+        let server = IsolatedTmuxServer::start_inside();
+        let config = floor_config();
+        let origin = session_with_window(&server, "ovf-nobreak", &FULL, true);
+        let state = config.xdg().join("break-refused");
+        config.write_executable("tmux", &tmux_wrapper_refusing_break_pane(&state));
+
+        let out = spawn_through_wrapper(&server, &config, &origin.panes[0]);
+
+        let reported = reported(&out, "json", "spawn-agent with break-pane refused");
+        assert!(
+            state.exists(),
+            "the placement must have attempted break-pane"
+        );
+        assert_stayed_below_floor(&server, &reported, &origin, "break-pane refused");
+    }
+}
