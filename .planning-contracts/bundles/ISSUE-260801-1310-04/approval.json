@@ -1,0 +1,57 @@
+{
+  "approval_id": "dispatch-20261102T034406Z",
+  "impact_disposition": {
+    "checked_revisions": [
+      {
+        "revision": "4194f7efb0b9aa09eab9ab18db15120a8e2e8b85",
+        "sha256": "aff804f1931800a3a4ed23ac446114981100eb60483d6b8cc1aa6b224a9a73de",
+        "target": "tmux-tools:ADR-260919-0146-01"
+      },
+      {
+        "revision": "4194f7efb0b9aa09eab9ab18db15120a8e2e8b85",
+        "sha256": "3b8142ee6d316689b26ed647da69b05c0433fb31490b3891a990da6d8e03d31b",
+        "target": "tmux-tools:PRD-260801-0656-01"
+      },
+      {
+        "revision": "4194f7efb0b9aa09eab9ab18db15120a8e2e8b85",
+        "sha256": "89e022e32cffd813184bc0c6e201a2e28a09fa2312ddf3c7d27c2898edd794d0",
+        "target": "tmux-tools:PRD-260918-0323-01#p2-surface"
+      },
+      {
+        "revision": "4194f7efb0b9aa09eab9ab18db15120a8e2e8b85",
+        "sha256": "05941c8a9b107818f53b60318fcb6990b213c10e6b0f3470e28eaf1feefa458c",
+        "target": "tmux-tools:PRD-260918-0323-01#p7-prompt"
+      }
+    ],
+    "status": "accepted"
+  },
+  "issue": {
+    "revision": "f5b417ee671defb68d50e41d9f7d883ae4efc598",
+    "sha256": "ec9e24abb7e544f412cecc13d0c5c8d25843151dfc3085a56928f2f65b24cb4d",
+    "target": "tmux-tools:ISSUE-260801-1310-04"
+  },
+  "resolution_mode": "canonical",
+  "schema": "planning-contracts.revision.v2",
+  "sources": [
+    {
+      "revision": "4194f7efb0b9aa09eab9ab18db15120a8e2e8b85",
+      "sha256": "aff804f1931800a3a4ed23ac446114981100eb60483d6b8cc1aa6b224a9a73de",
+      "target": "tmux-tools:ADR-260919-0146-01"
+    },
+    {
+      "revision": "4194f7efb0b9aa09eab9ab18db15120a8e2e8b85",
+      "sha256": "3b8142ee6d316689b26ed647da69b05c0433fb31490b3891a990da6d8e03d31b",
+      "target": "tmux-tools:PRD-260801-0656-01"
+    },
+    {
+      "revision": "4194f7efb0b9aa09eab9ab18db15120a8e2e8b85",
+      "sha256": "89e022e32cffd813184bc0c6e201a2e28a09fa2312ddf3c7d27c2898edd794d0",
+      "target": "tmux-tools:PRD-260918-0323-01#p2-surface"
+    },
+    {
+      "revision": "4194f7efb0b9aa09eab9ab18db15120a8e2e8b85",
+      "sha256": "05941c8a9b107818f53b60318fcb6990b213c10e6b0f3470e28eaf1feefa458c",
+      "target": "tmux-tools:PRD-260918-0323-01#p7-prompt"
+    }
+  ]
+}
