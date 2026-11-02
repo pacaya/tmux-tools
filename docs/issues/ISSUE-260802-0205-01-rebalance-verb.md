@@ -43,8 +43,9 @@ meanings), § Documentation (doc copies and the installed-copy release step), §
 - New verb `rebalance` with the common target arguments (`--target`, `--session`, `--window`,
   `--format`). The resolved pane's containing window is the window acted on; inside tmux with no
   selector, that is the calling pane's window.
-- Outside tmux (`TMUX` unset) with no `--target`, `--session` or `--window`, the verb refuses with a
-  non-zero exit before target resolution runs, so it never creates the managed session.
+- Outside tmux (`TMUX` unset or empty, as target resolution judges it) with no `--target`,
+  `--session` or `--window`, the verb refuses with a non-zero exit before target resolution runs, so
+  it never creates the managed session.
 - Guard: the shared window guard owned by ISSUE-260801-1310-06 in the core layout module (`@tt-tiled`
   present on the window, and at least one pane in the window owned per the shared ownership predicate
   for this invocation's cwd). Reuse it; do not build a second marker read or ownership scan. A
@@ -82,8 +83,9 @@ meanings), § Documentation (doc copies and the installed-copy release step), §
       `below_floor: true` (json).
 - [ ] Given a roomy marked, owned window holding a `tt-fake-tui` agent pane whose surface floor its
       tiled pane meets, when `rebalance` runs, then it exits 0 and reports `below_floor: false` (json).
-- [ ] Given the CLI runs outside tmux (`TMUX` unset) with no `--target`, `--session` or `--window`,
-      when `rebalance` runs, then it exits non-zero and no tmux session exists afterwards that did not
+- [ ] Given the CLI runs outside tmux with no `--target`, `--session` or `--window`, once with `TMUX`
+      unset and once with `TMUX` set to the empty string, when `rebalance` runs, then each run exits
+      non-zero and no tmux session exists afterwards that did not
       exist before (in particular no `tmux-tools` session), observable via `tmux list-sessions` on the
       private server; in the same test, outside tmux, `rebalance --session <S>` on a marked, owned,
       ragged window exits 0 and the window is retiled.
