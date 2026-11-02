@@ -2,7 +2,7 @@
 id: ISSUE-260801-1310-01
 kind: issue
 category: enhancement
-status: draft
+status: needs-triage
 brief_contract: agent-brief.v3
 context: tmux-tools
 summary: Run pane-creating integration tests against a private, config-isolated tmux server

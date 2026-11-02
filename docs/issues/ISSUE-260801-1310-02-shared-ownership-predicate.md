@@ -2,7 +2,7 @@
 id: ISSUE-260801-1310-02
 kind: issue
 category: enhancement
-status: draft
+status: ready-for-agent
 brief_contract: agent-brief.v3
 context: tmux-tools
 summary: Extract the pane-ownership predicate so layout and the destructive verbs share one definition

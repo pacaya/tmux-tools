@@ -2,7 +2,7 @@
 id: ISSUE-260801-1310-07
 kind: issue
 category: enhancement
-status: draft
+status: needs-triage
 brief_contract: agent-brief.v3
 context: tmux-tools
 summary: Relocate a pane to another window when placing it would push its origin below the effective floor
@@ -57,7 +57,9 @@ reports `relocated`.
   (origin) window, never the caller's session.
 - Candidates: the session's windows other than the origin that pass the shared window guard owned by
   ISSUE-260801-1310-06 (`@tt-tiled` marker and an owned pane), with no second marker read or ownership
-  scan, judged before any pane is joined into them, tried in ascending window index. Overflow-candidate ordering (eligible marked windows, ascending index) is pure given
+  scan, judged before any pane is joined into them, tried in ascending window index. This issue may
+  extend that guard in place so its verdict can be computed from marker presence, pane registrations
+  and cwd already read; candidate ordering uses that verdict. Overflow-candidate ordering (eligible marked windows, ascending index) is pure given
   the session's windows, their markers and their panes' registrations, and is unit-testable without a
   tmux server.
 - Trial per candidate: `join-pane -d` the new pane into it, retile, measure against the candidate's
@@ -115,6 +117,11 @@ read tmux state independently with `tmux -L <socket>` queries (`#{window_id}`, `
       `select-layout tiled` before the placement, when
       `spawn-agent` places into it, then in the same run `relocated` is true, the reported `window_id`
       differs from the target's, and `status` pointed at the origin window reports it below floor.
+- [ ] Given a breaching origin, an eligible marked, owned candidate at the lowest index that tmux
+      refuses to join (no space for a new pane), and a higher-index eligible candidate with room, when
+      `spawn-agent` places into the origin, then it exits 0, `relocated` is true, the reported
+      `window_id` is the higher-index candidate's, and the refused candidate's pane count is unchanged; observable at `spawn-agent --format json` and `tmux -L
+      <socket>` queries.
 - [ ] Unit tests in `core` cover overflow-candidate ordering: unmarked windows, windows without an
       owned pane, and the origin are excluded; the remainder are in ascending index order.
 
@@ -137,4 +144,4 @@ release action.
 ## Triage Notes
 
 - 2026-11-02: reminted to agent-brief.v3 after dispatch readiness; prior gate rounds in Git history.
-- 2026-11-02: mint-check repair applied.
+- 2026-11-02: mint-check repair applied; second targeted repair (refused-join criterion, guard verdict).

@@ -2,7 +2,7 @@
 id: ISSUE-260802-0205-01
 kind: issue
 category: enhancement
-status: draft
+status: needs-triage
 brief_contract: agent-brief.v3
 context: tmux-tools
 summary: A rebalance verb so a crowded window can be retiled through the tool instead of raw tmux
@@ -102,7 +102,7 @@ did not introduce is reported, not fixed. Release step: the installed `SKILL.md`
 branch `agent/auto-tile-layout` in the claude-settings repository
 (`/Users/Shared/Data/work/Programming/ai/claude`) and pushed to its lane; this issue closes on that
 branch commit. The control Mac lands that branch once, after the whole auto-tile epic's binary is
-installed.
+installed. Do not modify that repository's live working tree before then.
 
 **Out of scope:**
 - Moving panes out of an over-full window, or killing exited-agent panes to reclaim geometry.
@@ -117,4 +117,4 @@ installed.
 ## Triage Notes
 
 - 2026-11-02: reminted to agent-brief.v3 after dispatch readiness; prior gate rounds in Git history.
-- 2026-11-02: mint-check repair applied.
+- 2026-11-02: mint-check repair applied; second targeted repair (live working tree rule).

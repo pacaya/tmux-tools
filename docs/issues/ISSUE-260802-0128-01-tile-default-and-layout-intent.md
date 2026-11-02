@@ -2,7 +2,7 @@
 id: ISSUE-260802-0128-01
 kind: issue
 category: enhancement
-status: draft
+status: needs-triage
 brief_contract: agent-brief.v3
 context: tmux-tools
 summary: Make tile the default placement inside tmux — ownership-gated retile, the @tt-tiled layout-intent marker, sizing opt-outs, and the documentation change

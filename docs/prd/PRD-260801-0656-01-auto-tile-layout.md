@@ -354,8 +354,10 @@ it targets, because that is how the window records that a human took manual cont
 `--split window` keeps its meaning but is **currently broken** from inside tmux: the launch path
 passes the calling *pane* id to `new-window -t`, which tmux rejects with `can't specify pane here`.
 Since this epic makes that flag a documented opt-out, fixing it is in scope, for the calling pane and
-for `--target <pane> --split window`, which shares the defect. The window is created in the pane's
-session for every session name tmux allows, including its default numeric names.
+for `--target <pane> --split window` and `--session`/`--window` with `--split window` and no `--target`,
+which share the defect, as does the new-window path of `--session`/`--window` without `--target`. The
+window is created in the destination session (the calling pane's, the target pane's, or the scoped
+session) for every session name tmux allows, including its default numeric names.
 
 Two destinations are unaffected by the tile default because they create a fresh window rather than
 splitting: the outside-tmux path, and `--session`/`--window` without `--target`. An explicit

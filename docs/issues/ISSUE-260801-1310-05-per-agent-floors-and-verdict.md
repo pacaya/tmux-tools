@@ -2,7 +2,7 @@
 id: ISSUE-260801-1310-05
 kind: issue
 category: enhancement
-status: draft
+status: needs-triage
 brief_contract: agent-brief.v3
 context: tmux-tools
 summary: Per-surface geometry floors in the registry, effective-floor resolution, below_floor verdict, and status geometry
