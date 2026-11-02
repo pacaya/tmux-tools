@@ -521,6 +521,7 @@ dependencies = [
  "anyhow",
  "clap",
  "dirs",
+ "libc",
  "regex",
  "serde",
  "serde_json",
