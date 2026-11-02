@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{anyhow, bail, Context};
+use anyhow::{anyhow, bail};
 use serde::Deserialize;
 
 mod builtin;
@@ -54,6 +54,12 @@ pub struct Surface {
     pub quit_when_idle: bool,
     /// Resume-argument syntax and identifier shape, when this rendering supports resume.
     pub resume: Option<ResumeSpec>,
+    /// The narrowest pane this rendering's readiness signal stays matchable in (its
+    /// floor's width). `None` means undeclared: the global default applies to this axis.
+    pub min_cols: Option<u32>,
+    /// The shortest pane this rendering's readiness signal stays matchable in (its
+    /// floor's height). `None` means undeclared: the global default applies to this axis.
+    pub min_rows: Option<u32>,
 }
 
 impl Default for Surface {
@@ -68,6 +74,8 @@ impl Default for Surface {
             interrupt_key: "C-c".to_owned(),
             quit_when_idle: false,
             resume: None,
+            min_cols: None,
+            min_rows: None,
         }
     }
 }
@@ -297,36 +305,89 @@ pub struct LoadWarning {
     pub detail: String,
 }
 
+/// A user `agents.toml` that exists but could not be read or parsed.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RegistryLoadFailure {
+    pub path: PathBuf,
+    /// What went wrong, on one line.
+    pub error: String,
+}
+
 impl Registry {
+    /// The built-in agents only, with no user configuration.
+    pub fn builtin() -> Registry {
+        Registry {
+            agents: builtin::all().clone(),
+        }
+    }
+
     /// Invalid entries are skipped with a warning rather than aborting the load.
     pub fn load() -> anyhow::Result<(Registry, Vec<LoadWarning>)> {
         Self::load_with_user_path(user_config_path().as_deref())
     }
 
-    /// Invalid entries are skipped with a warning rather than aborting the load.
+    /// Invalid entries are skipped with a warning rather than aborting the load. A file
+    /// that exists but cannot be read or parsed is an error.
     pub fn load_with_user_path(
         path: Option<&Path>,
     ) -> anyhow::Result<(Registry, Vec<LoadWarning>)> {
-        let builtins = builtin::all();
+        let Some(path) = path.filter(|path| path.exists()) else {
+            return Ok((Self::builtin(), Vec::new()));
+        };
+        let user_agents = read_user_agents(path).map_err(|error| match error {
+            UserFileError::Read(error) => anyhow::Error::new(error)
+                .context(format!("failed to read agent registry {}", path.display())),
+            UserFileError::Parse(error, _) => anyhow::Error::new(error)
+                .context("invalid agents TOML")
+                .context(format!("failed to parse agent registry {}", path.display())),
+        })?;
+        Ok(Self::from_user_agents(user_agents))
+    }
 
-        if let Some(path) = path.filter(|path| path.exists()) {
-            let contents = fs::read_to_string(path)
-                .with_context(|| format!("failed to read agent registry {}", path.display()))?;
-            let user_agents = parse_agent_configs(&contents)
-                .with_context(|| format!("failed to parse agent registry {}", path.display()))?;
+    /// Like [`Registry::load`], but a user file that exists and cannot be read or parsed
+    /// is not an error: the built-in registry is used alone and the failure is returned
+    /// for the caller to report. For verbs whose use of the registry is advisory.
+    pub fn load_or_builtin() -> (Registry, Vec<LoadWarning>, Option<RegistryLoadFailure>) {
+        Self::load_or_builtin_with_user_path(user_config_path().as_deref())
+    }
 
-            // User config is a deep merge: scalar fields replace builtins when present,
-            // while access profiles merge by name so builtin profiles survive unless overridden.
-            let (agents, warnings) = merge_agent_configs(builtins.clone(), user_agents);
-            Ok((Registry { agents }, warnings))
-        } else {
-            Ok((
-                Registry {
-                    agents: builtins.clone(),
-                },
+    /// [`Registry::load_or_builtin`] with an explicit user file path.
+    pub fn load_or_builtin_with_user_path(
+        path: Option<&Path>,
+    ) -> (Registry, Vec<LoadWarning>, Option<RegistryLoadFailure>) {
+        let Some(path) = path.filter(|path| path.exists()) else {
+            return (Self::builtin(), Vec::new(), None);
+        };
+        match read_user_agents(path) {
+            Ok(user_agents) => {
+                let (registry, warnings) = Self::from_user_agents(user_agents);
+                (registry, warnings, None)
+            }
+            Err(error) => (
+                Self::builtin(),
                 Vec::new(),
-            ))
+                Some(RegistryLoadFailure {
+                    path: path.to_owned(),
+                    error: error.one_line(),
+                }),
+            ),
         }
+    }
+
+    /// The registry an `agents.toml` with `contents` produces over the built-ins.
+    #[cfg(test)]
+    pub(crate) fn from_user_toml(contents: &str) -> anyhow::Result<(Registry, Vec<LoadWarning>)> {
+        Ok(Self::from_user_agents(parse_agent_configs(contents)?))
+    }
+
+    fn from_user_agents(
+        user_agents: BTreeMap<String, AgentConfig>,
+    ) -> (Registry, Vec<LoadWarning>) {
+        // User config is a deep merge: scalar fields replace builtins when present,
+        // while access profiles and surfaces merge by name so builtin entries survive
+        // unless overridden.
+        let (agents, warnings) = merge_agent_configs(builtin::all().clone(), user_agents);
+        (Registry { agents }, warnings)
     }
 
     pub fn get(&self, agent: &str) -> Option<&AgentSpec> {
@@ -475,6 +536,12 @@ struct AgentConfig {
     ready_regex: Option<String>,
     #[serde(default)]
     ready_lines: Option<usize>,
+    /// Pre-surface floor shape: like the readiness fields above, these bind to the
+    /// surface matching the agent's pre-surface rendering.
+    #[serde(default)]
+    min_cols: Option<u32>,
+    #[serde(default)]
+    min_rows: Option<u32>,
     #[serde(default)]
     interaction_patterns: Option<Vec<InteractionPatternConfig>>,
     #[serde(default)]
@@ -511,6 +578,10 @@ struct SurfaceConfig {
     quit_when_idle: Option<bool>,
     #[serde(default)]
     resume: Option<ResumeConfig>,
+    #[serde(default)]
+    min_cols: Option<u32>,
+    #[serde(default)]
+    min_rows: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -597,8 +668,66 @@ fn user_config_path() -> Option<PathBuf> {
     Some(config_home.join("tmux-tools").join("agents.toml"))
 }
 
+#[cfg(test)]
 fn parse_agent_configs(contents: &str) -> anyhow::Result<BTreeMap<String, AgentConfig>> {
-    toml::from_str(contents).context("invalid agents TOML")
+    anyhow::Context::context(toml::from_str(contents), "invalid agents TOML")
+}
+
+/// Why a user `agents.toml` that exists could not be used.
+enum UserFileError {
+    Read(std::io::Error),
+    /// The TOML error and, when it has a span, its 1-based line and column.
+    Parse(toml::de::Error, Option<(usize, usize)>),
+}
+
+impl UserFileError {
+    /// The failure on one line (a TOML error renders a multi-line source excerpt).
+    fn one_line(&self) -> String {
+        match self {
+            UserFileError::Read(error) => format!("cannot read: {error}"),
+            UserFileError::Parse(error, position) => {
+                let message = error
+                    .message()
+                    .lines()
+                    .map(str::trim)
+                    .filter(|line| !line.is_empty())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                match position {
+                    Some((line, column)) => {
+                        format!("invalid TOML at line {line}, column {column}: {message}")
+                    }
+                    None => format!("invalid TOML: {message}"),
+                }
+            }
+        }
+    }
+}
+
+fn read_user_agents(path: &Path) -> Result<BTreeMap<String, AgentConfig>, UserFileError> {
+    let contents = fs::read_to_string(path).map_err(UserFileError::Read)?;
+    toml::from_str(&contents).map_err(|error: toml::de::Error| {
+        let position = error.span().map(|span| line_col(&contents, span.start));
+        UserFileError::Parse(error, position)
+    })
+}
+
+/// The 1-based line and column (in characters) of byte `offset` in `text`.
+fn line_col(text: &str, offset: usize) -> (usize, usize) {
+    let mut end = offset.min(text.len());
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    let before = &text[..end];
+    let line = before.matches('\n').count() + 1;
+    let column = before
+        .rsplit('\n')
+        .next()
+        .unwrap_or_default()
+        .chars()
+        .count()
+        + 1;
+    (line, column)
 }
 
 /// Name of the surface synthesized for an agent declared without any.
@@ -652,17 +781,19 @@ fn merge_existing_agent(
         agent.default_surface = Some(default);
     }
 
-    // The pre-surface `agents.toml` shape carries readiness at the agent level; those
-    // fields are calibrated against the pre-surface rendering and bind there.
-    if user_agent.ready_regex.is_some() || user_agent.ready_lines.is_some() {
-        bind_pre_surface_readiness(
-            name,
-            agent,
-            user_agent.ready_regex,
-            user_agent.ready_lines,
-            warnings,
-        );
-    }
+    // The pre-surface `agents.toml` shape carries readiness and floor fields at the agent
+    // level; those are calibrated against the pre-surface rendering and bind there.
+    bind_pre_surface_fields(
+        name,
+        agent,
+        PreSurfaceFields {
+            ready_regex: user_agent.ready_regex,
+            ready_lines: user_agent.ready_lines,
+            min_cols: user_agent.min_cols,
+            min_rows: user_agent.min_rows,
+        },
+        warnings,
+    );
 
     if let Some(interaction_patterns) = user_agent.interaction_patterns {
         agent.interaction_patterns =
@@ -741,15 +872,17 @@ fn agent_from_config(
     };
 
     let agent_name = spec.name.clone();
-    if agent.ready_regex.is_some() || agent.ready_lines.is_some() {
-        bind_pre_surface_readiness(
-            &agent_name,
-            &mut spec,
-            agent.ready_regex,
-            agent.ready_lines,
-            warnings,
-        );
-    }
+    bind_pre_surface_fields(
+        &agent_name,
+        &mut spec,
+        PreSurfaceFields {
+            ready_regex: agent.ready_regex,
+            ready_lines: agent.ready_lines,
+            min_cols: agent.min_cols,
+            min_rows: agent.min_rows,
+        },
+        warnings,
+    );
 
     normalize_surfaces(&agent_name, &mut spec, warnings);
     warn_if_default_not_promoted(&agent_name, &spec, declared_default.as_deref(), warnings);
@@ -807,15 +940,35 @@ fn warn_if_default_not_promoted(
     });
 }
 
-/// Apply agent-level (pre-surface shape) readiness fields to the surface matching the
-/// agent's pre-surface rendering.
-fn bind_pre_surface_readiness(
-    name: &str,
-    agent: &mut AgentSpec,
+/// The agent-level fields of the pre-surface `agents.toml` shape: each is calibrated
+/// against the agent's pre-surface rendering.
+struct PreSurfaceFields {
     ready_regex: Option<String>,
     ready_lines: Option<usize>,
+    min_cols: Option<u32>,
+    min_rows: Option<u32>,
+}
+
+impl PreSurfaceFields {
+    fn is_empty(&self) -> bool {
+        self.ready_regex.is_none()
+            && self.ready_lines.is_none()
+            && self.min_cols.is_none()
+            && self.min_rows.is_none()
+    }
+}
+
+/// Apply agent-level (pre-surface shape) readiness and floor fields to the surface
+/// matching the agent's pre-surface rendering — never to a default that differs from it.
+fn bind_pre_surface_fields(
+    name: &str,
+    agent: &mut AgentSpec,
+    fields: PreSurfaceFields,
     warnings: &mut Vec<LoadWarning>,
 ) {
+    if fields.is_empty() {
+        return;
+    }
     let target = agent
         .pre_surface_rendering
         .clone()
@@ -829,7 +982,8 @@ fn bind_pre_surface_readiness(
     let Some(target) = target else {
         warnings.push(LoadWarning {
             agent: name.to_owned(),
-            detail: "readiness fields were given but no pre-surface-rendering surface is named"
+            detail: "agent-level readiness or floor fields were given but no \
+                     pre-surface-rendering surface is named"
                 .to_owned(),
         });
         return;
@@ -837,16 +991,24 @@ fn bind_pre_surface_readiness(
 
     match agent.surfaces.get_mut(&target) {
         Some(surface) => {
-            if let Some(ready_regex) = ready_regex {
+            if let Some(ready_regex) = fields.ready_regex {
                 surface.ready_regex = Some(ready_regex);
             }
-            if let Some(ready_lines) = ready_lines {
+            if let Some(ready_lines) = fields.ready_lines {
                 surface.ready_lines = Some(ready_lines);
+            }
+            if let Some(min_cols) = fields.min_cols {
+                surface.min_cols = Some(min_cols);
+            }
+            if let Some(min_rows) = fields.min_rows {
+                surface.min_rows = Some(min_rows);
             }
         }
         None => warnings.push(LoadWarning {
             agent: name.to_owned(),
-            detail: format!("readiness fields name unknown surface {target:?}"),
+            detail: format!(
+                "agent-level readiness or floor fields name unknown surface {target:?}"
+            ),
         }),
     }
 }
@@ -878,6 +1040,12 @@ fn merge_surface(existing: &mut Surface, config: SurfaceConfig) {
     }
     if let Some(resume) = config.resume {
         existing.resume = Some(resume.into());
+    }
+    if let Some(min_cols) = config.min_cols {
+        existing.min_cols = Some(min_cols);
+    }
+    if let Some(min_rows) = config.min_rows {
+        existing.min_rows = Some(min_rows);
     }
 }
 
@@ -1181,6 +1349,114 @@ args = []
             Some("^flat ready")
         );
         assert_eq!(demo.surfaces["flat"].ready_lines, None);
+    }
+
+    #[test]
+    fn surface_floor_fields_parse_and_merge_by_field() {
+        let (registry, warnings) = Registry::from_user_toml(
+            r#"
+[codex.surfaces.default]
+min_cols = 50
+
+[demo]
+binary = "/bin/demo"
+
+[demo.surfaces.main]
+min_rows = 12
+"#,
+        )
+        .unwrap();
+        assert!(warnings.is_empty(), "warnings: {warnings:?}");
+
+        // Merged over the seeded built-in: the declared axis replaces, the other survives,
+        // and the surface's other fields are untouched.
+        let codex = &registry.get("codex").unwrap().surfaces["default"];
+        assert_eq!((codex.min_cols, codex.min_rows), (Some(50), Some(9)));
+        assert_eq!(codex.ready_regex.as_deref(), Some("· Ready · Context"));
+
+        // A new surface declares only what it states.
+        let main = &registry.get("demo").unwrap().surfaces["main"];
+        assert_eq!((main.min_cols, main.min_rows), (None, Some(12)));
+    }
+
+    #[test]
+    fn agent_level_floor_binds_to_pre_surface_not_default() {
+        let agents = parse_registry_toml(
+            r#"
+[demo]
+binary = "/bin/demo"
+min_cols = 40
+min_rows = 20
+default_surface = "flat"
+pre_surface_rendering = "rich"
+
+[demo.surfaces.rich]
+args = ["--rich"]
+
+[demo.surfaces.flat]
+args = ["--flat"]
+min_rows = 7
+
+[demo.access.default]
+args = []
+"#,
+        )
+        .unwrap();
+
+        let demo = agents.get("demo").unwrap();
+        let rich = &demo.surfaces["rich"];
+        assert_eq!((rich.min_cols, rich.min_rows), (Some(40), Some(20)));
+        let flat = &demo.surfaces["flat"];
+        assert_eq!((flat.min_cols, flat.min_rows), (None, Some(7)));
+    }
+
+    #[test]
+    fn load_or_builtin_falls_back_to_the_builtins_on_an_unparsable_file() {
+        let path = write_temp_agents_file("[codex\nmin_cols = 1\n");
+        let (registry, warnings, failure) = Registry::load_or_builtin_with_user_path(Some(&path));
+        fs::remove_file(&path).unwrap();
+
+        assert!(warnings.is_empty());
+        assert_eq!(registry, Registry::builtin());
+        let failure = failure.expect("an unparsable file must be reported");
+        assert_eq!(failure.path, path);
+        assert!(
+            !failure.error.contains('\n') && !failure.error.is_empty(),
+            "the failure renders as one line: {:?}",
+            failure.error
+        );
+        assert!(failure.error.contains("line 1"), "{:?}", failure.error);
+
+        // An absent file is not a failure; a parsable one merges.
+        let missing = std::env::temp_dir().join("tmux-tools-agents-definitely-missing.toml");
+        let (_, _, failure) = Registry::load_or_builtin_with_user_path(Some(&missing));
+        assert!(failure.is_none());
+        let path = write_temp_agents_file("[codex.surfaces.default]\nmin_cols = 50\n");
+        let (registry, _, failure) = Registry::load_or_builtin_with_user_path(Some(&path));
+        fs::remove_file(&path).unwrap();
+        assert!(failure.is_none());
+        assert_eq!(
+            registry.get("codex").unwrap().surfaces["default"].min_cols,
+            Some(50)
+        );
+    }
+
+    #[test]
+    fn load_or_builtin_reports_an_unreadable_file() {
+        // A directory where the file should be cannot be read as a file.
+        let dir = write_temp_agents_file("");
+        fs::remove_file(&dir).unwrap();
+        fs::create_dir(&dir).unwrap();
+        let (registry, _, failure) = Registry::load_or_builtin_with_user_path(Some(&dir));
+        fs::remove_dir(&dir).unwrap();
+
+        assert_eq!(registry, Registry::builtin());
+        let failure = failure.expect("an unreadable file must be reported");
+        assert!(!failure.error.contains('\n'), "{:?}", failure.error);
+        // The strict loader still fails on the same file.
+        let dir2 = write_temp_agents_file("[codex\n");
+        assert!(Registry::load_with_user_path(Some(&dir2)).is_err());
+        fs::remove_file(&dir2).unwrap();
     }
 
     #[test]

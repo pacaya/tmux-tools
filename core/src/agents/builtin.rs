@@ -61,6 +61,12 @@ fn build_all() -> BTreeMap<String, AgentSpec> {
                         // session id is a UUID. With no id codex opens an interactive
                         // session picker, which P6 refuses. Read from codex-cli 0.155.1.
                         resume: resume("resume {id}", UUID_SHAPE),
+                        // Floor: one step above the 2026-08-01 cliff (the status line
+                        // wraps at 56 columns), measured against this surface's
+                        // ready_regex/ready_lines. Changing those invalidates it; the
+                        // measurement recorded no codex version.
+                        min_cols: Some(58),
+                        min_rows: Some(9),
                         ..surface(&[])
                     },
                 )]),
@@ -132,6 +138,13 @@ fn build_all() -> BTreeMap<String, AgentSpec> {
                             // session id is a UUID. With no id claude opens an interactive
                             // session picker, which P6 refuses. Read from claude 2.1.278.
                             resume: resume("--resume {id}", UUID_SHAPE),
+                            // Floor: one step above the 2026-08-01 cliff (at 14 rows a
+                            // `ready_lines = 0` scan no longer finds the sentinel), measured
+                            // against the opt-in status-line pattern a user declares on this
+                            // surface. The measurement recorded no claude version, and
+                            // `validated_version` above does not cover the floor.
+                            min_cols: Some(26),
+                            min_rows: Some(16),
                             ..Surface::default()
                         },
                     ),
@@ -192,6 +205,11 @@ fn build_all() -> BTreeMap<String, AgentSpec> {
                             "→ (Add a follow-up|Plan, search, build anything)\\s*$".to_owned(),
                         ),
                         ready_lines: Some(4),
+                        // Floor: one step above the 2026-08-01 cliff, measured against
+                        // this surface's ready_regex/ready_lines (no cursor-agent version
+                        // recorded). Changing those invalidates it.
+                        min_cols: Some(36),
+                        min_rows: Some(9),
                         ..Surface::default()
                     },
                 )]),
@@ -498,6 +516,26 @@ mod tests {
                     surface.resume.is_some(),
                     expected_resume,
                     "{name}.{surface_name} resume declaration moved unexpectedly"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn measured_floors_seed_exactly_the_measured_surfaces() {
+        let agents = all();
+        for (name, agent) in agents {
+            for (surface_name, surface) in &agent.surfaces {
+                let expected = match (name.as_str(), surface_name.as_str()) {
+                    ("codex", "default") => (Some(58), Some(9)),
+                    ("cursor", "default") => (Some(36), Some(9)),
+                    ("claude", "rich") => (Some(26), Some(16)),
+                    _ => (None, None),
+                };
+                assert_eq!(
+                    (surface.min_cols, surface.min_rows),
+                    expected,
+                    "{name}.{surface_name} floor seed"
                 );
             }
         }

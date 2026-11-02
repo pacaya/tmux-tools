@@ -4,10 +4,18 @@
 //! pane goes, creates it (split or new window), writes its whole registration, and
 //! then measures the window it landed in, returning a [`Landing`]. The verbs build
 //! the command and the registration; they never create a pane themselves.
+//!
+//! It also owns floors: [`pane_floor`] resolves a pane's floor from its registration
+//! and the agent registry, [`effective_floor`] combines a window's, and
+//! [`floor_violations`] / [`below_floor`] give the verdict. Those are pure over measured
+//! geometry; [`place`] and [`inspect`] measure and apply them. The floor is advisory:
+//! nothing here relocates or refuses a pane.
 
 use anyhow::{anyhow, Context, Result};
 use std::env;
 
+use crate::agents::Registry;
+use crate::format::non_empty;
 use crate::{names, target, tmux};
 
 /// The `--split` flag of the spawning verbs.
@@ -148,14 +156,154 @@ pub struct Landing {
     pub min_pane_cols: u32,
     /// The smallest pane height measured across every pane in that window.
     pub min_pane_rows: u32,
+    /// Whether that window is below its effective floor (see [`below_floor`]).
+    pub below_floor: bool,
+}
+
+/// A window's measured geometry and floor verdict, as [`inspect`] reports it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WindowReport {
+    /// The stable tmux id of the window.
+    pub window_id: String,
+    /// The smallest pane width measured across every pane in the window.
+    pub min_pane_cols: u32,
+    /// The smallest pane height measured across every pane in the window.
+    pub min_pane_rows: u32,
+    /// Whether the window is below its effective floor (see [`below_floor`]).
+    pub below_floor: bool,
+}
+
+/// A minimum pane geometry: a pane's floor, or a window's effective floor.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Floor {
+    pub cols: u32,
+    pub rows: u32,
+}
+
+/// The floor of every axis a resolved surface does not declare, and of a pane whose
+/// agent or recorded surface the registry does not have. An explicit assumption — the
+/// componentwise maximum of the measured seeds — not a measurement of any agent.
+pub const DEFAULT_FLOOR: Floor = Floor { cols: 58, rows: 16 };
+
+/// One pane of a window, as measured, with the registration its floor resolves from.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PaneGeometry {
+    pub pane_id: String,
+    pub cols: u32,
+    pub rows: u32,
+    /// `@tt-agent`; `None` when unset.
+    pub agent: Option<String>,
+    /// `@tt-surface`; `None` when unset.
+    pub surface: Option<String>,
+}
+
+/// Every pane of one window, as measured.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WindowGeometry {
+    pub window_id: String,
+    /// Never empty.
+    pub panes: Vec<PaneGeometry>,
+}
+
+impl WindowGeometry {
+    /// The smallest pane width in the window.
+    pub fn min_pane_cols(&self) -> u32 {
+        self.panes.iter().map(|pane| pane.cols).min().unwrap_or(0)
+    }
+
+    /// The smallest pane height in the window.
+    pub fn min_pane_rows(&self) -> u32 {
+        self.panes.iter().map(|pane| pane.rows).min().unwrap_or(0)
+    }
+
+    fn report(&self, registry: &Registry) -> WindowReport {
+        WindowReport {
+            window_id: self.window_id.clone(),
+            min_pane_cols: self.min_pane_cols(),
+            min_pane_rows: self.min_pane_rows(),
+            below_floor: below_floor(registry, &self.panes),
+        }
+    }
+}
+
+/// The floor a pane contributes, from its `@tt-agent` and `@tt-surface`.
+///
+/// - No agent: `None` — the pane contributes no floor (it is still measured).
+/// - The surface resolves as readiness resolves it ([`Registry::resolve_surface`]): a
+///   recorded surface is that surface, an absent record the agent's pre-surface
+///   rendering. Each axis the resolved surface declares keeps its value; an undeclared
+///   axis takes [`DEFAULT_FLOOR`]'s.
+/// - An agent the registry does not know, or a recorded surface it does not have:
+///   [`DEFAULT_FLOOR`].
+pub fn pane_floor(
+    registry: &Registry,
+    agent: Option<&str>,
+    surface: Option<&str>,
+) -> Option<Floor> {
+    let agent = agent?;
+    Some(match registry.resolve_surface(agent, surface) {
+        Some(resolved) => Floor {
+            cols: resolved.surface.min_cols.unwrap_or(DEFAULT_FLOOR.cols),
+            rows: resolved.surface.min_rows.unwrap_or(DEFAULT_FLOOR.rows),
+        },
+        None => DEFAULT_FLOOR,
+    })
+}
+
+/// A window's effective floor: the componentwise maximum over the floors its panes
+/// contribute. `None` when no pane contributes one (no pane has an agent).
+pub fn effective_floor(registry: &Registry, panes: &[PaneGeometry]) -> Option<Floor> {
+    panes
+        .iter()
+        .filter_map(|pane| pane_floor(registry, pane.agent.as_deref(), pane.surface.as_deref()))
+        .reduce(|a, b| Floor {
+            cols: a.cols.max(b.cols),
+            rows: a.rows.max(b.rows),
+        })
+}
+
+/// The panes narrower or shorter than `floor` — every pane, with or without an agent.
+pub fn floor_violations(panes: &[PaneGeometry], floor: Floor) -> Vec<&PaneGeometry> {
+    panes
+        .iter()
+        .filter(|pane| pane.cols < floor.cols || pane.rows < floor.rows)
+        .collect()
+}
+
+/// Whether the window these panes make up is below its effective floor: some pane (so
+/// the window's measured minimum on that axis) is below it. A window with no
+/// floor-contributing pane is never below floor.
+pub fn below_floor(registry: &Registry, panes: &[PaneGeometry]) -> bool {
+    effective_floor(registry, panes).is_some_and(|floor| !floor_violations(panes, floor).is_empty())
+}
+
+/// Measure the window that holds `pane_id` and give its floor verdict, reading every
+/// pane's registration from tmux.
+pub fn inspect(pane_id: &str, registry: &Registry) -> Result<WindowReport> {
+    Ok(measure(pane_id)?.report(registry))
+}
+
+/// Make the new pane's floor inputs the ones placement was given rather than what tmux
+/// reads back: its agent and resolved surface for `spawn-agent`, none for `launch`.
+fn apply_new_pane_registration(
+    panes: &mut [PaneGeometry],
+    pane_id: &str,
+    agent: Option<&AgentRegistration<'_>>,
+) {
+    for pane in panes.iter_mut().filter(|pane| pane.pane_id == pane_id) {
+        pane.agent = agent.map(|agent| agent.agent.to_owned());
+        pane.surface = agent.map(|agent| agent.surface.to_owned());
+    }
 }
 
 /// Place a new pane running `command`: resolve the destination, create the pane
-/// there, write `registration` on it, then measure the window it landed in.
+/// there, write `registration` on it, then measure the window it landed in and give
+/// its floor verdict against `registry`.
 pub fn place(
     command: &str,
     destination: &Destination<'_>,
     registration: &Registration<'_>,
+    registry: &Registry,
 ) -> Result<Landing> {
     let in_tmux = env::var_os("TMUX").is_some();
     let layout = resolve_layout(
@@ -182,14 +330,17 @@ pub fn place(
         in_tmux,
     )?;
     let name = register(&pane_id, registration)?;
-    let (window_id, min_pane_cols, min_pane_rows) = measure(&pane_id)?;
+    let mut geometry = measure(&pane_id)?;
+    apply_new_pane_registration(&mut geometry.panes, &pane_id, registration.agent.as_ref());
+    let report = geometry.report(registry);
 
     Ok(Landing {
         pane_id,
         name,
-        window_id,
-        min_pane_cols,
-        min_pane_rows,
+        window_id: report.window_id,
+        min_pane_cols: report.min_pane_cols,
+        min_pane_rows: report.min_pane_rows,
+        below_floor: report.below_floor,
     })
 }
 
@@ -218,37 +369,44 @@ fn register(pane_id: &str, registration: &Registration<'_>) -> Result<String> {
     Ok(name)
 }
 
-/// The window `pane_id` is in, and the smallest pane width and height across every
-/// pane of that window, as tmux reports them now.
-fn measure(pane_id: &str) -> Result<(String, u32, u32)> {
+/// Separates the fields of a measurement line. Registration values are user strings
+/// and may hold tabs; the unit separator does not occur in them.
+const FIELD_SEP: char = '\x1f';
+
+/// Every pane of the window `pane_id` is in, with its size and registration, as tmux
+/// reports them now.
+fn measure(pane_id: &str) -> Result<WindowGeometry> {
+    let format = [
+        "#{window_id}".to_owned(),
+        "#{pane_id}".to_owned(),
+        "#{pane_width}".to_owned(),
+        "#{pane_height}".to_owned(),
+        format!("#{{{}}}", names::KEY_AGENT),
+        format!("#{{{}}}", names::KEY_SURFACE),
+    ]
+    .join(&FIELD_SEP.to_string());
     // `list-panes -t <pane>` lists the panes of that pane's window.
-    let output = tmux::run_checked(&[
-        "list-panes",
-        "-t",
-        pane_id,
-        "-F",
-        "#{window_id}\t#{pane_width}\t#{pane_height}",
-    ])
-    .with_context(|| format!("cannot measure the window of pane {pane_id}"))?;
+    let output = tmux::run_checked(&["list-panes", "-t", pane_id, "-F", &format])
+        .with_context(|| format!("cannot measure the window of pane {pane_id}"))?;
     parse_window_geometry(&output)
         .with_context(|| format!("cannot measure the window of pane {pane_id}"))
 }
 
-/// Parse `#{window_id}\t#{pane_width}\t#{pane_height}` lines (one per pane of one
-/// window) into the window id and the componentwise minimum pane size.
-fn parse_window_geometry(output: &str) -> Result<(String, u32, u32)> {
+/// Parse measurement lines — window id, pane id, width, height, `@tt-agent` and
+/// `@tt-surface`, separated by [`FIELD_SEP`] — one per pane of one window.
+fn parse_window_geometry(output: &str) -> Result<WindowGeometry> {
     let mut window_id: Option<&str> = None;
-    let mut min_cols = u32::MAX;
-    let mut min_rows = u32::MAX;
+    let mut panes = Vec::new();
     for line in output.lines().filter(|line| !line.trim().is_empty()) {
-        let mut fields = line.trim_end_matches('\r').split('\t');
-        let (Some(window), Some(cols), Some(rows), None) =
-            (fields.next(), fields.next(), fields.next(), fields.next())
-        else {
+        let fields: Vec<&str> = line.trim_end_matches('\r').split(FIELD_SEP).collect();
+        let [window, pane, cols, rows, agent, surface] = fields[..] else {
             return Err(anyhow!("unexpected tmux pane geometry line {line:?}"));
         };
         if window.is_empty() {
             return Err(anyhow!("tmux reported no window id in {line:?}"));
+        }
+        if pane.is_empty() {
+            return Err(anyhow!("tmux reported no pane id in {line:?}"));
         }
         match window_id {
             None => window_id = Some(window),
@@ -265,11 +423,19 @@ fn parse_window_geometry(output: &str) -> Result<(String, u32, u32)> {
         let rows: u32 = rows
             .parse()
             .map_err(|_| anyhow!("unexpected pane height {rows:?}"))?;
-        min_cols = min_cols.min(cols);
-        min_rows = min_rows.min(rows);
+        panes.push(PaneGeometry {
+            pane_id: pane.to_owned(),
+            cols,
+            rows,
+            agent: non_empty(agent),
+            surface: non_empty(surface),
+        });
     }
     let window_id = window_id.ok_or_else(|| anyhow!("tmux listed no panes"))?;
-    Ok((window_id.to_owned(), min_cols, min_rows))
+    Ok(WindowGeometry {
+        window_id: window_id.to_owned(),
+        panes,
+    })
 }
 
 /// Resolved tmux target for pane creation.
@@ -675,35 +841,442 @@ mod tests {
         }
     }
 
+    /// One `list-panes` geometry line in the measurement format.
+    fn line(window: &str, pane: &str, cols: u32, rows: u32, agent: &str, surface: &str) -> String {
+        [
+            window.to_owned(),
+            pane.to_owned(),
+            cols.to_string(),
+            rows.to_string(),
+            agent.to_owned(),
+            surface.to_owned(),
+        ]
+        .join(&FIELD_SEP.to_string())
+            + "\n"
+    }
+
     #[test]
     fn window_geometry_is_the_componentwise_minimum() {
-        let output = "@3\t83\t71\n@3\t196\t71\n@3\t280\t10\n";
+        let output = [
+            line("@3", "%1", 83, 71, "", ""),
+            line("@3", "%2", 196, 71, "codex", "default"),
+            line("@3", "%3", 280, 10, "", ""),
+        ]
+        .concat();
+        let geometry = parse_window_geometry(&output).unwrap();
+        assert_eq!(geometry.window_id, "@3");
         assert_eq!(
-            parse_window_geometry(output).unwrap(),
-            ("@3".to_owned(), 83, 10)
+            (geometry.min_pane_cols(), geometry.min_pane_rows()),
+            (83, 10)
         );
+        assert_eq!(geometry.panes.len(), 3);
+        assert_eq!(geometry.panes[1].agent.as_deref(), Some("codex"));
+        assert_eq!(geometry.panes[1].surface.as_deref(), Some("default"));
+        // An unset user option reads back empty and is no registration.
+        assert_eq!(geometry.panes[0].agent, None);
+        assert_eq!(geometry.panes[0].surface, None);
     }
 
     #[test]
     fn window_geometry_of_a_single_pane_is_that_pane() {
+        let geometry = parse_window_geometry(&line("@0", "%0", 280, 82, "", "")).unwrap();
+        assert_eq!(geometry.window_id, "@0");
         assert_eq!(
-            parse_window_geometry("@0\t280\t82\n").unwrap(),
-            ("@0".to_owned(), 280, 82)
+            (geometry.min_pane_cols(), geometry.min_pane_rows()),
+            (280, 82)
         );
     }
 
     #[test]
+    fn window_geometry_keeps_tabs_inside_registration_values() {
+        let geometry = parse_window_geometry(&line("@0", "%0", 280, 82, "odd\tagent", "")).unwrap();
+        assert_eq!(geometry.panes[0].agent.as_deref(), Some("odd\tagent"));
+    }
+
+    #[test]
     fn window_geometry_rejects_empty_and_malformed_output() {
+        let sep = FIELD_SEP.to_string();
+        let join = |fields: &[&str]| fields.join(&sep) + "\n";
         assert!(parse_window_geometry("").is_err());
         assert!(parse_window_geometry("\n").is_err());
-        assert!(parse_window_geometry("@0\t280\n").is_err());
-        assert!(parse_window_geometry("@0\twide\t82\n").is_err());
-        assert!(parse_window_geometry("\t280\t82\n").is_err());
-        assert!(parse_window_geometry("@0\t280\t82\textra\n").is_err());
+        assert!(parse_window_geometry(&join(&["@0", "%0", "280", "82", ""])).is_err());
+        assert!(parse_window_geometry(&join(&["@0", "%0", "wide", "82", "", ""])).is_err());
+        assert!(parse_window_geometry(&join(&["", "%0", "280", "82", "", ""])).is_err());
+        assert!(parse_window_geometry(&join(&["@0", "", "280", "82", "", ""])).is_err());
+        assert!(parse_window_geometry(&join(&["@0", "%0", "280", "82", "", "", "extra"])).is_err());
     }
 
     #[test]
     fn window_geometry_rejects_panes_of_two_windows() {
-        assert!(parse_window_geometry("@0\t280\t82\n@1\t100\t20\n").is_err());
+        let output = [
+            line("@0", "%0", 280, 82, "", ""),
+            line("@1", "%1", 100, 20, "", ""),
+        ]
+        .concat();
+        assert!(parse_window_geometry(&output).is_err());
+    }
+
+    // -- Floors (ISSUE-260801-1310-05) -------------------------------------------------
+
+    fn floor(cols: u32, rows: u32) -> Floor {
+        Floor { cols, rows }
+    }
+
+    /// The registry an `agents.toml` with `contents` produces over the built-ins.
+    fn registry_from(contents: &str) -> Registry {
+        let (registry, _warnings) = Registry::from_user_toml(contents).unwrap();
+        registry
+    }
+
+    fn pane(
+        id: &str,
+        cols: u32,
+        rows: u32,
+        agent: Option<&str>,
+        surface: Option<&str>,
+    ) -> PaneGeometry {
+        PaneGeometry {
+            pane_id: id.to_owned(),
+            cols,
+            rows,
+            agent: agent.map(str::to_owned),
+            surface: surface.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn surface_floor_declared_in_agents_toml_is_the_resolved_floor() {
+        let registry = registry_from(
+            r#"
+[codex.surfaces.default]
+min_cols = 70
+min_rows = 12
+
+[demo]
+binary = "/bin/demo"
+
+[demo.surfaces.main]
+min_cols = 40
+min_rows = 30
+"#,
+        );
+        assert_eq!(
+            pane_floor(&registry, Some("codex"), Some("default")),
+            Some(floor(70, 12))
+        );
+        assert_eq!(
+            pane_floor(&registry, Some("demo"), Some("main")),
+            Some(floor(40, 30))
+        );
+    }
+
+    #[test]
+    fn one_axis_override_of_a_seeded_surface_keeps_the_shipped_other_axis() {
+        let cols_only = registry_from("[codex.surfaces.default]\nmin_cols = 50\n");
+        assert_eq!(
+            pane_floor(&cols_only, Some("codex"), Some("default")),
+            Some(floor(50, 9)),
+            "only min_cols was set, so codex keeps its shipped 9 rows, not the default 16"
+        );
+
+        let rows_only = registry_from("[codex.surfaces.default]\nmin_rows = 20\n");
+        assert_eq!(
+            pane_floor(&rows_only, Some("codex"), Some("default")),
+            Some(floor(58, 20)),
+            "only min_rows was set, so codex keeps its shipped 58 columns"
+        );
+    }
+
+    #[test]
+    fn unseeded_surface_declaring_one_axis_takes_the_global_default_for_the_other() {
+        let registry = registry_from(
+            r#"
+[demo]
+binary = "/bin/demo"
+
+[demo.surfaces.wide]
+min_cols = 40
+
+[demo.surfaces.tall]
+min_rows = 30
+"#,
+        );
+        assert_eq!(
+            pane_floor(&registry, Some("demo"), Some("wide")),
+            Some(floor(40, DEFAULT_FLOOR.rows))
+        );
+        assert_eq!(
+            pane_floor(&registry, Some("demo"), Some("tall")),
+            Some(floor(DEFAULT_FLOOR.cols, 30))
+        );
+    }
+
+    #[test]
+    fn agent_level_floor_binds_to_the_pre_surface_rendering_only() {
+        // A new agent whose (validated) default `flat` differs from its pre-surface `rich`.
+        let registry = registry_from(
+            r#"
+[demo]
+binary = "/bin/demo"
+min_cols = 40
+min_rows = 20
+default_surface = "flat"
+pre_surface_rendering = "rich"
+
+[demo.surfaces.rich]
+args = ["--rich"]
+
+[demo.surfaces.flat]
+args = ["--flat"]
+ready_regex = "^ready$"
+busy_regex = "^busy$"
+validated_version = "demo 1.0"
+"#,
+        );
+        let demo = registry.get("demo").unwrap();
+        assert_eq!(demo.default_surface().unwrap().name, "flat");
+        assert_eq!(
+            pane_floor(&registry, Some("demo"), Some("rich")),
+            Some(floor(40, 20))
+        );
+        assert_eq!(
+            pane_floor(&registry, Some("demo"), Some("flat")),
+            Some(DEFAULT_FLOOR),
+            "the default surface's floor must not move"
+        );
+
+        // A built-in merged over: `claude` names `flat` as its default, and the agent-level
+        // floor still lands on `rich`, the pre-surface rendering.
+        let claude = registry_from(
+            r#"
+[claude]
+min_cols = 30
+default_surface = "flat"
+"#,
+        );
+        assert_eq!(
+            pane_floor(&claude, Some("claude"), Some("rich")),
+            Some(floor(30, 16))
+        );
+        assert_eq!(
+            pane_floor(&claude, Some("claude"), Some("flat")),
+            Some(DEFAULT_FLOOR)
+        );
+    }
+
+    #[test]
+    fn new_agent_without_surfaces_binds_an_agent_level_floor_to_its_one_surface() {
+        let registry = registry_from(
+            r#"
+[demo]
+binary = "/bin/demo"
+min_cols = 44
+"#,
+        );
+        assert_eq!(
+            pane_floor(&registry, Some("demo"), None),
+            Some(floor(44, DEFAULT_FLOOR.rows))
+        );
+        assert_eq!(
+            pane_floor(&registry, Some("demo"), Some("default")),
+            Some(floor(44, DEFAULT_FLOOR.rows))
+        );
+    }
+
+    #[test]
+    fn pane_without_surface_record_takes_the_pre_surface_floor_not_the_default() {
+        let registry = registry_from(
+            r#"
+[demo]
+binary = "/bin/demo"
+default_surface = "flat"
+pre_surface_rendering = "rich"
+
+[demo.surfaces.rich]
+min_cols = 30
+min_rows = 20
+
+[demo.surfaces.flat]
+ready_regex = "^ready$"
+busy_regex = "^busy$"
+validated_version = "demo 1.0"
+min_cols = 70
+min_rows = 10
+"#,
+        );
+        assert_eq!(
+            registry
+                .get("demo")
+                .unwrap()
+                .default_surface()
+                .unwrap()
+                .name,
+            "flat"
+        );
+        assert_eq!(
+            pane_floor(&registry, Some("demo"), None),
+            Some(floor(30, 20))
+        );
+    }
+
+    #[test]
+    fn claude_floors_resolve_per_recorded_surface() {
+        let registry = Registry::builtin();
+        assert_eq!(
+            pane_floor(&registry, Some("claude"), Some("flat")),
+            Some(floor(58, 16))
+        );
+        assert_eq!(
+            pane_floor(&registry, Some("claude"), Some("rich")),
+            Some(floor(26, 16))
+        );
+        assert_eq!(
+            pane_floor(&registry, Some("claude"), None),
+            Some(floor(26, 16)),
+            "no @tt-surface resolves to the rich pre-surface rendering"
+        );
+    }
+
+    #[test]
+    fn unknown_agent_or_surface_takes_the_default_pair() {
+        let registry = Registry::builtin();
+        assert_eq!(
+            pane_floor(&registry, Some("nope"), None),
+            Some(DEFAULT_FLOOR)
+        );
+        assert_eq!(
+            pane_floor(&registry, Some("nope"), Some("rich")),
+            Some(DEFAULT_FLOOR)
+        );
+        assert_eq!(
+            pane_floor(&registry, Some("codex"), Some("gone")),
+            Some(DEFAULT_FLOOR)
+        );
+        assert_eq!(DEFAULT_FLOOR, floor(58, 16));
+    }
+
+    #[test]
+    fn a_pane_without_an_agent_contributes_no_floor() {
+        let registry = Registry::builtin();
+        assert_eq!(pane_floor(&registry, None, None), None);
+        assert_eq!(pane_floor(&registry, None, Some("rich")), None);
+    }
+
+    #[test]
+    fn builtin_floors_are_the_measured_seeds() {
+        let registry = Registry::builtin();
+        assert_eq!(
+            pane_floor(&registry, Some("codex"), Some("default")),
+            Some(floor(58, 9))
+        );
+        assert_eq!(
+            pane_floor(&registry, Some("cursor"), Some("default")),
+            Some(floor(36, 9))
+        );
+        assert_eq!(
+            pane_floor(&registry, Some("claude"), Some("rich")),
+            Some(floor(26, 16))
+        );
+        assert_eq!(
+            pane_floor(&registry, Some("claude"), Some("flat")),
+            Some(floor(58, 16))
+        );
+        assert_eq!(
+            pane_floor(&registry, Some("agy"), Some("default")),
+            Some(DEFAULT_FLOOR)
+        );
+    }
+
+    #[test]
+    fn effective_floor_is_the_componentwise_maximum_of_agent_panes_only() {
+        let registry = Registry::builtin();
+        let panes = [
+            // codex 58x9 and cursor 36x9 and claude rich 26x16 → 58x16.
+            pane("%1", 100, 40, Some("codex"), Some("default")),
+            pane("%2", 100, 40, Some("cursor"), Some("default")),
+            pane("%3", 100, 40, Some("claude"), Some("rich")),
+            // An agentless pane contributes nothing, however small it is.
+            pane("%4", 5, 3, None, None),
+        ];
+        assert_eq!(effective_floor(&registry, &panes), Some(floor(58, 16)));
+
+        let narrow = [
+            pane("%1", 100, 40, Some("cursor"), Some("default")),
+            pane("%2", 100, 40, None, None),
+        ];
+        assert_eq!(effective_floor(&registry, &narrow), Some(floor(36, 9)));
+    }
+
+    #[test]
+    fn an_agentless_pane_below_the_effective_floor_puts_the_window_below_floor() {
+        let registry = Registry::builtin();
+        let panes = [
+            pane("%1", 120, 40, Some("cursor"), Some("default")),
+            // The window's smallest pane has no agent and is narrower than cursor's 36.
+            pane("%2", 30, 40, None, None),
+        ];
+        let effective = effective_floor(&registry, &panes).unwrap();
+        let violations = floor_violations(&panes, effective);
+        assert_eq!(
+            violations
+                .iter()
+                .map(|p| p.pane_id.as_str())
+                .collect::<Vec<_>>(),
+            ["%2"]
+        );
+        assert!(below_floor(&registry, &panes));
+    }
+
+    #[test]
+    fn floor_comparison_is_per_axis_and_strict() {
+        let registry = Registry::builtin();
+        // Exactly at the floor is not below it.
+        let at = [pane("%1", 58, 9, Some("codex"), Some("default"))];
+        assert!(!below_floor(&registry, &at));
+        assert!(floor_violations(&at, floor(58, 9)).is_empty());
+        // One axis short is below it.
+        let short = [pane("%1", 200, 8, Some("codex"), Some("default"))];
+        assert!(below_floor(&registry, &short));
+        let narrow = [pane("%1", 57, 80, Some("codex"), Some("default"))];
+        assert!(below_floor(&registry, &narrow));
+    }
+
+    #[test]
+    fn a_window_without_agent_panes_is_never_below_floor() {
+        let registry = Registry::builtin();
+        let panes = [pane("%1", 10, 3, None, None), pane("%2", 20, 5, None, None)];
+        assert_eq!(effective_floor(&registry, &panes), None);
+        assert!(!below_floor(&registry, &panes));
+    }
+
+    #[test]
+    fn the_new_panes_registration_overrides_what_tmux_reads_back() {
+        let registry = Registry::builtin();
+        // tmux reports the new pane with no agent options (for example, read before the
+        // write is visible); placement's own inputs are authoritative for it.
+        let mut panes = vec![
+            pane("%1", 100, 40, None, None),
+            pane("%2", 30, 40, None, None),
+        ];
+        assert!(!below_floor(&registry, &panes));
+        apply_new_pane_registration(
+            &mut panes,
+            "%2",
+            Some(&AgentRegistration {
+                agent: "codex",
+                surface: "default",
+                access: None,
+                surface_unvalidated: false,
+            }),
+        );
+        assert_eq!(panes[1].agent.as_deref(), Some("codex"));
+        assert_eq!(panes[1].surface.as_deref(), Some("default"));
+        assert!(below_floor(&registry, &panes));
+
+        // A `launch` pane carries no agent, whatever tmux reads back for it.
+        let mut panes = vec![pane("%2", 30, 40, Some("codex"), Some("default"))];
+        apply_new_pane_registration(&mut panes, "%2", None);
+        assert_eq!(panes[0].agent, None);
+        assert_eq!(panes[0].surface, None);
     }
 }

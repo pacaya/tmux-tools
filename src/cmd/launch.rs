@@ -7,7 +7,10 @@ use tmux_tools_core::{
     names,
 };
 
-use crate::{util::rfc3339_utc_now, CommonArgs};
+use crate::{
+    util::{load_registry_for_floors, rfc3339_utc_now},
+    CommonArgs,
+};
 
 #[derive(Args, Debug)]
 pub struct LaunchArgs {
@@ -35,6 +38,7 @@ struct LaunchJson<'a> {
     window_id: &'a str,
     min_pane_cols: u32,
     min_pane_rows: u32,
+    below_floor: bool,
 }
 
 pub fn run(args: &LaunchArgs) -> Result<()> {
@@ -45,6 +49,9 @@ pub fn run(args: &LaunchArgs) -> Result<()> {
     };
     let launched_at = rfc3339_utc_now()?;
     let cwd = invoking_cwd();
+    // Loaded before the pane exists: the verdict needs it, and its warnings belong to
+    // this invocation whether or not placement succeeds.
+    let registry = load_registry_for_floors();
 
     let landing = layout::place(
         &cmd_for_tmux,
@@ -57,6 +64,7 @@ pub fn run(args: &LaunchArgs) -> Result<()> {
             cwd: cwd.as_deref(),
             agent: None,
         },
+        &registry,
     )?;
 
     render_output(args, &landing, &launched_at)
@@ -106,12 +114,13 @@ pub(crate) fn wrap_keep_open(cmd: &str) -> String {
 fn render_output(args: &LaunchArgs, landing: &Landing, launched_at: &str) -> Result<()> {
     match args.common.format {
         Format::Concise => println!(
-            "name={} pane={} window_id={} min_pane_cols={} min_pane_rows={}",
+            "name={} pane={} window_id={} min_pane_cols={} min_pane_rows={} below_floor={}",
             landing.name,
             landing.pane_id,
             landing.window_id,
             landing.min_pane_cols,
-            landing.min_pane_rows
+            landing.min_pane_rows,
+            landing.below_floor
         ),
         Format::Raw => println!("{}", landing.pane_id),
         Format::Json => {
@@ -122,6 +131,7 @@ fn render_output(args: &LaunchArgs, landing: &Landing, launched_at: &str) -> Res
                 window_id: &landing.window_id,
                 min_pane_cols: landing.min_pane_cols,
                 min_pane_rows: landing.min_pane_rows,
+                below_floor: landing.below_floor,
             };
             println!("{}", serde_json::to_string(&output)?);
         }

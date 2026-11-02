@@ -8710,3 +8710,638 @@ fn spawn_agent_with_access_and_trailing_args_registers_access_and_unvalidated_ma
         "--access and trailing caller arguments add @tt-access and @tt-surface-unvalidated"
     );
 }
+
+// ---------------------------------------------------------------------------
+// ISSUE-260801-1310-05 — per-surface floors and the `below_floor` verdict.
+//
+// Every case injects its own `XDG_CONFIG_HOME` (empty unless the test writes an
+// `agents.toml`), so the developer's registry never decides a verdict. The cases carry
+// no "tmux not on PATH" skip: when the behavior or tmux is absent they fail.
+// ---------------------------------------------------------------------------
+
+/// An agent no registry knows: its panes resolve to the 58x16 default floor.
+const FLOOR_PROBE_AGENT: &str = "tt-floor-probe";
+
+/// A throwaway `XDG_CONFIG_HOME` holding no `agents.toml` until a test writes one.
+struct FloorXdg {
+    dir: std::path::PathBuf,
+}
+
+impl FloorXdg {
+    fn new() -> Self {
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "tt-floor-xdg-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::SeqCst)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("tmux-tools")).unwrap();
+        Self { dir }
+    }
+
+    fn path(&self) -> &std::path::Path {
+        &self.dir
+    }
+
+    fn write_agents_toml(&self, contents: &str) {
+        std::fs::write(self.dir.join("tmux-tools").join("agents.toml"), contents).unwrap();
+    }
+}
+
+impl Drop for FloorXdg {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+/// Parse `--format json` stdout of a successful command.
+fn json_payload(out: &CmdOutput, ctx: &str) -> serde_json::Value {
+    out.assert_success(ctx);
+    serde_json::from_str(out.stdout.trim())
+        .unwrap_or_else(|e| panic!("{ctx}: JSON should parse ({e}): {:?}", out.stdout))
+}
+
+/// The JSON `below_floor` field, which must be present and boolean.
+fn json_below_floor(payload: &serde_json::Value, ctx: &str) -> bool {
+    payload
+        .get("below_floor")
+        .and_then(|value| value.as_bool())
+        .unwrap_or_else(|| panic!("{ctx}: JSON must carry boolean below_floor: {payload}"))
+}
+
+/// Register `pane` with `@tt-agent` directly through tmux (no spawn involved).
+fn register_agent_directly(server: &IsolatedTmuxServer, pane: &str, agent: &str) {
+    server
+        .tmux(&["set-option", "-p", "-t", pane, "@tt-agent", agent])
+        .assert_success("set @tt-agent directly");
+}
+
+/// Crowd the harness window: a 200-column pane to the right of the calling pane, which
+/// leaves the calling pane 79 columns wide, so a flagless 70% split of it yields panes
+/// narrower than 58 columns. Returns the new right-hand pane.
+fn crowd_calling_pane(server: &IsolatedTmuxServer) -> String {
+    let out = server.tmux(&[
+        "split-window",
+        "-h",
+        "-d",
+        "-l",
+        "200",
+        "-t",
+        server.pane(),
+        "-P",
+        "-F",
+        "#{pane_id}",
+        "sleep",
+        "600",
+    ]);
+    out.assert_success("crowd the calling pane");
+    out.stdout.trim().to_owned()
+}
+
+/// Assert a spawning verb's verdict (`below`) in the given format.
+fn assert_spawn_verdict(out: &CmdOutput, format: &str, below: bool, ctx: &str) {
+    match format {
+        "json" => {
+            let payload = json_payload(out, ctx);
+            assert_eq!(
+                json_below_floor(&payload, ctx),
+                below,
+                "{ctx}: below_floor; stdout: {}",
+                out.stdout
+            );
+        }
+        "concise" => {
+            out.assert_success(ctx);
+            assert_eq!(
+                concise_field(out, "below_floor"),
+                Some(below.to_string()),
+                "{ctx}: concise must carry below_floor={below}; stdout: {}",
+                out.stdout
+            );
+        }
+        other => panic!("unexpected format {other}"),
+    }
+}
+
+/// `launch` into a window whose agent pane's floor (58x16) the landing breaks.
+fn launch_into_crowded_agent_window(format: &str) {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    let xdg = FloorXdg::new();
+    let agent_pane = crowd_calling_pane(&server);
+    register_agent_directly(&server, &agent_pane, FLOOR_PROBE_AGENT);
+
+    let out = server.cli_env(
+        &["launch", "--cmd", "sleep 600", "--format", format],
+        xdg.path(),
+    );
+    assert_spawn_verdict(
+        &out,
+        format,
+        true,
+        &format!("launch --format {format} (crowded)"),
+    );
+}
+
+/// `launch` into a window holding an agent pane, with room for its floor.
+fn launch_into_roomy_agent_window(format: &str) {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    let xdg = FloorXdg::new();
+    register_agent_directly(&server, server.pane(), FLOOR_PROBE_AGENT);
+
+    let out = server.cli_env(
+        &["launch", "--cmd", "sleep 600", "--format", format],
+        xdg.path(),
+    );
+    assert_spawn_verdict(
+        &out,
+        format,
+        false,
+        &format!("launch --format {format} (roomy)"),
+    );
+}
+
+#[test]
+fn launch_json_reports_below_floor_in_a_crowded_agent_window() {
+    launch_into_crowded_agent_window("json");
+}
+
+#[test]
+fn launch_concise_reports_below_floor_in_a_crowded_agent_window() {
+    launch_into_crowded_agent_window("concise");
+}
+
+#[test]
+fn launch_json_reports_not_below_floor_in_a_roomy_agent_window() {
+    launch_into_roomy_agent_window("json");
+}
+
+#[test]
+fn launch_concise_reports_not_below_floor_in_a_roomy_agent_window() {
+    launch_into_roomy_agent_window("concise");
+}
+
+/// A window with no `@tt-agent` pane has no effective floor: however crowded, the
+/// verdict is present and false.
+#[test]
+fn launch_json_into_a_crowded_window_without_agents_reports_below_floor_false() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    let xdg = FloorXdg::new();
+    crowd_calling_pane(&server);
+
+    let out = server.cli_env(
+        &["launch", "--cmd", "sleep 600", "--format", "json"],
+        xdg.path(),
+    );
+    let (pane, _, cols, _) = json_landing(&out, "launch --format json (crowded, no agents)");
+    assert!(
+        cols < 58,
+        "the window must be crowded below 58 columns; got {cols}"
+    );
+    assert!(
+        tt_registration_keys(&server, &pane)
+            .iter()
+            .all(|key| key != "@tt-agent"),
+        "launch registers no agent"
+    );
+    let payload = json_payload(&out, "launch --format json");
+    assert!(
+        !json_below_floor(&payload, "launch --format json (crowded, no agents)"),
+        "a window without agent panes is never below floor: {}",
+        out.stdout
+    );
+}
+
+/// `spawn-agent` lands its own agent pane (the fixture agent, default floor 58x16)
+/// either in a crowded window or with room.
+#[cfg(feature = "test-fixtures")]
+fn spawn_agent_verdict(format: &str, crowded: bool) {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    let config = fake_tui_agent_config();
+    if crowded {
+        crowd_calling_pane(&server);
+    }
+
+    let out = server.cli_env(
+        &["spawn-agent", "tt-fake-tui", "--bare", "--format", format],
+        config.xdg(),
+    );
+    assert_spawn_verdict(
+        &out,
+        format,
+        crowded,
+        &format!("spawn-agent --format {format} (crowded: {crowded})"),
+    );
+}
+
+#[cfg(feature = "test-fixtures")]
+#[test]
+fn spawn_agent_json_reports_below_floor_in_a_crowded_window() {
+    spawn_agent_verdict("json", true);
+}
+
+#[cfg(feature = "test-fixtures")]
+#[test]
+fn spawn_agent_concise_reports_below_floor_in_a_crowded_window() {
+    spawn_agent_verdict("concise", true);
+}
+
+#[cfg(feature = "test-fixtures")]
+#[test]
+fn spawn_agent_json_reports_not_below_floor_in_a_roomy_window() {
+    spawn_agent_verdict("json", false);
+}
+
+#[cfg(feature = "test-fixtures")]
+#[test]
+fn spawn_agent_concise_reports_not_below_floor_in_a_roomy_window() {
+    spawn_agent_verdict("concise", false);
+}
+
+/// A new detached window in the harness session; returns its pane.
+fn new_window_pane(server: &IsolatedTmuxServer) -> String {
+    let target = format!("={HARNESS_SESSION}:");
+    let out = server.tmux(&[
+        "new-window",
+        "-d",
+        "-t",
+        &target,
+        "-P",
+        "-F",
+        "#{pane_id}",
+        "sleep",
+        "600",
+    ]);
+    out.assert_success("create a window");
+    out.stdout.trim().to_owned()
+}
+
+/// A window holding one `@tt-agent` pane, crowded below 58 columns by direct
+/// `tmux split-window` calls. Returns the agent pane.
+fn crowded_window_with_agent(server: &IsolatedTmuxServer) -> String {
+    let pane = new_window_pane(server);
+    register_agent_directly(server, &pane, FLOOR_PROBE_AGENT);
+    for _ in 0..3 {
+        server
+            .tmux(&["split-window", "-h", "-d", "-t", &pane, "sleep", "600"])
+            .assert_success("crowd the window by a direct split");
+    }
+    pane
+}
+
+/// A window holding one `@tt-agent` pane and nothing else. Returns the agent pane.
+fn roomy_window_with_agent(server: &IsolatedTmuxServer) -> String {
+    let pane = new_window_pane(server);
+    register_agent_directly(server, &pane, FLOOR_PROBE_AGENT);
+    pane
+}
+
+/// A `key: value` line of `status --format concise`.
+fn status_concise_field(out: &CmdOutput, key: &str) -> Option<String> {
+    let prefix = format!("{key}: ");
+    out.stdout
+        .lines()
+        .find_map(|line| line.strip_prefix(&prefix).map(str::to_owned))
+}
+
+/// `status` pointed at `pane` reports its window's measured minima (as tmux reports
+/// them) and the expected verdict, in `json` and `concise`.
+fn assert_status_verdict(server: &IsolatedTmuxServer, xdg: &FloorXdg, pane: &str, below: bool) {
+    let (_, cols, rows) = tmux_landing(server, pane);
+
+    let json = server.cli_env(
+        &["status", "--target", pane, "--format", "json"],
+        xdg.path(),
+    );
+    let payload = json_payload(&json, "status --format json");
+    assert_eq!(
+        json_below_floor(&payload, "status --format json"),
+        below,
+        "status json below_floor for {pane}: {}",
+        json.stdout
+    );
+    assert_eq!(
+        payload.get("min_pane_cols").and_then(|v| v.as_u64()),
+        Some(cols),
+        "status json min_pane_cols: {}",
+        json.stdout
+    );
+    assert_eq!(
+        payload.get("min_pane_rows").and_then(|v| v.as_u64()),
+        Some(rows),
+        "status json min_pane_rows: {}",
+        json.stdout
+    );
+    assert!(
+        payload.get("min_cols").is_none() && payload.get("min_rows").is_none(),
+        "status must not reuse the registry's floor names: {}",
+        json.stdout
+    );
+
+    let concise = server.cli_env(
+        &["status", "--target", pane, "--format", "concise"],
+        xdg.path(),
+    );
+    concise.assert_success("status --format concise");
+    assert_eq!(
+        status_concise_field(&concise, "below_floor"),
+        Some(below.to_string()),
+        "status concise below_floor for {pane}: {}",
+        concise.stdout
+    );
+    assert_eq!(
+        status_concise_field(&concise, "min_pane_cols"),
+        Some(cols.to_string()),
+        "status concise min_pane_cols: {}",
+        concise.stdout
+    );
+    assert_eq!(
+        status_concise_field(&concise, "min_pane_rows"),
+        Some(rows.to_string()),
+        "status concise min_pane_rows: {}",
+        concise.stdout
+    );
+}
+
+#[test]
+fn status_reports_a_window_crowded_by_direct_splits_below_floor() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    let xdg = FloorXdg::new();
+    let pane = crowded_window_with_agent(&server);
+    let (_, cols, _) = tmux_landing(&server, &pane);
+    assert!(
+        cols < 58,
+        "the window must be crowded below 58 columns; got {cols}"
+    );
+
+    assert_status_verdict(&server, &xdg, &pane, true);
+}
+
+#[test]
+fn status_reports_a_roomy_window_with_the_same_registration_not_below_floor() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    let xdg = FloorXdg::new();
+    let pane = roomy_window_with_agent(&server);
+
+    assert_status_verdict(&server, &xdg, &pane, false);
+}
+
+/// The tmux format `status --format raw` passes through, as it stood before floors.
+fn status_raw_format() -> String {
+    [
+        "#{session_name}",
+        "#{window_index}.#{window_name}",
+        "#{pane_index}.#{pane_id}",
+        "#{@tt-name}",
+        "#{@tt-agent}",
+        "#{@tt-access}",
+        "#{@tt-launched-at}",
+        "#{@tt-cwd}",
+    ]
+    .join("\x1f")
+}
+
+#[test]
+fn status_raw_is_byte_for_byte_the_unchanged_passthrough() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    let xdg = FloorXdg::new();
+    let pane = crowded_window_with_agent(&server);
+
+    let raw = server.cli_env(
+        &["status", "--target", &pane, "--format", "raw"],
+        xdg.path(),
+    );
+    raw.assert_success("status --format raw");
+    let expected = server.tmux(&["display-message", "-p", "-t", &pane, &status_raw_format()]);
+    expected.assert_success("display the status format directly");
+    assert_eq!(
+        raw.stdout, expected.stdout,
+        "raw must be the passthrough, byte for byte"
+    );
+    assert_eq!(raw.stderr, "", "raw prints nothing on stderr");
+}
+
+/// The unparsable `agents.toml` the load-failure criteria inject.
+const UNPARSABLE_AGENTS_TOML: &str = "[codex\nmin_cols = 50\n";
+
+fn assert_registry_warning(out: &CmdOutput, ctx: &str) {
+    let warnings: Vec<&str> = out
+        .stderr
+        .lines()
+        .filter(|line| line.starts_with("warning: agent registry"))
+        .collect();
+    assert_eq!(
+        warnings.len(),
+        1,
+        "{ctx}: stderr must carry exactly one registry warning line: {:?}",
+        out.stderr
+    );
+    assert!(
+        warnings[0].ends_with("; using built-in floors"),
+        "{ctx}: the warning must say the built-in floors are used: {:?}",
+        warnings[0]
+    );
+    assert!(
+        warnings[0].contains("agents.toml"),
+        "{ctx}: the warning must name the file: {:?}",
+        warnings[0]
+    );
+}
+
+#[test]
+fn unparsable_agents_toml_warns_and_launch_and_status_still_report_floors() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    let broken = FloorXdg::new();
+    broken.write_agents_toml(UNPARSABLE_AGENTS_TOML);
+    let empty = FloorXdg::new();
+
+    let before = all_pane_ids(&server);
+    let launch = server.cli_env(
+        &["launch", "--cmd", "sh", "--format", "json"],
+        broken.path(),
+    );
+    let payload = json_payload(&launch, "launch with an unparsable agents.toml");
+    json_below_floor(&payload, "launch with an unparsable agents.toml");
+    assert_registry_warning(&launch, "launch");
+    let pane = payload["pane_id"].as_str().expect("pane_id").to_owned();
+    let after = all_pane_ids(&server);
+    assert_eq!(
+        after.len(),
+        before.len() + 1,
+        "launch must create exactly one pane: before {before:?}, after {after:?}"
+    );
+    assert!(after.contains(&pane));
+
+    let status = server.cli_env(
+        &["status", "--target", &pane, "--format", "json"],
+        broken.path(),
+    );
+    let payload = json_payload(
+        &status,
+        "status --format json with an unparsable agents.toml",
+    );
+    json_below_floor(&payload, "status --format json");
+    assert_registry_warning(&status, "status --format json");
+
+    let concise = server.cli_env(
+        &["status", "--target", &pane, "--format", "concise"],
+        broken.path(),
+    );
+    concise.assert_success("status --format concise with an unparsable agents.toml");
+    assert!(status_concise_field(&concise, "below_floor").is_some());
+    assert_registry_warning(&concise, "status --format concise");
+
+    let raw_broken = server.cli_env(
+        &["status", "--target", &pane, "--format", "raw"],
+        broken.path(),
+    );
+    let raw_empty = server.cli_env(
+        &["status", "--target", &pane, "--format", "raw"],
+        empty.path(),
+    );
+    raw_broken.assert_success("status --format raw with an unparsable agents.toml");
+    raw_empty.assert_success("status --format raw without agents.toml");
+    assert_eq!(
+        raw_broken.stdout, raw_empty.stdout,
+        "raw stdout must not change"
+    );
+    assert_eq!(
+        raw_broken.stderr, raw_empty.stderr,
+        "raw stderr must not change"
+    );
+}
+
+/// `status --target` with `TMUX` unset still renders a pane, so it loads the registry.
+#[test]
+fn status_target_outside_tmux_loads_the_registry_and_reports_the_verdict() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_outside();
+    let broken = FloorXdg::new();
+    broken.write_agents_toml(UNPARSABLE_AGENTS_TOML);
+    let empty = FloorXdg::new();
+    let pane = crowded_window_with_agent(&server);
+
+    let json = server.cli_env(
+        &["status", "--target", &pane, "--format", "json"],
+        empty.path(),
+    );
+    let payload = json_payload(&json, "status --target outside tmux");
+    assert!(json_below_floor(&payload, "status --target outside tmux"));
+
+    let warned = server.cli_env(
+        &["status", "--target", &pane, "--format", "json"],
+        broken.path(),
+    );
+    json_payload(
+        &warned,
+        "status --target outside tmux, unparsable agents.toml",
+    );
+    assert_registry_warning(&warned, "status --target outside tmux");
+}
+
+/// The not-in-tmux output never loads the registry.
+#[test]
+fn status_not_in_tmux_output_is_unchanged_and_loads_no_registry() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_outside();
+    let broken = FloorXdg::new();
+    broken.write_agents_toml(UNPARSABLE_AGENTS_TOML);
+
+    for (format, expected) in [
+        ("concise", "not in tmux\n"),
+        ("raw", "not in tmux\n"),
+        ("json", "{\n  \"in_tmux\": false\n}\n"),
+    ] {
+        let out = server.cli_env(&["status", "--format", format], broken.path());
+        out.assert_success(&format!("status --format {format} outside tmux"));
+        assert_eq!(
+            out.stdout, expected,
+            "status --format {format} not-in-tmux output"
+        );
+        assert_eq!(
+            out.stderr, "",
+            "status --format {format} must not load the registry"
+        );
+    }
+}
+
+#[cfg(feature = "test-fixtures")]
+#[test]
+fn spawn_agent_and_wait_idle_still_fail_on_an_unparsable_agents_toml() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    let broken = FloorXdg::new();
+    broken.write_agents_toml(UNPARSABLE_AGENTS_TOML);
+
+    let before = all_pane_ids(&server);
+    let spawned = server.cli_env(
+        &["spawn-agent", "codex", "--bare", "--format", "json"],
+        broken.path(),
+    );
+    assert_ne!(spawned.status, 0, "spawn-agent must fail: {spawned:?}");
+    assert_eq!(
+        all_pane_ids(&server),
+        before,
+        "spawn-agent must create no pane"
+    );
+
+    // wait-idle reads the registry for a pane that names an agent.
+    let agent_pane = roomy_window_with_agent(&server);
+    let waited = server.cli_env(
+        &["wait-idle", "--target", &agent_pane, "--timeout", "2"],
+        broken.path(),
+    );
+    assert_ne!(waited.status, 0, "wait-idle must fail: {waited:?}");
+}
+
+/// The README section documenting floors (`### Floors` up to the next heading).
+fn readme_floor_section() -> String {
+    let readme = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/README.md"))
+        .expect("README should be readable");
+    let start = readme
+        .find("### Floors")
+        .expect("README must document floors under a `### Floors` heading");
+    let body = &readme[start + "### Floors".len()..];
+    let end = body
+        .find("\n## ")
+        .into_iter()
+        .chain(body.find("\n### "))
+        .min()
+        .unwrap_or(body.len());
+    body[..end].to_owned()
+}
+
+#[test]
+fn readme_documents_surface_floors_and_their_limits() {
+    let section = readme_floor_section();
+    let normalized = section.split_whitespace().collect::<Vec<_>>().join(" ");
+    for needle in [
+        "`min_cols`",
+        "`min_rows`",
+        "pre-surface rendering",
+        "58×16",
+        "assumption",
+        "`codex` `default`",
+        "`cursor` `default`",
+        "`claude` `rich`",
+        "status-line pattern",
+        "`ready_regex`",
+        "`ready_lines`",
+        "does not enforce",
+        "agent versions",
+        "`validated_version`",
+    ] {
+        assert!(
+            normalized.contains(needle),
+            "README's floor section must mention {needle:?}"
+        );
+    }
+}

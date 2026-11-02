@@ -47,7 +47,7 @@ Most pane verbs accept `--target <name|id>`, `--format concise|json|raw`, `--ses
 | `escape` | `[--target name\|id]` | Sends `Escape`. |
 | `send-enter` | `[--target name\|id]` | Sends `Enter`. Same `--force`/`--any` guards as `kill`. Useful when an agent didn't process the Enter from `send --enter`/`prompt`. |
 | `list` | `[--session NAME] [--all]` | Lists panes in the managed/current scope by default. |
-| `status` | `[--target name\|id]` | Shows session, window, pane, name, and agent metadata. |
+| `status` | `[--target name\|id]` | Shows session, window, pane, name, and agent metadata; `concise` and `json` add the pane's window geometry (`min_pane_cols`, `min_pane_rows`) and floor verdict (`below_floor`, see "Floors"). `raw` is unchanged. |
 
 ## Configuration
 
@@ -184,6 +184,7 @@ Field summary:
 - `interrupt_key` — the key `interrupt` sends for this rendering.
 - `quit_when_idle` — whether that key quits the agent when the pane is idle.
 - `resume.syntax` / `resume.id_regex` — the resume-argument template and the identifier shape.
+- `min_cols` / `min_rows` — the surface's floor, the smallest pane its readiness signal stays matchable in (see "Floors").
 
 `default_surface` names the surface `spawn-agent` uses when `--surface` is omitted; exactly one surface per agent is the default. A named default is honored only once it carries a validated `ready_regex`/`busy_regex` pair — the flat surface's promotion bar — so an agent whose flat surface has no validated patterns keeps its former default. When an `agents.toml` explicitly names a `default_surface` that fails that bar, the load reports it on stderr (`warning: agent …: default_surface … is not smoke-validated … recording … instead`) and records the pre-surface rendering, rather than silently substituting a different surface. `pre_surface_rendering` names the surface matching the rendering the agent launched with before surfaces existed: readiness fields written at the agent level (no `[agent.surfaces.*]` tables) bind there, and a pane with no `@tt-surface` record resolves there. The two differ once a flat surface becomes the default; naming a different `default_surface` never moves `pre_surface_rendering`.
 
@@ -244,6 +245,33 @@ args = []
 ```
 
 `dsh --profile tui` is the rich, full-screen rendering; `dsh --profile dshline` is the flat, non-alternate-screen rendering. Both accept `--resume <id>`, with the identifier shapes above measured against and stamped with `dsh 0.1.5-rc.1`. The flat surface's measured `ready_regex`/`busy_regex` pair promotes it to the default; the rich surface stays the pre-surface rendering, so a pre-surface `agents.toml` override for `dsh` still governs `--profile tui`.
+
+### Floors
+
+A surface may declare a **floor**: `min_cols` and `min_rows`, the smallest pane its readiness signal stays matchable in. Both are optional and merge by field like the surface's other fields, so overriding one axis of a built-in surface keeps the built-in's other axis (`min_cols = 50` on `codex`'s `default` surface gives 50×9, not 50×16). Written at the agent level (the pre-surface shape), `min_cols`/`min_rows` bind to the agent's pre-surface rendering, as agent-level `ready_regex`/`ready_lines` do — never to a `default_surface` that differs from it. An agent declared without surfaces gets them on its one synthesized surface.
+
+```toml
+[codex.surfaces.default]
+min_cols = 50          # min_rows stays at the shipped 9
+
+[myagent]
+binary = "/usr/local/bin/myagent"
+min_cols = 40          # agent level: binds to the pre-surface rendering; rows default to 16
+```
+
+A pane's floor resolves from its `@tt-agent` and `@tt-surface` the way readiness does: a recorded surface is that surface, and no record is the agent's pre-surface rendering. An axis the resolved surface does not declare takes the global default of **58×16**; an agent the registry does not know, or a recorded surface it does not have, takes 58×16 for both. That default is an assumption, not a measurement: it is the componentwise maximum of the shipped floors, the most conservative value to assert for a TUI nobody has measured. A pane with no `@tt-agent` (a plain `launch`, or a pane made by raw `tmux split-window`) contributes no floor, but it is still measured. A window's effective floor is the componentwise maximum over its panes' floors.
+
+`launch` and `spawn-agent` report `below_floor` for the window the pane landed in, and `status` reports it with `min_pane_cols`/`min_pane_rows` for the window of the pane it resolves (`concise` and `json` only; `raw` is unchanged). `below_floor` is true when the window's smallest pane width or height is below the matching axis of its effective floor; a window without agent panes is never below floor. The floor is advisory: the tool reports a breach and does not move or refuse a pane, and raw tmux splits bypass it. `launch` and `status` use the registry only for floors, so when `agents.toml` cannot be read or parsed they print `warning: agent registry <path>: <error>; using built-in floors` and carry on with the built-ins; `spawn-agent` and `wait-idle` still fail on such a file.
+
+Shipped floors, each one step above the readiness cliff measured on 2026-08-01, each against the readiness rules of one surface:
+
+| Surface | Floor | Measured against |
+| --- | --- | --- |
+| `codex` `default` | 58×9 | its shipped `ready_regex`/`ready_lines` (the status line wraps at 56 columns) |
+| `cursor` `default` | 36×9 | its shipped `ready_regex`/`ready_lines` |
+| `claude` `rich` | 26×16 | the opt-in status-line pattern a user declares on it (see "Detecting readiness from a custom Claude status line"); at 14 rows `ready_lines = 0` no longer finds the indicator |
+
+`claude` `flat`, `agy` `default` and every other surface ship no floor and take 58×16. A floor is derived from the `ready_regex`/`ready_lines` it was measured with: changing either on that surface makes its floor invalid, and the tool does not enforce this coupling — re-measure and set `min_cols`/`min_rows` yourself. The 2026-08-01 measurement recorded no agent versions, and a surface's `validated_version` does not cover its floor.
 
 ### Detecting readiness from a custom Claude status line
 

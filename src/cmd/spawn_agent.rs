@@ -59,6 +59,7 @@ struct SpawnAgentJson<'a> {
     window_id: &'a str,
     min_pane_cols: u32,
     min_pane_rows: u32,
+    below_floor: bool,
 }
 
 pub fn run(args: &SpawnAgentArgs) -> Result<()> {
@@ -97,6 +98,7 @@ pub fn run(args: &SpawnAgentArgs) -> Result<()> {
                 surface_unvalidated: !args.extra_args.is_empty(),
             }),
         },
+        &registry,
     )?;
 
     render_output(
@@ -168,7 +170,7 @@ fn render_output(
 ) -> Result<()> {
     match args.common.format {
         Format::Concise => println!(
-            "agent={} access={} surface={} name={} pane={} window_id={} min_pane_cols={} min_pane_rows={}",
+            "agent={} access={} surface={} name={} pane={} window_id={} min_pane_cols={} min_pane_rows={} below_floor={}",
             args.agent,
             display_value(args.access.as_deref()),
             surface,
@@ -176,7 +178,8 @@ fn render_output(
             landing.pane_id,
             landing.window_id,
             landing.min_pane_cols,
-            landing.min_pane_rows
+            landing.min_pane_rows,
+            landing.below_floor
         ),
         Format::Json => {
             let output = SpawnAgentJson {
@@ -191,6 +194,7 @@ fn render_output(
                 window_id: &landing.window_id,
                 min_pane_cols: landing.min_pane_cols,
                 min_pane_rows: landing.min_pane_rows,
+                below_floor: landing.below_floor,
             };
             println!("{}", serde_json::to_string(&output)?);
         }
