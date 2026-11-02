@@ -15,13 +15,13 @@ the whole glossary.
 
 ## Agents and readiness
 
-**Agent profile** [aggregate] — one named registry entry: the binary to run, its [[Surface]] map, its access profiles, and its capabilities; plus its geometry floor (*planned — PRD-260801-0656-01 · ISSUE-260801-1310-05*). _Avoid_: agent config, agent definition. ↔ core/src/agents/mod.rs
+**Agent profile** [aggregate] — one named registry entry: the binary to run, its [[Surface]] map, its access profiles, and its capabilities. _Avoid_: agent config, agent definition. ↔ core/src/agents/mod.rs
 
 **Agent registry** [repository] — the built-in profiles deep-merged with the user's `agents.toml`. _Avoid_: agent list, catalogue. ↔ core/src/agents/mod.rs
 
 **Access profile** [VO] — a named argument set granting an agent a level of filesystem authority, e.g. `read-only`, `workspace-write`, `full-access`. _Avoid_: permission, sandbox mode. ↔ core/src/agents/mod.rs
 
-**Surface** [VO] — one named **rendering** of an agent: the launch arguments that select it and every rendering-dependent behavior (readiness patterns, bracketed-paste capability, interrupt key and its quit hazard, resume syntax), plus the agent version those declarations were measured against. An agent carries a map of surfaces; `spawn-agent --surface <name>` selects one, and the resolved name is recorded in [[Pane registration]]. _Avoid_: mode, profile, variant. ↔ core/src/agents/mod.rs
+**Surface** [VO] — one named **rendering** of an agent: the launch arguments that select it and every rendering-dependent behavior (readiness patterns, bracketed-paste capability, interrupt key and its quit hazard, resume syntax), plus the agent version those declarations were measured against, and its [[Floor]] (*planned — PRD-260801-0656-01 · ISSUE-260801-1310-05*). An agent carries a map of surfaces; `spawn-agent --surface <name>` selects one, and the resolved name is recorded in [[Pane registration]]. _Avoid_: mode, profile, variant. ↔ core/src/agents/mod.rs
 
 **Default surface** [VO] — the surface `spawn-agent` resolves when no `--surface` is given, named by `default_surface`. Exactly one per agent after the `agents.toml` deep-merge. It is promotable: a flat surface becomes the default only once it ships a `ready_regex`/`busy_regex` pair carrying a [[Validated version]]; until then the agent keeps its [[Pre-surface rendering]] as the default. When an `agents.toml` explicitly names a `default_surface` that fails that bar, the fallback is reported through the registry load warning rather than applied silently. _Avoid_: primary surface, current surface. ↔ core/src/agents/mod.rs
 
@@ -57,13 +57,13 @@ the whole glossary.
 
 **Turn observation** [VO] — whether `busy_regex` was observed between submission and settle. It reports that the agent took the turn and makes no claim about where content begins. _Avoid_: turn detection, completion. ↔ src/cmd/prompt.rs *(planned — PRD-260918-0323-01 · ISSUE-260918-0525-06)*
 
-**Completeness** [VO] — whether everything after the [[History mark]] can be supplied: `false` when the pane has no scrollback (per live `alternate_on`) or history has evicted lines. Reported independently of [[Turn observation]]. _Avoid_: truncation, fidelity. ↔ src/cmd/prompt.rs *(planned — PRD-260918-0323-01 · ISSUE-260918-0525-06)*
+**Completeness** [VO] — whether everything after the [[History mark]] can be supplied: `false` when the pane has no scrollback (per live `alternate_on`), history has evicted lines, or the pane's width changed between the mark and settle (*width condition planned — PRD-260918-0323-01 · ISSUE-261102-0012-01*). Reported independently of [[Turn observation]]. _Avoid_: truncation, fidelity. ↔ src/cmd/prompt.rs *(planned — PRD-260918-0323-01 · ISSUE-260918-0525-06)*
 
 ## Layout and geometry
 
 **Tile** [VO] — the placement mode that applies tmux's `tiled` layout to a window after each spawn; the implicit default inside tmux. _Avoid_: grid, auto-layout. ↔ core/src/layout.rs *(planned — PRD-260801-0656-01)*
 
-**Floor** [VO] — the minimum pane geometry an agent needs for its readiness signal to remain matchable, declared per agent as `min_cols`/`min_rows`. _Avoid_: minimum size, threshold, limit. ↔ core/src/agents/mod.rs *(planned — PRD-260801-0656-01)*
+**Floor** [VO] — the minimum pane geometry a [[Surface]] needs for its readiness signal to remain matchable, declared per surface as `min_cols`/`min_rows` and resolved from the pane's `@tt-agent` and `@tt-surface`. _Avoid_: minimum size, threshold, limit. ↔ core/src/agents/mod.rs *(planned — PRD-260801-0656-01)*
 
 **Effective floor** [VO] — a window's floor: the componentwise maximum over the floors contributed by the panes in it; panes with no agent contribute none but are still measured. _Avoid_: window floor, combined minimum. ↔ core/src/layout.rs *(planned — PRD-260801-0656-01)*
 
@@ -73,7 +73,7 @@ the whole glossary.
 
 **Overflow window** [entity] — the window a pane is moved to when placing it would push its origin below the effective floor. _Avoid_: spillover window, secondary window. ↔ core/src/layout.rs *(planned — PRD-260801-0656-01)*
 
-**Layout intent** [VO] — whether a window is tool-tiled or human-arranged, recorded as the `@tt-tiled` window option (unset when cleared, so "cleared" and "never set" are one state). A record of what the tool did, not a permission to act: it gates teardown (`kill` retiling) and overflow-destination eligibility, never placement — which is gated by [[Ownership]] alone, since the first tiling placement into any window necessarily finds no marker and is what sets one. _Avoid_: tiled flag, managed layout. ↔ core/src/layout.rs *(planned — PRD-260801-0656-01)*
+**Layout intent** [VO] — whether a window is tool-tiled or human-arranged, recorded as the `@tt-tiled` window option (unset when cleared, so "cleared" and "never set" are one state). A record of what the tool did, not a permission to act: it gates teardown (`kill` retiling), the `rebalance` verb, and overflow-destination eligibility, never placement — which is gated by [[Ownership]] alone, since the first tiling placement into any window necessarily finds no marker and is what sets one. _Avoid_: tiled flag, managed layout. ↔ core/src/layout.rs *(planned — PRD-260801-0656-01)*
 
 ## Ownership
 
