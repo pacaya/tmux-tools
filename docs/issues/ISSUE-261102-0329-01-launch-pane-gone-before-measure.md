@@ -2,7 +2,7 @@
 id: ISSUE-261102-0329-01
 kind: issue
 category: bug
-status: needs-triage
+status: ready-for-agent
 brief_contract: agent-brief.v3
 context: tmux-tools
 summary: launch and spawn-agent exit 0 and omit window geometry when their new pane no longer exists at a placement step after the split
