@@ -10545,3 +10545,431 @@ fn launch_fails_on_an_injected_measurement_error_with_the_pane_alive() {
 fn launch_fails_on_an_injected_registration_error_with_the_pane_alive() {
     assert_launch_fails_with_live_pane_fault(PlacementStep::Registration, StepFault::InjectedError);
 }
+
+// ---------------------------------------------------------------------------
+// ISSUE-260801-1310-06 — kill-time reclamation: `kill` retiles a window that carries
+// `@tt-tiled` and holds a pane this invocation owns, in the same tmux command
+// sequence as the removal, so the surviving panes reclaim the removed pane's space.
+//
+// "Retiled" means the remaining panes' geometry equals what an explicit
+// `select-layout tiled` of the same panes produces; "not retiled" means it differs.
+// Every fixture is built directly through tmux in tmux's tiled arrangement with five
+// or six panes, so tiled and untiled geometry differ after a kill.
+// ---------------------------------------------------------------------------
+
+/// How a reclamation fixture pane is registered.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FixturePane {
+    /// `@tt-name` and `@tt-cwd` set to the fixture's owned cwd.
+    Owned,
+    /// `@tt-name` and a `@tt-cwd` of another project.
+    ForeignCwd,
+    /// No registration at all.
+    Unregistered,
+}
+
+/// The `@tt-cwd` of a fixture pane registered from another project.
+const FOREIGN_PROJECT_CWD: &str = "/nonexistent/other-project";
+
+/// A tiled fixture window: its id and its panes in pane order (row-major).
+struct TiledFixture {
+    window: String,
+    panes: Vec<String>,
+}
+
+/// A new window in the harness session holding one pane per `layout` entry in tmux's
+/// tiled arrangement, registered as `layout` says against the harness cwd, carrying
+/// `@tt-tiled` when `marked`.
+fn tiled_fixture(
+    server: &IsolatedTmuxServer,
+    layout: &[FixturePane],
+    marked: bool,
+) -> TiledFixture {
+    tiled_fixture_in(server, layout, marked, &harness_cwd(), "sleep 600")
+}
+
+/// [`tiled_fixture`] with every pane started in `owned_cwd`, `Owned` panes recording
+/// it as `@tt-cwd`, and the first pane running `first_cmd`.
+fn tiled_fixture_in(
+    server: &IsolatedTmuxServer,
+    layout: &[FixturePane],
+    marked: bool,
+    owned_cwd: &str,
+    first_cmd: &str,
+) -> TiledFixture {
+    let session = format!("={HARNESS_SESSION}:");
+    let first = server.tmux(&[
+        "new-window",
+        "-d",
+        "-t",
+        &session,
+        "-c",
+        owned_cwd,
+        "-P",
+        "-F",
+        "#{pane_id}",
+        first_cmd,
+    ]);
+    first.assert_success("fixture: create a window");
+    let first = first.stdout.trim().to_owned();
+    let window = window_of(server, &first);
+    for _ in 1..layout.len() {
+        server
+            .tmux(&[
+                "split-window",
+                "-d",
+                "-t",
+                &window,
+                "-c",
+                owned_cwd,
+                "sleep",
+                "600",
+            ])
+            .assert_success("fixture: split the window");
+        server
+            .tmux(&["select-layout", "-t", &window, "tiled"])
+            .assert_success("fixture: tile the window");
+    }
+    let panes: Vec<String> = window_rects(server, &window)
+        .into_iter()
+        .map(|rect| rect.0)
+        .collect();
+    assert_eq!(panes.len(), layout.len(), "fixture: pane count");
+    assert_eq!(panes[0], first, "fixture: the first pane keeps index 0");
+    for (index, (pane, kind)) in panes.iter().zip(layout).enumerate() {
+        let name = format!("reclaim-{}-{index}", window.trim_start_matches('@'));
+        match kind {
+            FixturePane::Owned => register_name_and_cwd(server, pane, &name, owned_cwd),
+            FixturePane::ForeignCwd => {
+                register_name_and_cwd(server, pane, &name, FOREIGN_PROJECT_CWD)
+            }
+            FixturePane::Unregistered => {}
+        }
+    }
+    if marked {
+        server
+            .tmux(&["set-option", "-w", "-t", &window, TILED_MARKER, "1"])
+            .assert_success("fixture: mark the window tiled");
+    }
+    TiledFixture { window, panes }
+}
+
+/// `n` owned fixture panes.
+fn owned_panes(n: usize) -> Vec<FixturePane> {
+    vec![FixturePane::Owned; n]
+}
+
+/// Assert `window` is not retiled: an explicit `select-layout tiled` of its panes
+/// changes some pane's rectangle.
+fn assert_not_retiled(server: &IsolatedTmuxServer, window: &str, ctx: &str) {
+    let placed = window_rects(server, window);
+    server
+        .tmux(&["select-layout", "-t", window, "tiled"])
+        .assert_success("explicit select-layout tiled");
+    let tiled = window_rects(server, window);
+    assert_ne!(
+        placed, tiled,
+        "{ctx}: the window must not be in tmux's tiled arrangement"
+    );
+}
+
+/// `tmux-tools kill --target <pane>` plus `extra`; asserts exit 0 and that the pane
+/// left the server.
+fn kill_and_assert_gone(server: &IsolatedTmuxServer, pane: &str, extra: &[&str]) -> CmdOutput {
+    let mut args = vec!["kill", "--target", pane];
+    args.extend_from_slice(extra);
+    let out = server.cli(&args);
+    out.assert_success(&format!("kill --target {pane} {extra:?}"));
+    assert!(
+        !all_pane_ids(server).contains(&pane.to_owned()),
+        "kill --target {pane} must remove the pane"
+    );
+    out
+}
+
+/// Acceptance: in a marked, owned window of six tiled panes, killing any two panes
+/// leaves four panes each at least 40 rows tall.
+#[test]
+fn kill_of_any_two_panes_of_six_leaves_four_panes_at_least_forty_rows_tall() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    for first in 0..6 {
+        for second in first + 1..6 {
+            let fixture = tiled_fixture(&server, &owned_panes(6), true);
+            kill_and_assert_gone(&server, &fixture.panes[first], &[]);
+            kill_and_assert_gone(&server, &fixture.panes[second], &[]);
+            let rects = window_rects(&server, &fixture.window);
+            assert_eq!(rects.len(), 4, "panes {first} and {second}: four remain");
+            assert!(
+                rects.iter().all(|rect| rect.4 >= 40),
+                "killing panes {first} and {second}: every remaining pane must be at least \
+                 40 rows tall: {rects:?}"
+            );
+        }
+    }
+}
+
+/// Acceptance: in a marked, owned window of six tiled panes, killing one pane outside
+/// the last row retiles the window.
+#[test]
+fn kill_of_a_pane_outside_the_last_row_of_six_retiles_the_window() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    let probe = tiled_fixture(&server, &owned_panes(6), true);
+    let rects = window_rects(&server, &probe.window);
+    let last_row_top = rects.iter().map(|rect| rect.2).max().unwrap();
+    let outside_last_row: Vec<usize> = (0..rects.len())
+        .filter(|&index| rects[index].2 < last_row_top)
+        .collect();
+    assert_eq!(outside_last_row.len(), 4, "fixture: three rows of two");
+
+    for index in outside_last_row {
+        let fixture = tiled_fixture(&server, &owned_panes(6), true);
+        kill_and_assert_gone(&server, &fixture.panes[index], &[]);
+        assert_retiled(
+            &server,
+            &fixture.window,
+            &format!("kill of pane {index} of six"),
+        );
+    }
+}
+
+/// Acceptance: of two windows that differ only in `@tt-tiled`, each holding owned
+/// panes, killing the corresponding pane retiles only the marked window.
+#[test]
+fn kill_retiles_only_the_marked_one_of_two_owned_windows() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    let marked = tiled_fixture(&server, &owned_panes(5), true);
+    let unmarked = tiled_fixture(&server, &owned_panes(5), false);
+
+    kill_and_assert_gone(&server, &marked.panes[0], &[]);
+    kill_and_assert_gone(&server, &unmarked.panes[0], &[]);
+
+    assert_retiled(&server, &marked.window, "kill in the marked window");
+    assert_not_retiled(&server, &unmarked.window, "kill in the unmarked window");
+}
+
+/// Acceptance: a marked window whose only owned pane is the target is retiled when
+/// that pane is killed: ownership is read before the pane and its options vanish.
+#[test]
+fn kill_of_the_only_owned_pane_retiles_its_marked_window() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    let mut layout = vec![FixturePane::Unregistered; 5];
+    layout[0] = FixturePane::Owned;
+    let fixture = tiled_fixture(&server, &layout, true);
+
+    kill_and_assert_gone(&server, &fixture.panes[0], &[]);
+
+    assert_retiled(&server, &fixture.window, "kill of the only owned pane");
+}
+
+/// Acceptance: `kill --any` of an unowned target in a marked window holding an owned
+/// sibling retiles the window.
+#[test]
+fn kill_any_of_an_unowned_target_beside_an_owned_sibling_retiles_the_window() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    let mut layout = vec![FixturePane::Unregistered; 5];
+    layout[1] = FixturePane::Owned;
+    let fixture = tiled_fixture(&server, &layout, true);
+
+    kill_and_assert_gone(&server, &fixture.panes[0], &["--any"]);
+
+    assert_retiled(&server, &fixture.window, "kill --any of an unowned target");
+}
+
+/// Acceptance: `kill --any` in a marked window whose panes carry a foreign `@tt-cwd`
+/// does not retile it; the control window, differing only in `@tt-cwd`, is retiled.
+#[test]
+fn kill_any_does_not_retile_a_foreign_cwd_window_but_retiles_its_owned_control() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    let foreign = tiled_fixture(&server, &[FixturePane::ForeignCwd; 5], true);
+    let control = tiled_fixture(&server, &owned_panes(5), true);
+
+    kill_and_assert_gone(&server, &foreign.panes[0], &["--any"]);
+    kill_and_assert_gone(&server, &control.panes[0], &["--any"]);
+
+    assert_not_retiled(&server, &foreign.window, "kill --any in the foreign window");
+    assert_retiled(&server, &control.window, "kill --any in the control window");
+}
+
+/// Acceptance: a process in one pane of a marked, owned five-pane window that runs
+/// `kill --force` on its own pane is hung up with it, and the remaining panes are
+/// still retiled.
+#[test]
+fn kill_force_of_the_callers_own_pane_retiles_the_remaining_panes() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    // The pane process runs from this cwd and the fixture records it as `@tt-cwd`; it
+    // is canonical so the kill's own cwd reads back the same.
+    let cwd = std::fs::canonicalize(harness_cwd())
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    let go = server.tmpdir().join("self-kill-go");
+    let quote = |value: &str| format!("'{}'", value.replace('\'', "'\\''"));
+    // Waits until the fixture is complete, then kills its own pane; prints the exit
+    // status and stays alive only if the kill did not take the pane.
+    let command = format!(
+        "while [ ! -e {go} ]; do sleep 0.05; done; {bin} kill --force --target \"$TMUX_PANE\"; \
+         echo kill-exit=$?; sleep 600",
+        go = quote(&go.to_string_lossy()),
+        bin = quote(BIN),
+    );
+    let fixture = tiled_fixture_in(&server, &owned_panes(5), true, &cwd, &command);
+    let caller = fixture.panes[0].clone();
+
+    std::fs::write(&go, "").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while all_pane_ids(&server).contains(&caller) {
+        if Instant::now() > deadline {
+            let screen = server.tmux(&["capture-pane", "-p", "-t", &caller]);
+            panic!(
+                "the pane's own kill --force must remove it; pane shows:\n{}",
+                screen.stdout
+            );
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+
+    assert_eq!(window_rects(&server, &fixture.window).len(), 4);
+    assert_retiled(
+        &server,
+        &fixture.window,
+        "kill --force of the caller's own pane",
+    );
+}
+
+/// Acceptance: killing the single, owned pane of a marked window exits 0, removes the
+/// window, and emits no error (no retile is attempted on a window that is gone).
+#[test]
+fn kill_of_the_last_pane_of_a_marked_window_removes_it_without_error() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    let fixture = tiled_fixture(&server, &[FixturePane::Owned], true);
+
+    let out = kill_and_assert_gone(&server, &fixture.panes[0], &[]);
+
+    assert_eq!(out.stderr, "", "kill of the last pane must emit no error");
+    let windows = server.tmux(&["list-windows", "-a", "-F", "#{window_id}"]);
+    windows.assert_success("list windows");
+    assert!(
+        !windows.stdout.lines().any(|line| line == fixture.window),
+        "the window {} must be gone: {}",
+        fixture.window,
+        windows.stdout
+    );
+}
+
+/// Acceptance: a retiling kill prints exactly what `kill` printed before, in every
+/// format, and nothing on stderr.
+#[test]
+fn retiling_kill_output_is_unchanged_in_every_format() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    for format in ["concise", "json", "raw"] {
+        let fixture = tiled_fixture(&server, &owned_panes(5), true);
+        let pane = fixture.panes[0].clone();
+        let name = registered_name(&server, &pane);
+
+        let out = kill_and_assert_gone(&server, &pane, &["--format", format]);
+
+        let expected = match format {
+            "concise" => format!("killed pane={pane} name={name}\n"),
+            "json" => format!("{{\"pane_id\":\"{pane}\",\"name\":\"{name}\",\"agent\":null}}\n"),
+            _ => format!("{pane}\n"),
+        };
+        assert_eq!(out.stdout, expected, "kill --format {format} stdout");
+        assert_eq!(out.stderr, "", "kill --format {format} stderr");
+        assert_retiled(&server, &fixture.window, &format!("kill --format {format}"));
+    }
+}
+
+/// Acceptance: in a marked, owned window the safety guards still deny an unowned and a
+/// foreign-cwd target without `--any`, with the unchanged messages, and neither the
+/// pane nor the window's geometry changes.
+#[test]
+fn kill_denials_in_a_marked_owned_window_are_unchanged_and_touch_nothing() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    let mut layout = owned_panes(5);
+    layout[0] = FixturePane::Unregistered;
+    layout[1] = FixturePane::ForeignCwd;
+    let fixture = tiled_fixture(&server, &layout, true);
+    let before = window_rects(&server, &fixture.window);
+
+    let unowned = &fixture.panes[0];
+    let out = server.cli(&["kill", "--target", unowned]);
+    assert_ne!(out.status, 0, "kill of an unowned pane without --any");
+    assert!(
+        out.stderr.contains(&format!(
+            "refusing to kill pane {unowned} not created by tmux-tools (no @tt-name or \
+             @tt-agent set); pass --any to override"
+        )),
+        "stderr: {}",
+        out.stderr
+    );
+    assert_eq!(out.stdout, "");
+
+    let foreign = &fixture.panes[1];
+    let out = server.cli(&["kill", "--target", foreign]);
+    assert_ne!(out.status, 0, "kill of a foreign-cwd pane without --any");
+    assert!(
+        out.stderr.contains(&format!(
+            "refusing to kill pane {foreign} owned by another cwd ({FOREIGN_PROJECT_CWD}); \
+             pass --any to override"
+        )),
+        "stderr: {}",
+        out.stderr
+    );
+    assert_eq!(out.stdout, "");
+
+    assert_eq!(
+        window_rects(&server, &fixture.window),
+        before,
+        "a denied kill must leave every pane and its geometry as it was"
+    );
+}
+
+/// The core window guard names which guard failed: the marker, or ownership.
+#[test]
+fn core_window_guard_reports_which_guard_failed() {
+    use tmux_tools_core::layout::{window_guard, WindowGuard};
+
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    let cwd = harness_cwd();
+    let mut one_owned = vec![FixturePane::Unregistered; 3];
+    one_owned[2] = FixturePane::Owned;
+    let cases = [
+        (tiled_fixture(&server, &one_owned, true), WindowGuard::Holds),
+        (
+            tiled_fixture(&server, &owned_panes(3), false),
+            WindowGuard::MarkerAbsent,
+        ),
+        (
+            tiled_fixture(&server, &[FixturePane::ForeignCwd; 3], false),
+            WindowGuard::MarkerAbsent,
+        ),
+        (
+            tiled_fixture(
+                &server,
+                &[FixturePane::ForeignCwd, FixturePane::Unregistered],
+                true,
+            ),
+            WindowGuard::NoOwnedPane,
+        ),
+    ];
+    for (fixture, expected) in cases {
+        for target in [&fixture.window, &fixture.panes[0]] {
+            let guard = tmux_tools_core::with_invocation(server.core_invocation(), || {
+                window_guard(target, Some(&cwd))
+            })
+            .expect("the window guard must read the window");
+            assert_eq!(guard, expected, "window guard for {target}");
+        }
+    }
+}

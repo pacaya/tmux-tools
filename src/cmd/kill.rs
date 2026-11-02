@@ -3,7 +3,7 @@ use clap::Args;
 use serde::Serialize;
 use tmux_tools_core::{
     format::{Format, MISSING_GLYPH},
-    target, tmux,
+    layout, target,
 };
 
 use crate::{cmd::safety, CommonArgs};
@@ -36,7 +36,10 @@ pub fn run(args: &KillArgs) -> Result<()> {
     let pane = target::resolve_from_common(&args.common)?;
     let registered = safety::enforce_for_pane(VERB, &pane, args.force, args.any)?;
 
-    kill_pane(&pane)?;
+    // The safety verdict above governs destruction only (`--any` included). Whether the
+    // window is retiled is the layout module's window guard, evaluated across the whole
+    // window before the pane is destroyed.
+    layout::remove_pane(&pane, current_cwd().as_deref())?;
 
     match args.common.format {
         Format::Concise => {
@@ -60,8 +63,10 @@ pub fn run(args: &KillArgs) -> Result<()> {
     Ok(())
 }
 
-fn kill_pane(pane: &str) -> Result<()> {
-    // Pane user-options vanish with the pane; no explicit unset needed.
-    tmux::run_checked(&["kill-pane", "-t", pane])?;
-    Ok(())
+/// The invoking process's cwd, the ownership predicate's `current_cwd`; `None` when it
+/// is unreadable.
+fn current_cwd() -> Option<String> {
+    std::env::current_dir()
+        .ok()
+        .map(|cwd| cwd.to_string_lossy().into_owned())
 }

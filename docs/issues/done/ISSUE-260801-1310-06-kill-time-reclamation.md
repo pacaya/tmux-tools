@@ -2,7 +2,7 @@
 id: ISSUE-260801-1310-06
 kind: issue
 category: enhancement
-status: ready-for-agent
+status: done
 brief_contract: agent-brief.v3
 context: tmux-tools
 summary: kill retiles a tool-tiled window so survivors reclaim the removed pane's space

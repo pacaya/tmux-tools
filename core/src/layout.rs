@@ -10,6 +10,12 @@
 //! registration; they never create a pane themselves.
 //! [`rebalance`] retiles a window and returns its measured geometry.
 //!
+//! It owns the window guard and kill-time reclamation: [`window_guard`] answers
+//! whether the tool may rearrange a window (it carries [`TILED_MARKER`] and holds a
+//! pane this invocation owns), and [`remove_pane`] destroys a pane and, when that
+//! guard held before the destruction, retiles its window in the same tmux command
+//! sequence.
+//!
 //! It also owns floors: [`pane_floor`] resolves a pane's floor from its registration
 //! and the agent registry, [`effective_floor`] combines a window's, and
 //! [`floor_violations`] / [`below_floor`] give the verdict. Those are pure over measured
@@ -515,11 +521,140 @@ pub fn rebalance(target: &str) -> Result<WindowGeometry> {
     measure(target)
 }
 
+/// tmux's layout name for the tiled arrangement this tool applies.
+const TILED_LAYOUT: &str = "tiled";
+
 /// Apply tmux's `tiled` layout to the window that `target` is in.
 fn retile(target: &str) -> Result<()> {
-    tmux::run_checked(&["select-layout", "-t", target, "tiled"])
+    tmux::run_checked(&["select-layout", "-t", target, TILED_LAYOUT])
         .with_context(|| format!("cannot retile the window of {target}"))?;
     Ok(())
+}
+
+/// The window guard's answer: whether the tool may rearrange a window.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WindowGuard {
+    /// The window carries [`TILED_MARKER`] and holds a pane [`names::pane_is_owned`]
+    /// reports as ours.
+    Holds,
+    /// The window does not carry [`TILED_MARKER`]: the tool did not arrange it. This is
+    /// the answer whenever the marker is absent, whatever the window's ownership.
+    MarkerAbsent,
+    /// The window carries [`TILED_MARKER`] but holds no pane this invocation owns.
+    NoOwnedPane,
+}
+
+impl WindowGuard {
+    /// Whether the guard holds.
+    pub fn holds(self) -> bool {
+        self == WindowGuard::Holds
+    }
+}
+
+/// Evaluate the window guard on the window that `target` (a pane or window target)
+/// is in: read its [`TILED_MARKER`] and apply [`names::pane_is_owned`], judged
+/// against `current_cwd`, to every pane of the window.
+pub fn window_guard(target: &str, current_cwd: Option<&str>) -> Result<WindowGuard> {
+    Ok(read_window_state(target)?.guard(current_cwd))
+}
+
+/// What [`remove_pane`] did besides destroying the pane.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Removal {
+    /// The window guard, evaluated on the pane's window before the pane was destroyed.
+    pub guard: WindowGuard,
+    /// Whether the window was retiled: the guard held and the pane was not the
+    /// window's last.
+    pub retiled: bool,
+}
+
+/// Destroy `pane_id` and, when the window guard holds on its window, retile the
+/// panes that remain.
+///
+/// The guard is read before the destruction: pane options vanish with the pane, so a
+/// pane holding the window's only ownership evidence still counts. The removal and
+/// the retile reach tmux as one command sequence, so the retile completes even when
+/// the destroyed pane is the caller's own and the calling process is hung up with it.
+/// A pane that is its window's last takes the window with it; no retile is sent.
+pub fn remove_pane(pane_id: &str, current_cwd: Option<&str>) -> Result<Removal> {
+    let state = read_window_state(pane_id)?;
+    let guard = state.guard(current_cwd);
+    let retiled = guard.holds() && state.panes.len() > 1;
+    tmux::run_checked_owned(&removal_args(pane_id, &state.window_id, retiled))?;
+    Ok(Removal { guard, retiled })
+}
+
+/// The tmux arguments that destroy `pane_id` and, when `retile` is set, retile
+/// `window_id` in the same command sequence.
+fn removal_args(pane_id: &str, window_id: &str, retile: bool) -> Vec<String> {
+    let mut args = vec!["kill-pane", "-t", pane_id];
+    if retile {
+        args.extend([";", "select-layout", "-t", window_id, TILED_LAYOUT]);
+    }
+    args.into_iter().map(str::to_owned).collect()
+}
+
+/// What the window guard reads about one window.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct WindowState {
+    window_id: String,
+    /// Whether the window carries [`TILED_MARKER`].
+    marked: bool,
+    /// The registration of every pane in the window, as the ownership predicate reads it.
+    panes: Vec<names::Registered>,
+}
+
+impl WindowState {
+    fn guard(&self, current_cwd: Option<&str>) -> WindowGuard {
+        guard_verdict(self.marked, &self.panes, current_cwd)
+    }
+}
+
+/// The window guard over what was read: the marker first, then ownership.
+fn guard_verdict(
+    marked: bool,
+    panes: &[names::Registered],
+    current_cwd: Option<&str>,
+) -> WindowGuard {
+    if !marked {
+        WindowGuard::MarkerAbsent
+    } else if panes
+        .iter()
+        .any(|registered| names::pane_is_owned(registered, current_cwd))
+    {
+        WindowGuard::Holds
+    } else {
+        WindowGuard::NoOwnedPane
+    }
+}
+
+/// Read the window that `target` is in: its id, then its marker and its panes'
+/// registrations by that id.
+fn read_window_state(target: &str) -> Result<WindowState> {
+    let window_id = tmux::run_checked(&["display-message", "-p", "-t", target, "#{window_id}"])
+        .with_context(|| format!("cannot read the window of {target}"))?
+        .trim()
+        .to_owned();
+    if window_id.is_empty() {
+        return Err(anyhow!("tmux reported no window id for {target}"));
+    }
+    let marked = tiled_marker_present(&window_id)?;
+    let panes = read_ownership_snapshot(&window_id)?;
+    Ok(WindowState {
+        window_id,
+        marked,
+        panes,
+    })
+}
+
+/// Whether the window that `target` is in carries [`TILED_MARKER`] itself (a global
+/// value is not the window's record). Presence is the test, whatever the value.
+fn tiled_marker_present(target: &str) -> Result<bool> {
+    let output = tmux::run_checked(&["show-options", "-w", "-q", "-t", target, TILED_MARKER])
+        .with_context(|| format!("cannot read the tiled marker of the window of {target}"))?;
+    Ok(output
+        .lines()
+        .any(|line| line.split_whitespace().next() == Some(TILED_MARKER)))
 }
 
 /// Set [`TILED_MARKER`] on the window that `target` is in.
@@ -540,14 +675,20 @@ fn clear_tiled_marker(target: &str) -> Result<()> {
 /// Whether the window that `target` is in holds a pane [`names::pane_is_owned`]
 /// reports as ours, judged against `current_cwd`.
 fn window_has_owned_pane(target: &str, current_cwd: Option<&str>) -> Result<bool> {
+    Ok(read_ownership_snapshot(target)?
+        .iter()
+        .any(|registered| names::pane_is_owned(registered, current_cwd)))
+}
+
+/// The registration of every pane in the window that `target` is in, as the
+/// ownership predicate reads it.
+fn read_ownership_snapshot(target: &str) -> Result<Vec<names::Registered>> {
     let format = [names::KEY_NAME, names::KEY_AGENT, names::KEY_CWD]
         .map(|key| format!("#{{{key}}}"))
         .join(&FIELD_SEP.to_string());
     let output = tmux::run_checked(&["list-panes", "-t", target, "-F", &format])
         .with_context(|| format!("cannot read the panes of the window of {target}"))?;
-    Ok(parse_ownership_snapshot(&output)?
-        .iter()
-        .any(|registered| names::pane_is_owned(registered, current_cwd)))
+    parse_ownership_snapshot(&output)
 }
 
 /// Parse ownership snapshot lines — `@tt-name`, `@tt-agent` and `@tt-cwd`, separated
@@ -1117,6 +1258,85 @@ mod tests {
         assert!(parse_ownership_snapshot(&["a", "b"].join(&sep)).is_err());
         assert!(parse_ownership_snapshot(&["a", "b", "c", "d"].join(&sep)).is_err());
         assert!(parse_ownership_snapshot("").unwrap().is_empty());
+    }
+
+    // -- Window guard and kill-time removal (ISSUE-260801-1310-06) ---------------------
+
+    fn registered(name: Option<&str>, cwd: Option<&str>) -> names::Registered {
+        names::Registered {
+            name: name.map(str::to_owned),
+            agent: None,
+            access: None,
+            launched_at: None,
+            cwd: cwd.map(str::to_owned),
+            surface: None,
+            surface_unvalidated: false,
+        }
+    }
+
+    #[test]
+    fn guard_holds_on_a_marked_window_with_one_owned_pane_among_others() {
+        let panes = [
+            registered(None, None),
+            registered(Some("ours"), Some("/work")),
+            registered(Some("theirs"), Some("/other")),
+        ];
+        assert_eq!(
+            guard_verdict(true, &panes, Some("/work")),
+            WindowGuard::Holds
+        );
+        assert!(WindowGuard::Holds.holds());
+    }
+
+    #[test]
+    fn guard_names_the_absent_marker_whatever_the_ownership() {
+        let owned = [registered(Some("ours"), Some("/work"))];
+        let foreign = [registered(Some("theirs"), Some("/other"))];
+        for panes in [&owned[..], &foreign[..]] {
+            let verdict = guard_verdict(false, panes, Some("/work"));
+            assert_eq!(verdict, WindowGuard::MarkerAbsent);
+            assert!(!verdict.holds());
+        }
+    }
+
+    #[test]
+    fn guard_names_missing_ownership_on_a_marked_window() {
+        let panes = [
+            registered(None, None),
+            registered(Some("theirs"), Some("/other")),
+        ];
+        let verdict = guard_verdict(true, &panes, Some("/work"));
+        assert_eq!(verdict, WindowGuard::NoOwnedPane);
+        assert!(!verdict.holds());
+    }
+
+    #[test]
+    fn guard_ownership_fails_open_as_the_predicate_does() {
+        // No recorded cwd, or no current cwd: the predicate passes on registration.
+        assert!(guard_verdict(true, &[registered(Some("old"), None)], Some("/work")).holds());
+        assert!(guard_verdict(true, &[registered(Some("x"), Some("/other"))], None).holds());
+    }
+
+    #[test]
+    fn removal_with_a_retile_is_one_command_sequence() {
+        assert_eq!(
+            removal_args("%5", "@2", true),
+            [
+                "kill-pane",
+                "-t",
+                "%5",
+                ";",
+                "select-layout",
+                "-t",
+                "@2",
+                "tiled"
+            ]
+        );
+    }
+
+    #[test]
+    fn removal_without_a_retile_is_the_bare_kill() {
+        assert_eq!(removal_args("%5", "@2", false), ["kill-pane", "-t", "%5"]);
     }
 
     /// One `list-panes` geometry line in the measurement format.
