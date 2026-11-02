@@ -5524,18 +5524,18 @@ enum ProbeCounter<'a> {
 }
 
 /// A fake `tmux` that rewrites the P7 probe's `#{history_collected}` field while
-/// preserving the real `cursor_y` and `alternate_on`, so both eviction paths are
+/// preserving the real `cursor_y`, `alternate_on` and `pane_width`, so both eviction paths are
 /// exercised regardless of whether the host tmux provides the counter.
 #[cfg(feature = "test-fixtures")]
 fn tmux_wrapper_probe(counter: ProbeCounter<'_>) -> String {
     let real = real_tmux_path();
     let probe_body = match counter {
-        ProbeCounter::Absent => "printf '%s\\n' \"950 1000 $3 $4\"\n".to_owned(),
-        ProbeCounter::AbsentBelowFloor => "printf '%s\\n' \"100 1000 $3 $4\"\n".to_owned(),
-        ProbeCounter::Constant(value) => format!("printf '%s\\n' \"$1 $2 $3 $4 {value}\"\n"),
+        ProbeCounter::Absent => "printf '%s\\n' \"950 1000 $3 $4 $5\"\n".to_owned(),
+        ProbeCounter::AbsentBelowFloor => "printf '%s\\n' \"100 1000 $3 $4 $5\"\n".to_owned(),
+        ProbeCounter::Constant(value) => format!("printf '%s\\n' \"$1 $2 $3 $4 $5 {value}\"\n"),
         ProbeCounter::Increment(state) => format!(
             "n=0\n[ -f '{state}' ] && n=$(cat '{state}')\nn=$((n+1))\nprintf '%s' \"$n\" > \
-             '{state}'\nprintf '%s\\n' \"$1 $2 $3 $4 $n\"\n",
+             '{state}'\nprintf '%s\\n' \"$1 $2 $3 $4 $5 $n\"\n",
             state = state.display(),
         ),
     };
@@ -5546,7 +5546,7 @@ fn tmux_wrapper_probe(counter: ProbeCounter<'_>) -> String {
          case \"$5\" in\n\
          *'#{{history_collected}}'*)\n\
          base=$(\"$REAL\" \"$1\" \"$2\" \"$3\" \"$4\" '#{{history_size}} #{{history_limit}} \
-         #{{cursor_y}} #{{alternate_on}}')\n\
+         #{{cursor_y}} #{{alternate_on}} #{{pane_width}}')\n\
          set -- $base\n\
          {probe_body}\
          exit 0 ;;\n\
@@ -6600,6 +6600,174 @@ fn prompt_reports_complete_below_the_floor_without_the_counter() {
             out.stderr
         );
     }
+}
+
+/// Run `prompt` at `format` against the named fixture with a settle window long enough to
+/// act in, call `during` once the fixture has reported the submission (so `prompt` has
+/// taken its mark and is still waiting for settle), then return the command output.
+#[cfg(feature = "test-fixtures")]
+fn prompt_across_settle(
+    server: &IsolatedTmuxServer,
+    name: &str,
+    text: &str,
+    format: &str,
+    xdg: &std::path::Path,
+    during: impl FnOnce(),
+) -> CmdOutput {
+    let submissions_before = capture_history_text(server, name)
+        .matches("tt-fake-tui: submission #")
+        .count();
+    let child = server
+        .command_with_cli_env(
+            BIN,
+            &CliOptions {
+                xdg: Some(xdg),
+                ..CliOptions::default()
+            },
+        )
+        .args([
+            "prompt",
+            "--target",
+            name,
+            text,
+            "--format",
+            format,
+            "--idle-seconds",
+            "3",
+            "--timeout",
+            "30",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn prompt");
+    let needle = format!("tt-fake-tui: submission #{}", submissions_before + 1);
+    wait_for_isolated_pane_text(server, name, &needle, Duration::from_secs(10));
+    during();
+    wait_for_child(
+        child,
+        &format!("prompt {format} across the settle window"),
+        Duration::from_secs(60),
+    )
+}
+
+/// The named pane's full history text on the private server.
+#[cfg(feature = "test-fixtures")]
+fn capture_history_text(server: &IsolatedTmuxServer, name: &str) -> String {
+    let pane = pane_id_by_name(server, name).expect("pane should exist");
+    let cap = server.tmux(&["capture-pane", "-p", "-S", "-", "-t", &pane]);
+    cap.assert_success("capture pane history");
+    cap.stdout
+}
+
+/// Narrow the pane by splitting a sibling beside it, as a retile would, and assert its
+/// width really changed.
+#[cfg(feature = "test-fixtures")]
+fn narrow_pane(server: &IsolatedTmuxServer, pane: &str) {
+    let before = tmux_format(server, pane, "#{pane_width}");
+    let split = server.tmux(&["split-window", "-h", "-d", "-t", pane, "sleep 600"]);
+    split.assert_success("split a sibling beside the fixture pane");
+    let after = tmux_format(server, pane, "#{pane_width}");
+    assert_ne!(
+        before, after,
+        "the split must change the fixture pane's width"
+    );
+}
+
+/// Acceptance: a main-screen fixture pane whose width changes while `prompt` waits for
+/// settle is reported incomplete, in JSON and on stderr for raw.
+#[cfg(feature = "test-fixtures")]
+#[test]
+fn prompt_reports_incomplete_when_the_pane_width_changes_before_settle() {
+    let _serial = serial_guard();
+
+    if Command::new("tmux").arg("-V").output().is_err() {
+        eprintln!("SKIP: tmux not on PATH");
+        return;
+    }
+
+    let server = IsolatedTmuxServer::start_inside();
+
+    let config = AgentsConfig::new();
+    let name = format!("p7-width-{}", std::process::id());
+
+    launch_fake_tui_with(&server, &name, &["--ready", "WIDTH-READY"]);
+    let pane = pane_id_by_name(&server, &name).expect("fixture pane should exist");
+    assert_eq!(
+        tmux_format(&server, &pane, "#{alternate_on}"),
+        "0",
+        "the fixture must be on the main screen"
+    );
+
+    let out = prompt_across_settle(&server, &name, "width change", "json", config.xdg(), || {
+        narrow_pane(&server, &pane)
+    });
+    out.assert_success("prompt json across a width change");
+    let parsed: serde_json::Value =
+        serde_json::from_str(out.stdout.trim()).expect("prompt JSON should parse");
+    assert_eq!(
+        parsed["complete"].as_bool(),
+        Some(false),
+        "a width change between mark and settle must report incomplete; payload: {parsed}"
+    );
+
+    let out = prompt_across_settle(
+        &server,
+        &name,
+        "width change again",
+        "raw",
+        config.xdg(),
+        || narrow_pane(&server, &pane),
+    );
+    out.assert_success("prompt raw across a width change");
+    assert!(
+        out.stderr
+            .contains("tmux-tools: prompt: completeness: incomplete:"),
+        "raw stderr must report incompleteness; got: {:?}",
+        out.stderr
+    );
+    assert!(
+        out.stderr.contains("width"),
+        "raw stderr must name the width change; got: {:?}",
+        out.stderr
+    );
+}
+
+/// Acceptance: the same fixture and exchange with the width unchanged is reported
+/// complete.
+#[cfg(feature = "test-fixtures")]
+#[test]
+fn prompt_reports_complete_when_the_pane_width_is_unchanged() {
+    let _serial = serial_guard();
+
+    if Command::new("tmux").arg("-V").output().is_err() {
+        eprintln!("SKIP: tmux not on PATH");
+        return;
+    }
+
+    let server = IsolatedTmuxServer::start_inside();
+
+    let config = AgentsConfig::new();
+    let name = format!("p7-width-same-{}", std::process::id());
+
+    launch_fake_tui_with(&server, &name, &["--ready", "WIDTH-READY"]);
+    let pane = pane_id_by_name(&server, &name).expect("fixture pane should exist");
+    let width = tmux_format(&server, &pane, "#{pane_width}");
+
+    let out = prompt_across_settle(&server, &name, "width change", "json", config.xdg(), || {});
+    out.assert_success("prompt json with the width unchanged");
+    assert_eq!(
+        tmux_format(&server, &pane, "#{pane_width}"),
+        width,
+        "the fixture pane's width must not change"
+    );
+    let parsed: serde_json::Value =
+        serde_json::from_str(out.stdout.trim()).expect("prompt JSON should parse");
+    assert_eq!(
+        parsed["complete"].as_bool(),
+        Some(true),
+        "an unchanged width must report complete; payload: {parsed}"
+    );
 }
 
 /// Acceptance: a fixture that prints nothing after the mark returns an empty result in

@@ -2,7 +2,7 @@
 id: ISSUE-261102-0012-01
 kind: issue
 category: bug
-status: ready-for-agent
+status: done
 brief_contract: agent-brief.v3
 context: tmux-tools
 summary: prompt reports its result incomplete when the pane's width changed between the history mark and settle

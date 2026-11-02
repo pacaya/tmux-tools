@@ -57,6 +57,9 @@ struct PaneProbe {
     history_limit: u64,
     cursor_y: u64,
     alternate_on: bool,
+    /// The pane's width in columns. A change between the mark and settle rewraps
+    /// history, so the row-counted mark no longer locates the submission point.
+    pane_width: u64,
     /// The pane's `history_collected` counter, when the running tmux provides it.
     /// Support is detected at runtime from the probe's field count, never a version.
     history_collected: Option<u64>,
@@ -171,11 +174,12 @@ pub fn run(args: &PromptArgs) -> Result<()> {
     // the pre-submission capture is used to detect content newer than the mark.
     let (after_probe, after_capture) = read_probe_and_capture(&pane)?;
     let evicted = history_evicted(&before_probe, &after_probe);
+    let width_changed = before_probe.pane_width != after_probe.pane_width;
     // A pane that was on the alternate screen at the mark, at any idle-loop poll, or at
     // settle has no scrollback for that output, even if it left the screen before settling.
     let alternate_seen =
         before_probe.alternate_on || outcome.alternate_seen || after_probe.alternate_on;
-    let complete = !alternate_seen && !evicted;
+    let complete = !alternate_seen && !evicted && !width_changed;
 
     let before_lines: Vec<&str> = before_capture.lines().collect();
     let after_lines: Vec<&str> = after_capture.lines().collect();
@@ -204,7 +208,7 @@ pub fn run(args: &PromptArgs) -> Result<()> {
     // reports them as `turn_observed` and `complete`. They are stated on every run.
     if matches!(args.common.format, Format::Raw | Format::Concise) {
         emit_turn_observation(turn_observed);
-        emit_completeness(complete, alternate_seen, evicted);
+        emit_completeness(complete, alternate_seen, evicted, width_changed);
     }
 
     match args.common.format {
@@ -316,7 +320,7 @@ fn emit_turn_observation(observed: bool) {
 
 /// P7 completeness for raw and concise, which have no structured field. JSON
 /// reports the same fact as `complete`. The message names every condition that held.
-fn emit_completeness(complete: bool, alternate_seen: bool, evicted: bool) {
+fn emit_completeness(complete: bool, alternate_seen: bool, evicted: bool, width_changed: bool) {
     if complete {
         eprintln!("tmux-tools: prompt: completeness: complete");
         return;
@@ -329,6 +333,9 @@ fn emit_completeness(complete: bool, alternate_seen: bool, evicted: bool) {
     if evicted {
         reasons.push("history has evicted lines");
     }
+    if width_changed {
+        reasons.push("the pane's width changed between the mark and settle");
+    }
     eprintln!(
         "tmux-tools: prompt: completeness: incomplete: {}",
         reasons.join(" and ")
@@ -337,9 +344,10 @@ fn emit_completeness(complete: bool, alternate_seen: bool, evicted: bool) {
 
 /// The format string that samples P7's pane state. `#{history_collected}` expands to an
 /// empty string on a tmux that does not provide the counter, which is how its support is
-/// detected at runtime (a numeric fifth field means supported), never from a version.
-const PROBE_FORMAT: &str =
-    "#{history_size} #{history_limit} #{cursor_y} #{alternate_on} #{history_collected}";
+/// detected at runtime (a numeric sixth field means supported), never from a version.
+/// It stays last so its absence cannot shift the fields before it.
+const PROBE_FORMAT: &str = "#{history_size} #{history_limit} #{cursor_y} #{alternate_on} \
+                            #{pane_width} #{history_collected}";
 
 /// Sample the live pane state and the full `capture-pane -S -` history in one tmux
 /// invocation, so the probe's numbers and the captured bytes describe the same instant.
@@ -366,20 +374,23 @@ fn read_probe_and_capture(pane: &str) -> Result<(PaneProbe, String)> {
     Ok((probe, strip_ansi(capture)))
 }
 
-/// Parse the `history_size history_limit cursor_y alternate_on [history_collected]`
-/// summary line. The trailing counter is absent on a tmux that does not provide it.
+/// Parse the `history_size history_limit cursor_y alternate_on pane_width
+/// [history_collected]` summary line. The trailing counter is absent on a tmux that does
+/// not provide it.
 fn parse_probe(summary: &str) -> Option<PaneProbe> {
     let mut fields = summary.split_whitespace();
     let history_size = fields.next()?.parse().ok()?;
     let history_limit = fields.next()?.parse().ok()?;
     let cursor_y = fields.next()?.parse().ok()?;
     let alternate_on = crate::cmd::capture::parse_alternate_on(fields.next()?);
+    let pane_width = fields.next()?.parse().ok()?;
     let history_collected = fields.next().and_then(|value| value.parse().ok());
     Some(PaneProbe {
         history_size,
         history_limit,
         cursor_y,
         alternate_on,
+        pane_width,
         history_collected,
     })
 }
@@ -603,13 +614,14 @@ mod tests {
             history_limit,
             cursor_y,
             alternate_on,
+            pane_width: 80,
             history_collected,
         }
     }
 
     #[test]
-    fn parse_probe_reads_the_four_fields_when_the_counter_is_absent() {
-        let parsed = parse_probe("12 50000 8 1").expect("probe parses");
+    fn parse_probe_reads_the_five_fields_when_the_counter_is_absent() {
+        let parsed = parse_probe("12 50000 8 1 80").expect("probe parses");
 
         assert_eq!(parsed.history_size, 12);
         assert_eq!(parsed.history_limit, 50000);
@@ -620,7 +632,7 @@ mod tests {
 
     #[test]
     fn parse_probe_reads_the_counter_when_the_tmux_provides_it() {
-        let parsed = parse_probe("12 50000 8 0 34").expect("probe parses");
+        let parsed = parse_probe("12 50000 8 0 80 34").expect("probe parses");
 
         assert!(!parsed.alternate_on);
         assert_eq!(parsed.history_collected, Some(34));
@@ -631,6 +643,16 @@ mod tests {
         assert!(parse_probe("").is_none());
         assert!(parse_probe("12 50000 8").is_none());
         assert!(parse_probe("x 50000 8 0").is_none());
+    }
+
+    #[test]
+    fn parse_probe_reads_the_pane_width_and_requires_it() {
+        let parsed = parse_probe("12 50000 8 0 137 34").expect("probe parses");
+
+        assert_eq!(parsed.pane_width, 137);
+        assert_eq!(parsed.history_collected, Some(34));
+        assert!(parse_probe("12 50000 8 0").is_none());
+        assert!(parse_probe("12 50000 8 0 wide").is_none());
     }
 
     #[test]
