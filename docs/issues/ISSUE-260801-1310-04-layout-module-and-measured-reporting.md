@@ -70,7 +70,7 @@ contract:
 - [ ] Given this change, `src/` contains no definition of `Split` or `Layout` (any item kind) and no flags-to-layout resolution. A reviewer check by reading code confirms that `launch` and `spawn-agent` create panes only through `layout::place`, with no split or new-window placement call left in `src/`, for every path listed under Destinations. Fails while placement stays in the binary crate.
 - [ ] Given the private harness in inside-tmux mode, when `launch --cmd <shell>` runs with no layout flags, then `tmux list-panes -t <window> -F '#{pane_left} #{pane_top} #{pane_width} #{pane_height}'` shows a horizontal split: the new pane has 70% of the window width, and both panes span the full window height. This is a preservation check: it passes before and after this change.
 - [ ] Given the private harness, when `launch --format json` runs, and when `spawn-agent <fake agent> --format json` runs, then each JSON object contains `window_id`, `min_pane_cols` and `min_pane_rows`, observable at the CLI seam. `window_id` equals `tmux display -p -t <pane_id> '#{window_id}'`. The two minima equal the componentwise minimum of `tmux list-panes -t <window_id> -F '#{pane_width} #{pane_height}'`. Fails before this change because the fields are absent.
-- [ ] Given the same invocations with `--format concise`, then stdout contains the same window id and the same two minima as the JSON output.
+- [ ] Given `launch --format concise` and `spawn-agent <fake agent> --format concise`, then each invocation's stdout contains the window id that `tmux display -p -t <that invocation's pane_id> '#{window_id}'` reports, and the componentwise minimum of `tmux list-panes -t <that window_id> -F '#{pane_width} #{pane_height}'`.
 - [ ] Given `launch` and `spawn-agent` with `--format raw`, then stdout is exactly the pane id followed by a newline.
 - [ ] Given the private harness, read registration with `tmux show-options -p -t <pane_id>`. The set of `@tt-*` keys for each pane is exactly as follows, and no key that is absent is present with an empty value:
   - flagless `launch`: `@tt-name` (non-empty), `@tt-launched-at`, `@tt-cwd`;
@@ -78,7 +78,7 @@ contract:
   - `spawn-agent --access <profile> <agent> -- <arg>`: those keys plus `@tt-access` and `@tt-surface-unvalidated`, both present.
 - [ ] Given a flagless `launch` and a flagless `spawn-agent`, then the name in `concise` and `json` output equals the `@tt-name` value that tmux reports for the created pane.
 - [ ] Given the harness in outside-tmux mode, when `launch --format json` runs, then `tmux display -p -t <window_id> '#{session_name}'` returns `tmux-tools`. Given `launch --session <s> --format json` with no `--target`, then the reported window is a new window in session `<s>`.
-- [ ] The existing `history-limit` integration tests (`rg -n '^fn \w*(history_limit|created_session)\w*' tests/integration.rs`) and the acceptance tests of ISSUE-260802-0628-01 pass without modification.
+- [ ] The existing `history-limit` integration tests (`rg -n '^fn \w*(history_limit|created_session|managed_session|pending_session)\w*' tests/integration.rs`) and the acceptance tests of ISSUE-260802-0628-01 pass without modification.
 - [ ] Every `spawn-agent` criterion above runs without an installed vendor agent. It uses the `AgentsConfig` registry, injected through `XDG_CONFIG_HOME` with `tt-fake-tui` (`tests/integration.rs`), under the `test-fixtures` feature. It fails, and never skips, when the behavior is absent.
 
 **Verification and release:** `cargo test --workspace --features test-fixtures` passes against an isolated tmux server (PRD-260801-0656-01 § How to run the suite). If a failure survives isolation and this change did not introduce it, report it. Do not fix it.
@@ -86,7 +86,6 @@ contract:
 **Out of scope:**
 - The tile placement mode, the default change, the ownership snapshot, tiling from the second pane, `@tt-tiled`, the sizing opt-outs, and all documentation changes. These belong to ISSUE-260802-0128-01.
 - Floors, effective-floor resolution, `below_floor`, `relocated` and relocation. These belong to ISSUE-260801-1310-05 and ISSUE-260801-1310-07.
-- The fix for `--split window` inside tmux, which belongs to ISSUE-260801-1310-03.
 - Retiling on `kill`, the `rebalance` verb, and geometry on `status`.
 - Predicting geometry from a model of tmux's tiling algorithm.
 
