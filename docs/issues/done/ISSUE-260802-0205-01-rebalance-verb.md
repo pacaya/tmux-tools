@@ -2,7 +2,7 @@
 id: ISSUE-260802-0205-01
 kind: issue
 category: enhancement
-status: ready-for-agent
+status: done
 brief_contract: agent-brief.v3
 context: tmux-tools
 summary: A rebalance verb so a crowded window can be retiled through the tool instead of raw tmux

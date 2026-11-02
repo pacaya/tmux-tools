@@ -269,7 +269,9 @@ impl WindowGeometry {
         self.panes.iter().map(|pane| pane.rows).min().unwrap_or(0)
     }
 
-    fn report(&self, registry: &Registry) -> WindowReport {
+    /// The window's measured minima and its floor verdict, with each pane's floor
+    /// resolved from its `@tt-agent` and `@tt-surface` through `registry`.
+    pub fn report(&self, registry: &Registry) -> WindowReport {
         WindowReport {
             window_id: self.window_id.clone(),
             min_pane_cols: self.min_pane_cols(),

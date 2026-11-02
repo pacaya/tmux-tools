@@ -11877,3 +11877,493 @@ args = []
         assert_stayed_below_floor(&server, &reported, &origin, "break-pane refused");
     }
 }
+
+// ---------------------------------------------------------------------------
+// ISSUE-260802-0205-01 — `rebalance` retiles one window through the tool, under the
+// window guard `kill` uses (`@tt-tiled` present, an owned pane in the window), and
+// reports the window's measured geometry and floor verdict.
+//
+// "Retiled" means the window's pane geometry equals what an explicit
+// `select-layout tiled` of the same panes produces; "ragged" means it differs from
+// that geometry. These cases carry no "tmux not on PATH" skip: when the behavior or
+// tmux is absent they fail.
+// ---------------------------------------------------------------------------
+
+/// Assert `window` is ragged: an explicit `select-layout tiled` of its panes changes
+/// some pane's rectangle. The window's arrangement is restored after the probe.
+fn assert_ragged(server: &IsolatedTmuxServer, window: &str, ctx: &str) {
+    let layout = tmux_format(server, window, "#{window_layout}");
+    let ragged = window_rects(server, window);
+    server
+        .tmux(&["select-layout", "-t", window, "tiled"])
+        .assert_success("probe: explicit select-layout tiled");
+    let tiled = window_rects(server, window);
+    server
+        .tmux(&["select-layout", "-t", window, &layout])
+        .assert_success("probe: restore the ragged layout");
+    assert_eq!(
+        window_rects(server, window),
+        ragged,
+        "{ctx}: the probe must restore the ragged arrangement"
+    );
+    assert_ne!(
+        ragged, tiled,
+        "{ctx}: the window must not be in tmux's tiled arrangement"
+    );
+}
+
+/// Make the window of `pane` ragged with a raw `tmux split-window -h` of `pane`, and
+/// assert it is. Returns the window id.
+fn make_ragged(server: &IsolatedTmuxServer, pane: &str) -> String {
+    let window = window_of(server, pane);
+    server
+        .tmux(&["split-window", "-h", "-d", "-t", pane, "sleep", "600"])
+        .assert_success("make the window ragged by a raw split");
+    assert_ragged(server, &window, "fixture: after a raw split");
+    window
+}
+
+/// A [`tiled_fixture`] window made ragged by a raw `tmux split-window`.
+fn ragged_fixture(
+    server: &IsolatedTmuxServer,
+    layout: &[FixturePane],
+    marked: bool,
+) -> TiledFixture {
+    let fixture = tiled_fixture(server, layout, marked);
+    make_ragged(server, &fixture.panes[0]);
+    fixture
+}
+
+/// A marked window of two owned panes, made ragged by a raw split.
+fn ragged_owned_marked(server: &IsolatedTmuxServer) -> TiledFixture {
+    ragged_fixture(server, &owned_panes(2), true)
+}
+
+/// A ragged window without `@tt-tiled` holding owned panes.
+fn ragged_owned_unmarked(server: &IsolatedTmuxServer) -> TiledFixture {
+    ragged_fixture(server, &owned_panes(2), false)
+}
+
+/// A ragged, marked window in which no pane is owned for the harness cwd.
+fn ragged_unowned_marked(server: &IsolatedTmuxServer) -> TiledFixture {
+    ragged_fixture(
+        server,
+        &[FixturePane::ForeignCwd, FixturePane::Unregistered],
+        true,
+    )
+}
+
+/// `tmux-tools rebalance --target <target> --format <format>`.
+fn rebalance_cli(server: &IsolatedTmuxServer, target: &str, format: &str) -> CmdOutput {
+    server.cli(&["rebalance", "--target", target, "--format", format])
+}
+
+/// Assert `rebalance` of `window` exited 0 and left it retiled.
+fn assert_rebalanced(server: &IsolatedTmuxServer, out: &CmdOutput, window: &str, ctx: &str) {
+    out.assert_success(ctx);
+    assert_retiled(server, window, ctx);
+}
+
+/// Rebalance `fixture` (ragged); assert a non-zero exit and every pane's geometry
+/// unchanged. Returns the refusal's stderr.
+fn assert_rebalance_refused(
+    server: &IsolatedTmuxServer,
+    fixture: &TiledFixture,
+    ctx: &str,
+) -> String {
+    let before = window_rects(server, &fixture.window);
+    let out = rebalance_cli(server, &fixture.window, "concise");
+    assert_ne!(
+        out.status, 0,
+        "{ctx}: rebalance must refuse; stdout: {:?}",
+        out.stdout
+    );
+    assert_eq!(
+        window_rects(server, &fixture.window),
+        before,
+        "{ctx}: a refused rebalance must leave every pane's geometry unchanged"
+    );
+    out.stderr
+}
+
+/// Acceptance: `tmux-tools rebalance --help` exits 0 and `tmux-tools --help` lists
+/// `rebalance`.
+#[test]
+fn rebalance_help_exits_zero_and_top_level_help_lists_it() {
+    let help = Command::new(BIN)
+        .args(["rebalance", "--help"])
+        .output()
+        .expect("run rebalance --help");
+    assert_eq!(
+        help.status.code(),
+        Some(0),
+        "rebalance --help must exit 0; stderr: {}",
+        String::from_utf8_lossy(&help.stderr)
+    );
+
+    let top = Command::new(BIN)
+        .arg("--help")
+        .output()
+        .expect("run --help");
+    assert!(top.status.success(), "tmux-tools --help must succeed");
+    let listed = String::from_utf8_lossy(&top.stdout);
+    assert!(
+        listed
+            .lines()
+            .any(|line| line.split_whitespace().next() == Some("rebalance")),
+        "tmux-tools --help must list rebalance: {listed}"
+    );
+}
+
+/// Acceptance: a marked, owned window made ragged by a raw `tmux split-window` is
+/// retiled by `rebalance`, with exit 0.
+#[test]
+fn rebalance_retiles_a_marked_owned_window_made_ragged_by_a_raw_split() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    let fixture = ragged_owned_marked(&server);
+
+    let out = rebalance_cli(&server, &fixture.window, "concise");
+
+    assert_rebalanced(
+        &server,
+        &out,
+        &fixture.window,
+        "rebalance of a ragged owned window",
+    );
+}
+
+/// Inside tmux with no selector, `rebalance` acts on the calling pane's window.
+#[test]
+fn rebalance_without_a_selector_inside_tmux_retiles_the_calling_panes_window() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    let window = window_of(&server, server.pane());
+    register_name_and_cwd(&server, server.pane(), "rb-caller", &harness_cwd());
+    server
+        .tmux(&["split-window", "-d", "-t", server.pane(), "sleep", "600"])
+        .assert_success("add a second pane");
+    server
+        .tmux(&["select-layout", "-t", &window, "tiled"])
+        .assert_success("tile the calling window");
+    server
+        .tmux(&["set-option", "-w", "-t", &window, TILED_MARKER, "1"])
+        .assert_success("mark the calling window tiled");
+    make_ragged(&server, server.pane());
+
+    let out = server.cli(&["rebalance", "--format", "raw"]);
+
+    assert_rebalanced(&server, &out, &window, "selector-less rebalance");
+    assert_eq!(out.stdout, format!("{window}\n"));
+}
+
+/// Acceptance: the reported `window_id`, `min_pane_cols` and `min_pane_rows` equal the
+/// window id and the minima `tmux list-panes` reports after the call, in `json` and
+/// `concise` (which also carries `below_floor`); `raw` is exactly the window id.
+#[test]
+fn rebalance_reports_the_retiled_window_id_and_minima_in_every_format() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+
+    let fixture = ragged_owned_marked(&server);
+    let json = rebalance_cli(&server, &fixture.window, "json");
+    let payload = json_payload(&json, "rebalance --format json");
+    let (window, cols, rows) = tmux_landing(&server, &fixture.panes[0]);
+    assert_eq!(window, fixture.window);
+    assert_eq!(
+        (
+            payload.get("window_id").and_then(|v| v.as_str()),
+            payload.get("min_pane_cols").and_then(|v| v.as_u64()),
+            payload.get("min_pane_rows").and_then(|v| v.as_u64()),
+        ),
+        (Some(window.as_str()), Some(cols), Some(rows)),
+        "rebalance json must report the window and the minima tmux lists: {}",
+        json.stdout
+    );
+    assert!(
+        !json_below_floor(&payload, "rebalance --format json"),
+        "a window without agent panes is never below floor: {}",
+        json.stdout
+    );
+    assert_retiled(&server, &fixture.window, "rebalance --format json");
+
+    let fixture = ragged_owned_marked(&server);
+    let concise = rebalance_cli(&server, &fixture.window, "concise");
+    concise.assert_success("rebalance --format concise");
+    let (window, cols, rows) = tmux_landing(&server, &fixture.panes[0]);
+    assert_eq!(
+        (
+            concise_field(&concise, "window_id"),
+            concise_field(&concise, "min_pane_cols"),
+            concise_field(&concise, "min_pane_rows"),
+            concise_field(&concise, "below_floor"),
+        ),
+        (
+            Some(window),
+            Some(cols.to_string()),
+            Some(rows.to_string()),
+            Some("false".to_owned()),
+        ),
+        "rebalance concise must carry the four fields: {}",
+        concise.stdout
+    );
+    assert_retiled(&server, &fixture.window, "rebalance --format concise");
+
+    let fixture = ragged_owned_marked(&server);
+    let raw = rebalance_cli(&server, &fixture.window, "raw");
+    raw.assert_success("rebalance --format raw");
+    assert_eq!(raw.stdout, format!("{}\n", fixture.window));
+    assert_retiled(&server, &fixture.window, "rebalance --format raw");
+}
+
+/// Acceptance: a ragged window without `@tt-tiled` that holds an owned pane is
+/// refused with its geometry unchanged; a ragged, marked, owned window is retiled.
+#[test]
+fn rebalance_refuses_an_unmarked_owned_window_and_retiles_a_marked_one() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    let unmarked = ragged_owned_unmarked(&server);
+    let marked = ragged_owned_marked(&server);
+
+    assert_rebalance_refused(&server, &unmarked, "rebalance of an unmarked window");
+    assert_ragged(&server, &unmarked.window, "the refused window");
+
+    let out = rebalance_cli(&server, &marked.window, "concise");
+    assert_rebalanced(
+        &server,
+        &out,
+        &marked.window,
+        "rebalance of the marked control",
+    );
+}
+
+/// Acceptance: a ragged, marked window in which no pane is owned for the invoking cwd
+/// is refused with its geometry unchanged; a ragged, marked, owned window is retiled.
+#[test]
+fn rebalance_refuses_a_marked_window_without_an_owned_pane_and_retiles_an_owned_one() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    let unowned = ragged_unowned_marked(&server);
+    let owned = ragged_owned_marked(&server);
+
+    assert_rebalance_refused(&server, &unowned, "rebalance of an unowned window");
+    assert_ragged(&server, &unowned.window, "the refused window");
+
+    let out = rebalance_cli(&server, &owned.window, "concise");
+    assert_rebalanced(
+        &server,
+        &out,
+        &owned.window,
+        "rebalance of the owned control",
+    );
+}
+
+/// Acceptance: the two refusals' diagnostics differ, and each names its guard.
+#[test]
+fn rebalance_refusal_diagnostics_differ_and_name_their_guard() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    let unmarked = ragged_owned_unmarked(&server);
+    let unowned = ragged_unowned_marked(&server);
+
+    let marker = assert_rebalance_refused(&server, &unmarked, "unmarked window");
+    let ownership = assert_rebalance_refused(&server, &unowned, "unowned window");
+
+    assert_ne!(marker, ownership, "the two refusals must be told apart");
+    assert!(
+        marker.contains(TILED_MARKER) && marker.contains("layout intent"),
+        "the marker refusal must name the layout-intent guard (@tt-tiled): {marker:?}"
+    );
+    assert!(
+        !marker.contains("ownership"),
+        "the marker refusal must not name the ownership guard: {marker:?}"
+    );
+    assert!(
+        ownership.contains("ownership"),
+        "the ownership refusal must name the ownership guard: {ownership:?}"
+    );
+    assert!(
+        !ownership.contains(TILED_MARKER) && !ownership.contains("layout intent"),
+        "the ownership refusal must not name the layout-intent guard: {ownership:?}"
+    );
+}
+
+/// Acceptance: outside tmux (`TMUX` unset, then empty) with no `--target`, `--session`
+/// or `--window`, `rebalance` exits non-zero and creates no session; outside tmux,
+/// `rebalance --session <S>` retiles a marked, owned, ragged window.
+#[test]
+fn rebalance_outside_tmux_needs_a_selector_and_creates_no_session() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_outside();
+    let sessions = || {
+        let out = server.tmux(&["list-sessions", "-F", "#{session_id} #{session_name}"]);
+        out.assert_success("list-sessions");
+        out.stdout
+    };
+    let before = sessions();
+    assert!(
+        !before.lines().any(|line| line.ends_with(" tmux-tools")),
+        "no managed session may exist before the runs: {before}"
+    );
+
+    let unset = server.cli(&["rebalance"]);
+    assert_ne!(
+        unset.status, 0,
+        "rebalance with TMUX unset and no selector must fail; stdout: {:?}",
+        unset.stdout
+    );
+    assert_eq!(sessions(), before, "TMUX unset: no session may be created");
+
+    let empty = server
+        .command_with_cli_env(BIN, &CliOptions::default())
+        .env("TMUX", "")
+        .arg("rebalance")
+        .output()
+        .expect("run rebalance with TMUX empty");
+    assert_ne!(
+        empty.status.code(),
+        Some(0),
+        "rebalance with TMUX empty and no selector must fail; stdout: {:?}",
+        String::from_utf8_lossy(&empty.stdout)
+    );
+    assert_eq!(sessions(), before, "TMUX empty: no session may be created");
+
+    let session = "rb-outside";
+    let first = server.tmux(&[
+        "new-session",
+        "-d",
+        "-s",
+        session,
+        "-x",
+        SERVER_WIDTH,
+        "-y",
+        SERVER_HEIGHT,
+        "-P",
+        "-F",
+        "#{pane_id}",
+        "sleep",
+        "600",
+    ]);
+    first.assert_success("create the scoped session");
+    let first = first.stdout.trim().to_owned();
+    let window = window_of(&server, &first);
+    server
+        .tmux(&["split-window", "-d", "-t", &first, "sleep", "600"])
+        .assert_success("add a second pane");
+    server
+        .tmux(&["select-layout", "-t", &window, "tiled"])
+        .assert_success("tile the scoped window");
+    register_name_and_cwd(&server, &first, "rb-outside-0", &harness_cwd());
+    server
+        .tmux(&["set-option", "-w", "-t", &window, TILED_MARKER, "1"])
+        .assert_success("mark the scoped window tiled");
+    make_ragged(&server, &first);
+
+    let out = server.cli(&["rebalance", "--session", session]);
+
+    assert_rebalanced(&server, &out, &window, "outside-tmux rebalance --session");
+}
+
+/// The registry the agent-pane `rebalance` criteria use: `tt-fake-tui` (the fixture
+/// binary) with one surface, `wide`, whose floor is 140x21. On the 280x82 server two
+/// tiled panes (280x41 over 280x40) meet it; four (139 or 140 columns) do not.
+#[cfg(feature = "test-fixtures")]
+fn rebalance_floor_config() -> AgentsConfig {
+    let config = AgentsConfig::new();
+    config.write_agents_toml(&format!(
+        r#"
+[tt-fake-tui]
+binary = "{fake}"
+default_surface = "wide"
+
+[tt-fake-tui.surfaces.wide]
+min_cols = 140
+min_rows = 21
+
+[tt-fake-tui.access.default]
+args = []
+"#,
+        fake = FAKE_TUI_BIN
+    ));
+    config
+}
+
+/// A marked window of `panes` owned panes whose first pane runs `tt-fake-tui`,
+/// registered as that agent on its `wide` surface, made ragged by a raw split.
+#[cfg(feature = "test-fixtures")]
+fn ragged_fake_tui_window(server: &IsolatedTmuxServer, panes: usize) -> TiledFixture {
+    let fixture = tiled_fixture_in(
+        server,
+        &owned_panes(panes),
+        true,
+        &harness_cwd(),
+        &shell_quote(FAKE_TUI_BIN),
+    );
+    let agent = &fixture.panes[0];
+    register_agent_directly(server, agent, "tt-fake-tui");
+    server
+        .tmux(&["set-option", "-p", "-t", agent, "@tt-surface", "wide"])
+        .assert_success("record the agent pane's surface");
+    make_ragged(server, agent);
+    fixture
+}
+
+/// Rebalance `fixture` with the floor registry in json; assert exit 0, a retiled
+/// window, no registry warning, and the `below_floor` verdict.
+#[cfg(feature = "test-fixtures")]
+fn assert_rebalance_verdict(server: &IsolatedTmuxServer, fixture: &TiledFixture, below: bool) {
+    let config = rebalance_floor_config();
+    let ctx = format!("rebalance --format json (expected below_floor {below})");
+    let out = server.cli_env(
+        &["rebalance", "--target", &fixture.window, "--format", "json"],
+        config.xdg(),
+    );
+    let payload = json_payload(&out, &ctx);
+    assert!(
+        !out.stderr.contains("warning"),
+        "{ctx}: the fixture registry must load cleanly: {:?}",
+        out.stderr
+    );
+    assert_retiled(server, &fixture.window, &ctx);
+    assert_eq!(
+        json_below_floor(&payload, &ctx),
+        below,
+        "{ctx}: {}",
+        out.stdout
+    );
+}
+
+/// Acceptance: a marked, owned window holding a `tt-fake-tui` agent pane whose surface
+/// floor its tiled pane cannot meet is rebalanced with exit 0 and `below_floor: true`.
+#[cfg(feature = "test-fixtures")]
+#[test]
+fn rebalance_reports_below_floor_when_the_tiled_agent_pane_cannot_meet_its_surface_floor() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    let fixture = ragged_fake_tui_window(&server, 3);
+
+    assert_rebalance_verdict(&server, &fixture, true);
+    let (_, cols, _) = tmux_landing(&server, &fixture.panes[0]);
+    assert!(
+        cols < 140,
+        "four tiled panes must be narrower than 140: {cols}"
+    );
+}
+
+/// Acceptance: a roomy marked, owned window holding a `tt-fake-tui` agent pane whose
+/// surface floor its tiled pane meets is rebalanced with exit 0 and
+/// `below_floor: false`.
+#[cfg(feature = "test-fixtures")]
+#[test]
+fn rebalance_reports_not_below_floor_when_the_tiled_agent_pane_meets_its_surface_floor() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    let fixture = ragged_fake_tui_window(&server, 1);
+    let (_, ragged_cols, _) = tmux_landing(&server, &fixture.panes[0]);
+    assert!(
+        ragged_cols < 140,
+        "the ragged window must start below the floor: {ragged_cols}"
+    );
+
+    assert_rebalance_verdict(&server, &fixture, false);
+}

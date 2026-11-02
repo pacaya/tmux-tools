@@ -55,12 +55,19 @@ fn resolve_smart_default(session: Option<&str>, window: Option<&str>) -> Result<
         return active_pane_for_target(&target);
     }
 
-    if env::var("TMUX").map(|s| !s.is_empty()).unwrap_or(false) {
+    if in_tmux() {
         return current_pane();
     }
 
     ensure_managed_session()?;
     most_recent_pane_in_session(&managed_session_target())
+}
+
+/// Whether the invoking process runs inside tmux: `TMUX` is set and non-empty. Outside
+/// tmux, a smart-default resolution without `--session` or `--window` targets the
+/// managed session, creating it when absent.
+pub fn in_tmux() -> bool {
+    env::var("TMUX").map(|s| !s.is_empty()).unwrap_or(false)
 }
 
 /// Exact-match session target for the managed session. tmux resolves a bare session name
@@ -136,7 +143,7 @@ pub fn calling_pane_id() -> Option<String> {
             return Some(trimmed.to_owned());
         }
     }
-    if env::var("TMUX").map(|s| !s.is_empty()).unwrap_or(false) {
+    if in_tmux() {
         if let Ok(pane) = current_pane() {
             return Some(pane);
         }

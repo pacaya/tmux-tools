@@ -3,7 +3,7 @@ use clap::Args;
 use serde::Serialize;
 use tmux_tools_core::{
     format::Format,
-    layout::{self, Destination, Landing, Registration, Split},
+    layout::{self, Destination, Landing, Registration, Split, WindowReport},
     names,
 };
 
@@ -55,12 +55,18 @@ pub(crate) struct WindowJson<'a> {
 
 impl<'a> WindowJson<'a> {
     pub(crate) fn of(landing: &'a Landing) -> Option<Self> {
-        landing.window.as_ref().map(|window| WindowJson {
+        landing.window.as_ref().map(WindowJson::from_report)
+    }
+
+    /// The JSON fields of a measured window, as `launch`, `spawn-agent` and
+    /// `rebalance` report it.
+    pub(crate) fn from_report(window: &'a WindowReport) -> Self {
+        WindowJson {
             window_id: &window.window_id,
             min_pane_cols: window.min_pane_cols,
             min_pane_rows: window.min_pane_rows,
             below_floor: window.below_floor,
-        })
+        }
     }
 }
 
@@ -71,14 +77,18 @@ pub(crate) fn concise_landing_fields(landing: &Landing) -> String {
     let window = landing
         .window
         .as_ref()
-        .map(|window| {
-            format!(
-                " window_id={} min_pane_cols={} min_pane_rows={} below_floor={}",
-                window.window_id, window.min_pane_cols, window.min_pane_rows, window.below_floor
-            )
-        })
+        .map(|window| format!(" {}", concise_window_fields(window)))
         .unwrap_or_default();
     format!(" relocated={}{window}", landing.relocated)
+}
+
+/// A measured window's `key=value` fields of a concise line, space-separated, as
+/// `launch`, `spawn-agent` and `rebalance` report it.
+pub(crate) fn concise_window_fields(window: &WindowReport) -> String {
+    format!(
+        "window_id={} min_pane_cols={} min_pane_rows={} below_floor={}",
+        window.window_id, window.min_pane_cols, window.min_pane_rows, window.below_floor
+    )
 }
 
 /// Warn on stderr, once, when the pane was gone before its window was measured.
