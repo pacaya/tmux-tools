@@ -71,7 +71,7 @@ the whole glossary.
 
 **Advisory floor** [VO] — the property that a floor binds only panes this tool places: direct `tmux split-window` calls bypass it and concurrent spawns can overshoot it. _Avoid_: soft limit, best-effort floor. ↔ core/src/layout.rs
 
-**Overflow window** [entity] — the window a pane is moved to when placing it would push its origin below the effective floor. _Avoid_: spillover window, secondary window. ↔ core/src/layout.rs *(planned — PRD-260801-0656-01)*
+**Overflow window** [entity] — the window a pane is moved to when placing it would push its origin below the effective floor. _Avoid_: spillover window, secondary window. ↔ core/src/layout.rs
 
 **Layout intent** [VO] — whether a window is tool-tiled or human-arranged, recorded as the `@tt-tiled` window option (unset when cleared, so "cleared" and "never set" are one state). A record of what the tool did, not a permission to act: it gates teardown (`kill` retiling), the `rebalance` verb, and overflow-destination eligibility, never placement — which is gated by [[Ownership]] alone, since the first tiling placement into any window necessarily finds no marker and is what sets one. _Avoid_: tiled flag, managed layout. ↔ core/src/layout.rs *(planned — PRD-260801-0656-01)*
 
