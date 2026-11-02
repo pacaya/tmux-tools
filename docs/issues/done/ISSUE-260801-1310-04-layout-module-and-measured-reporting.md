@@ -2,7 +2,7 @@
 id: ISSUE-260801-1310-04
 kind: issue
 category: enhancement
-status: ready-for-agent
+status: done
 brief_contract: agent-brief.v3
 context: tmux-tools
 summary: Core layout module owning placement, and measured destination geometry in the spawning verbs' output

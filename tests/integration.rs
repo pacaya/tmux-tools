@@ -8275,3 +8275,438 @@ fn flagless_spawn_agent_json_and_concise_report_the_registered_name() {
         concise.stdout
     );
 }
+
+// ---------------------------------------------------------------------------
+// ISSUE-260801-1310-04 — the core layout module owns placement, and both spawning
+// verbs report the measured geometry of the window the pane landed in.
+//
+// These tests deliberately carry no "tmux not on PATH" skip: when the behavior or
+// tmux is absent they fail.
+// ---------------------------------------------------------------------------
+
+/// The landing a spawning verb's `--format json` stdout reports:
+/// `(pane_id, window_id, min_pane_cols, min_pane_rows)`.
+fn json_landing(out: &CmdOutput, ctx: &str) -> (String, String, u64, u64) {
+    out.assert_success(ctx);
+    let payload: serde_json::Value = serde_json::from_str(out.stdout.trim())
+        .unwrap_or_else(|e| panic!("{ctx}: JSON should parse ({e}): {:?}", out.stdout));
+    let text = |key: &str| {
+        payload
+            .get(key)
+            .and_then(|value| value.as_str())
+            .unwrap_or_else(|| panic!("{ctx}: JSON must carry string {key}: {}", out.stdout))
+            .to_owned()
+    };
+    let number = |key: &str| {
+        payload
+            .get(key)
+            .and_then(|value| value.as_u64())
+            .unwrap_or_else(|| panic!("{ctx}: JSON must carry numeric {key}: {}", out.stdout))
+    };
+    (
+        text("pane_id"),
+        text("window_id"),
+        number("min_pane_cols"),
+        number("min_pane_rows"),
+    )
+}
+
+/// The landing as tmux itself reports it for `pane`: the pane's `#{window_id}` and
+/// the componentwise minimum of `list-panes -t <window_id> -F '#{pane_width}
+/// #{pane_height}'`.
+fn tmux_landing(server: &IsolatedTmuxServer, pane: &str) -> (String, u64, u64) {
+    let window = tmux_format(server, pane, "#{window_id}");
+    let out = server.tmux(&[
+        "list-panes",
+        "-t",
+        &window,
+        "-F",
+        "#{pane_width} #{pane_height}",
+    ]);
+    out.assert_success("list-panes of the landing window");
+    let sizes: Vec<(u64, u64)> = out
+        .stdout
+        .lines()
+        .map(|line| {
+            let (cols, rows) = line.split_once(' ').expect("width height");
+            (cols.parse().unwrap(), rows.parse().unwrap())
+        })
+        .collect();
+    assert!(!sizes.is_empty(), "the landing window must list panes");
+    let cols = sizes.iter().map(|(cols, _)| *cols).min().unwrap();
+    let rows = sizes.iter().map(|(_, rows)| *rows).min().unwrap();
+    (window, cols, rows)
+}
+
+/// Assert a concise line carries the landing tmux reports for its `pane=`.
+fn assert_concise_landing(server: &IsolatedTmuxServer, out: &CmdOutput, ctx: &str) {
+    out.assert_success(ctx);
+    let pane = concise_field(out, "pane")
+        .unwrap_or_else(|| panic!("{ctx}: concise must carry pane=: {}", out.stdout));
+    let (window, cols, rows) = tmux_landing(server, &pane);
+    assert!(
+        out.stdout.contains(&window),
+        "{ctx}: concise must contain the pane's window id {window}: {}",
+        out.stdout
+    );
+    assert_eq!(
+        concise_field(out, "window_id"),
+        Some(window),
+        "{ctx}: concise must carry window_id=<the pane's window id>: {}",
+        out.stdout
+    );
+    assert_eq!(
+        concise_field(out, "min_pane_cols"),
+        Some(cols.to_string()),
+        "{ctx}: concise must carry the measured minimum width: {}",
+        out.stdout
+    );
+    assert_eq!(
+        concise_field(out, "min_pane_rows"),
+        Some(rows.to_string()),
+        "{ctx}: concise must carry the measured minimum height: {}",
+        out.stdout
+    );
+}
+
+/// The pane's `@tt-*` registration keys, sorted, asserting that none is present with
+/// an empty value.
+fn tt_registration_keys(server: &IsolatedTmuxServer, pane: &str) -> Vec<String> {
+    let mut keys = Vec::new();
+    for (key, value) in pane_user_options(server, pane) {
+        if !key.starts_with("@tt-") {
+            continue;
+        }
+        assert!(
+            !value.is_empty(),
+            "registration key {key} on {pane} must not be present with an empty value"
+        );
+        keys.push(key);
+    }
+    keys.sort();
+    keys
+}
+
+fn sorted_keys(keys: &[&str]) -> Vec<String> {
+    let mut keys: Vec<String> = keys.iter().map(|key| (*key).to_owned()).collect();
+    keys.sort();
+    keys
+}
+
+/// Preservation: a flagless `launch` inside tmux is still the horizontal split that
+/// gives the new pane 70% of the window width, with both panes at full height.
+#[test]
+fn flagless_launch_inside_tmux_splits_horizontally_giving_the_new_pane_seventy_percent() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+
+    let pane = launch_flagless_json(&server, "sh");
+
+    let window = tmux_format(&server, &pane, "#{window_id}");
+    assert_eq!(
+        window,
+        tmux_format(&server, server.pane(), "#{window_id}"),
+        "a flagless launch must split the calling pane's window"
+    );
+    let width: i64 = tmux_format(&server, &window, "#{window_width}")
+        .parse()
+        .unwrap();
+    let height: i64 = tmux_format(&server, &window, "#{window_height}")
+        .parse()
+        .unwrap();
+    let out = server.tmux(&[
+        "list-panes",
+        "-t",
+        &window,
+        "-F",
+        "#{pane_id} #{pane_left} #{pane_top} #{pane_width} #{pane_height}",
+    ]);
+    out.assert_success("list-panes of the split window");
+    let panes: Vec<Vec<String>> = out
+        .stdout
+        .lines()
+        .map(|line| line.split(' ').map(str::to_owned).collect())
+        .collect();
+    assert_eq!(panes.len(), 2, "the window must hold two panes: {panes:?}");
+    let field = |row: &[String], i: usize| -> i64 { row[i].parse().unwrap() };
+    let new = panes.iter().find(|row| row[0] == pane).expect("new pane");
+    let old = panes
+        .iter()
+        .find(|row| row[0] != pane)
+        .expect("calling pane");
+    for row in [new, old] {
+        assert_eq!(
+            field(row, 2),
+            0,
+            "both panes must start at the top: {panes:?}"
+        );
+        assert_eq!(
+            field(row, 4),
+            height,
+            "both panes must span the full window height: {panes:?}"
+        );
+    }
+    assert!(
+        field(new, 1) > field(old, 1),
+        "the split must be horizontal, new pane to the right: {panes:?}"
+    );
+    assert!(
+        (field(new, 3) - width * 70 / 100).abs() <= 1,
+        "the new pane must have 70% of the {width}-column window: {panes:?}"
+    );
+}
+
+/// `launch --format json` reports the landing window's id and its componentwise
+/// measured minima, here taken from two different panes.
+#[test]
+fn launch_json_reports_the_landing_window_and_its_measured_minima() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    // A short full-width pane below the calling pane: the window's minimum height then
+    // comes from it, and its minimum width from the narrowed calling pane.
+    server
+        .tmux(&[
+            "split-window",
+            "-v",
+            "-l",
+            "10",
+            "-d",
+            "-t",
+            server.pane(),
+            "sleep",
+            "600",
+        ])
+        .assert_success("add a short pane below the calling pane");
+
+    let out = server.cli(&["launch", "--cmd", "sleep 600", "--format", "json"]);
+    let (pane, window, cols, rows) = json_landing(&out, "launch --format json");
+
+    assert_eq!(
+        window,
+        tmux_format(&server, &pane, "#{window_id}"),
+        "window_id must be the pane's window id"
+    );
+    assert_eq!(
+        tmux_landing(&server, &pane),
+        (window, cols, rows),
+        "the minima must be the componentwise minimum of the window's panes; stdout: {}",
+        out.stdout
+    );
+    assert_eq!(rows, 10, "the minimum height must come from the short pane");
+}
+
+#[test]
+fn launch_concise_reports_the_landing_window_and_its_measured_minima() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+
+    let out = server.cli(&["launch", "--cmd", "sleep 600", "--format", "concise"]);
+    assert_concise_landing(&server, &out, "launch --format concise");
+}
+
+#[test]
+fn launch_raw_output_is_exactly_the_pane_id() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+
+    let out = server.cli(&["launch", "--cmd", "sleep 600", "--format", "raw"]);
+    out.assert_success("launch --format raw");
+    let pane = out.stdout.strip_suffix('\n').unwrap_or_default();
+    assert!(
+        pane.starts_with('%') && pane[1..].parse::<u32>().is_ok(),
+        "raw stdout must be exactly the pane id and a newline; got {:?}",
+        out.stdout
+    );
+    assert!(all_pane_ids(&server).contains(&pane.to_owned()));
+}
+
+#[test]
+fn flagless_launch_registers_exactly_name_launched_at_and_cwd() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+
+    let pane = launch_flagless_json(&server, "sleep 600");
+
+    assert_eq!(
+        tt_registration_keys(&server, &pane),
+        sorted_keys(&["@tt-name", "@tt-launched-at", "@tt-cwd"]),
+        "a flagless launch registers exactly name, launched-at and cwd"
+    );
+}
+
+/// Outside tmux, `launch` lands in a window of the managed `tmux-tools` session.
+#[test]
+fn outside_tmux_launch_reports_a_window_in_the_managed_session() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_outside();
+
+    let out = server.cli(&["launch", "--cmd", "sleep 600", "--format", "json"]);
+    let (pane, window, cols, rows) = json_landing(&out, "outside-tmux launch --format json");
+
+    assert_eq!(
+        tmux_format(&server, &window, "#{session_name}"),
+        "tmux-tools"
+    );
+    assert_eq!(tmux_landing(&server, &pane), (window, cols, rows));
+}
+
+/// `launch --session <s>` without `--target` reports a new window in session `<s>`.
+#[test]
+fn launch_with_session_scope_reports_a_new_window_in_that_session() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_outside();
+    let session_target = format!("={HARNESS_SESSION}");
+    let before = server.tmux(&["list-windows", "-t", &session_target, "-F", "#{window_id}"]);
+    before.assert_success("list harness session windows");
+
+    let out = server.cli(&[
+        "launch",
+        "--cmd",
+        "sleep 600",
+        "--session",
+        HARNESS_SESSION,
+        "--format",
+        "json",
+    ]);
+    let (pane, window, cols, rows) = json_landing(&out, "launch --session --format json");
+
+    assert!(
+        !before.stdout.lines().any(|line| line == window),
+        "the reported window {window} must be new; windows before: {:?}",
+        before.stdout
+    );
+    assert_eq!(
+        tmux_format(&server, &window, "#{session_name}"),
+        HARNESS_SESSION
+    );
+    assert_eq!(tmux_landing(&server, &pane), (window, cols, rows));
+}
+
+#[cfg(feature = "test-fixtures")]
+#[test]
+fn spawn_agent_json_reports_the_landing_window_and_its_measured_minima() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    let config = fake_tui_agent_config();
+
+    let out = server.cli_env(
+        &["spawn-agent", "tt-fake-tui", "--bare", "--format", "json"],
+        config.xdg(),
+    );
+    let (pane, window, cols, rows) = json_landing(&out, "spawn-agent --format json");
+
+    assert_eq!(window, tmux_format(&server, &pane, "#{window_id}"));
+    assert_eq!(
+        tmux_landing(&server, &pane),
+        (window, cols, rows),
+        "spawn-agent minima must be the window's measured minima; stdout: {}",
+        out.stdout
+    );
+}
+
+#[cfg(feature = "test-fixtures")]
+#[test]
+fn spawn_agent_concise_reports_the_landing_window_and_its_measured_minima() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    let config = fake_tui_agent_config();
+
+    let out = server.cli_env(
+        &[
+            "spawn-agent",
+            "tt-fake-tui",
+            "--bare",
+            "--format",
+            "concise",
+        ],
+        config.xdg(),
+    );
+    assert_concise_landing(&server, &out, "spawn-agent --format concise");
+}
+
+#[cfg(feature = "test-fixtures")]
+#[test]
+fn spawn_agent_raw_output_is_exactly_the_pane_id() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    let config = fake_tui_agent_config();
+
+    let out = server.cli_env(
+        &["spawn-agent", "tt-fake-tui", "--bare", "--format", "raw"],
+        config.xdg(),
+    );
+    out.assert_success("spawn-agent --format raw");
+    let pane = out.stdout.strip_suffix('\n').unwrap_or_default();
+    assert!(
+        pane.starts_with('%') && pane[1..].parse::<u32>().is_ok(),
+        "raw stdout must be exactly the pane id and a newline; got {:?}",
+        out.stdout
+    );
+    assert!(all_pane_ids(&server).contains(&pane.to_owned()));
+}
+
+#[cfg(feature = "test-fixtures")]
+#[test]
+fn spawn_agent_without_access_or_trailing_args_registers_exactly_the_agent_set() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    let config = fake_tui_agent_config();
+
+    let out = server.cli_env(
+        &["spawn-agent", "tt-fake-tui", "--bare", "--format", "json"],
+        config.xdg(),
+    );
+    out.assert_success("flagless spawn-agent");
+    let (pane, _) = json_pane_and_name(&out);
+
+    assert_eq!(
+        tt_registration_keys(&server, &pane),
+        sorted_keys(&[
+            "@tt-name",
+            "@tt-launched-at",
+            "@tt-cwd",
+            "@tt-agent",
+            "@tt-surface",
+        ]),
+        "spawn-agent without --access or trailing arguments registers neither @tt-access nor the unvalidated mark"
+    );
+}
+
+#[cfg(feature = "test-fixtures")]
+#[test]
+fn spawn_agent_with_access_and_trailing_args_registers_access_and_unvalidated_mark() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    let config = fake_tui_agent_config();
+
+    let out = server.cli_env(
+        &[
+            "spawn-agent",
+            "--access",
+            "default",
+            "--bare",
+            "--format",
+            "json",
+            "tt-fake-tui",
+            "--",
+            "--quiet-submit",
+        ],
+        config.xdg(),
+    );
+    out.assert_success("spawn-agent --access default tt-fake-tui -- --quiet-submit");
+    let (pane, _) = json_pane_and_name(&out);
+
+    assert_eq!(
+        tt_registration_keys(&server, &pane),
+        sorted_keys(&[
+            "@tt-name",
+            "@tt-launched-at",
+            "@tt-cwd",
+            "@tt-agent",
+            "@tt-surface",
+            "@tt-access",
+            "@tt-surface-unvalidated",
+        ]),
+        "--access and trailing caller arguments add @tt-access and @tt-surface-unvalidated"
+    );
+}

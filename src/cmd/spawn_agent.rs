@@ -5,13 +5,11 @@ use std::path::PathBuf;
 use tmux_tools_core::{
     agents::Registry,
     format::{display_value, Format},
-    names,
+    layout::{self, AgentRegistration, Landing, Registration, Split},
 };
 
 use crate::{
-    cmd::launch::{
-        launch_pane, resolve_launch_target, resolve_layout, wrap_keep_open, Layout, Split,
-    },
+    cmd::launch::{destination, invoking_cwd, wrap_keep_open},
     util::rfc3339_utc_now,
     CommonArgs,
 };
@@ -58,6 +56,9 @@ struct SpawnAgentJson<'a> {
     binary: &'a str,
     argv: &'a [String],
     launched_at: &'a str,
+    window_id: &'a str,
+    min_pane_cols: u32,
+    min_pane_rows: u32,
 }
 
 pub fn run(args: &SpawnAgentArgs) -> Result<()> {
@@ -74,53 +75,33 @@ pub fn run(args: &SpawnAgentArgs) -> Result<()> {
     let binary = resolved.binary;
     let argv = launch_argv(binary.clone(), resolved.args, &args.extra_args);
     let cmd = launch_command(&argv, args.cwd.as_ref(), args.bare)?;
-    let layout = resolve_layout(
-        args.split,
-        args.size,
-        args.common.target.is_some(),
-        args.common.session.is_some(),
-        args.common.window.is_some(),
-    );
-    let (split_arg, size_arg) = layout.split_args();
-    let launch_target = resolve_launch_target(
-        args.common.target.as_ref().map(|target| target.as_str()),
-        args.common.session.as_deref(),
-        args.common.window.as_deref(),
-        matches!(layout, Layout::Split { .. }),
-    )?;
-    let pane_id = launch_pane(
-        &cmd,
-        args.name.as_deref(),
-        split_arg,
-        size_arg,
-        launch_target.as_ref(),
-    )?;
     let launched_at = rfc3339_utc_now()?;
+    let cwd = invoking_cwd();
 
-    names::set(&pane_id, names::KEY_AGENT, &args.agent)?;
-    // Record the resolved surface unconditionally, whether or not one was named: an
-    // absent record can then only mean a pane created before surfaces existed.
-    names::set(&pane_id, names::KEY_SURFACE, &resolved.surface)?;
-    // Caller-supplied trailing arguments can change the rendering out from under the
-    // recorded surface. Arguments the surface supplies itself are validated by
-    // construction and do not set the mark.
-    if !args.extra_args.is_empty() {
-        names::set(&pane_id, names::KEY_SURFACE_UNVALIDATED, "1")?;
-    }
-    if let Some(access) = &args.access {
-        names::set(&pane_id, names::KEY_ACCESS, access)?;
-    }
-    // Derive from the agent's resolved command (its binary), never the keep-alive wrap.
-    let name = names::set_name_or_derive(&pane_id, args.name.as_deref(), &binary)?;
-    names::set(&pane_id, names::KEY_LAUNCHED_AT, &launched_at)?;
-    if let Ok(cwd) = std::env::current_dir() {
-        names::set(&pane_id, names::KEY_CWD, &cwd.to_string_lossy())?;
-    }
+    let landing = layout::place(
+        &cmd,
+        &destination(&args.common, args.split, args.size),
+        &Registration {
+            name: args.name.as_deref(),
+            // Derive from the agent's resolved command (its binary), never the keep-alive wrap.
+            name_source: &binary,
+            launched_at: &launched_at,
+            cwd: cwd.as_deref(),
+            agent: Some(AgentRegistration {
+                agent: &args.agent,
+                surface: &resolved.surface,
+                access: args.access.as_deref(),
+                // Caller-supplied trailing arguments can change the rendering out from
+                // under the recorded surface; arguments the surface supplies itself are
+                // validated by construction and do not set the mark.
+                surface_unvalidated: !args.extra_args.is_empty(),
+            }),
+        },
+    )?;
 
     render_output(
         args,
-        &name,
-        &pane_id,
+        &landing,
         &binary,
         &argv,
         &launched_at,
@@ -176,11 +157,10 @@ pub(crate) fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
-/// Print the spawn result; `name` is the registered `@tt-name`, not the flag value.
+/// Print the spawn result; the name is the registered `@tt-name`, not the flag value.
 fn render_output(
     args: &SpawnAgentArgs,
-    name: &str,
-    pane_id: &str,
+    landing: &Landing,
     binary: &str,
     argv: &[String],
     launched_at: &str,
@@ -188,27 +168,33 @@ fn render_output(
 ) -> Result<()> {
     match args.common.format {
         Format::Concise => println!(
-            "agent={} access={} surface={} name={} pane={}",
+            "agent={} access={} surface={} name={} pane={} window_id={} min_pane_cols={} min_pane_rows={}",
             args.agent,
             display_value(args.access.as_deref()),
             surface,
-            name,
-            pane_id
+            landing.name,
+            landing.pane_id,
+            landing.window_id,
+            landing.min_pane_cols,
+            landing.min_pane_rows
         ),
         Format::Json => {
             let output = SpawnAgentJson {
                 agent: &args.agent,
                 access: args.access.as_deref(),
                 surface,
-                name,
-                pane_id,
+                name: &landing.name,
+                pane_id: &landing.pane_id,
                 binary,
                 argv,
                 launched_at,
+                window_id: &landing.window_id,
+                min_pane_cols: landing.min_pane_cols,
+                min_pane_rows: landing.min_pane_rows,
             };
             println!("{}", serde_json::to_string(&output)?);
         }
-        Format::Raw => println!("{pane_id}"),
+        Format::Raw => println!("{}", landing.pane_id),
     }
 
     Ok(())
