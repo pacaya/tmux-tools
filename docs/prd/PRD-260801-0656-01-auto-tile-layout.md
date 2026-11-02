@@ -509,7 +509,8 @@ One rule for all cases, no per-pane exception and nothing conditionally omitted,
 when the new pane no longer exists at any placement step after the split (registration, retile,
 marker, measurement), `launch` and `spawn-agent` exit 0, print the pane id, leave out `window_id`,
 `min_pane_cols`, `min_pane_rows` and `below_floor` in `concise` and `json`, and print one warning line
-on stderr. Any other failure at those steps fails the verb.
+on stderr. `name` reports the name chosen for the pane (`--name`, else the derived name), even when
+registration did not write it. Any other failure at those steps fails the verb.
 
 The reported names are deliberately distinct from the registry's `min_cols`/`min_rows`. Those are the
 floor an agent *requires*; these are the geometry a window *has*. Reusing one pair of identifiers for a

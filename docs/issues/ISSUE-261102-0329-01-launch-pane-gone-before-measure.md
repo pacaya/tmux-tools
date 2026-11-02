@@ -29,20 +29,20 @@ contract:
 
 **Required change:**
 - When a tmux call at a placement step after the split fails because the new pane no longer exists, `place` stops the remaining steps and `launch` and `spawn-agent` exit 0.
-- stdout: `raw` is unchanged (the pane id and a newline). `concise` and `json` keep every other field they print today and leave out `window_id`, `min_pane_cols`, `min_pane_rows` and `below_floor` (JSON: the keys are absent).
+- stdout: `raw` is unchanged (the pane id and a newline). `concise` and `json` keep every other field they print today and leave out `window_id`, `min_pane_cols`, `min_pane_rows` and `below_floor` (JSON: the keys are absent). `name` reports the name chosen for the pane (`--name`, else the derived name), even when registration did not write it.
 - stderr gets one line: `warning: pane <id> no longer exists; window geometry not measured`.
 - Any other failure at those steps (the pane still exists, or tmux output cannot be parsed) fails the verb as today.
 
-**Acceptance:** Runtime criteria run on the private harness (`IsolatedTmuxServer`). "Gone-pane wrapper at step S" is a test-only tmux wrapper that kills the new pane and then answers the first tmux call of step S that targets it with tmux's `can't find pane: <id>` error and exit 1.
+**Acceptance:** Runtime criteria run on the private harness (`IsolatedTmuxServer`). "Gone-pane wrapper at step S" is a test-only tmux wrapper that kills the new pane and then passes the first tmux call of step S that targets it to real tmux unchanged, so the CLI gets tmux's own error and exit status for that step. "Injected error at step S" is a test-only tmux wrapper that leaves the pane alive and makes the first tmux call of step S exit 1 with an error message.
 - [ ] Given the gone-pane wrapper at measurement, when `launch --cmd <shell> --format json` runs, then it exits 0, stdout is JSON with `pane_id` and without `window_id`, `min_pane_cols`, `min_pane_rows` and `below_floor`, and stderr contains the warning line. Fails before this change.
 - [ ] With the same wrapper, `launch --format concise` exits 0 and prints none of those four keys, and `launch --format raw` prints exactly the pane id and a newline.
-- [ ] Given the gone-pane wrapper at registration, when `launch --cmd <shell> --format json` runs, then it exits 0 with the same stdout and stderr result. Fails before this change.
+- [ ] Given the gone-pane wrapper at registration, when `launch --cmd <shell> --name <n> --format json` runs, then it exits 0 with the same stdout and stderr result, and `name` is `<n>`. Without `--name`, `name` is the derived name. Fails before this change.
 - [ ] Given an owned window and the gone-pane wrapper at retile, when a flagless `launch --cmd <shell> --format json` runs into it, then it exits 0 with the same stdout and stderr result. Fails before this change.
 - [ ] Given an owned window and the gone-pane wrapper at the `@tt-tiled` marker step, when a flagless `launch --cmd <shell> --format json` runs into it, then it exits 0 with the same stdout and stderr result. Fails before this change.
 - [ ] Given the gone-pane wrapper at measurement, when `spawn-agent <fake agent> --format json` runs with the `AgentsConfig` registry and `tt-fake-tui`, then it exits 0 with the same stdout and stderr result. Fails before this change.
 - [ ] Given a pane that still exists and a wrapper that answers the measurement `list-panes` with output that cannot be parsed, when `launch --format json` runs, then it exits non-zero.
-- [ ] Given a pane that still exists and a wrapper that makes the measurement `list-panes` exit 1 with an error other than `can't find pane: <id>`, when `launch --format json` runs, then it exits non-zero.
-- [ ] Given a pane that still exists and a wrapper that makes the first registration tmux call exit 1 with an error other than `can't find pane: <id>`, when `launch --format json` runs, then it exits non-zero.
+- [ ] Given an injected error at measurement, when `launch --format json` runs, then it exits non-zero.
+- [ ] Given an injected error at registration, when `launch --format json` runs, then it exits non-zero.
 - [ ] `launch_bare_pane_closes_when_cmd_exits` passes unmodified.
 
 **Verification and release:** `cargo test --workspace --features test-fixtures --no-fail-fast` passes with the decoy environment (`TMUX=/nonexistent/tt-decoy,1,0 TMUX_PANE=%999999 TMUX_TMPDIR=<empty temp dir>`), and the temp dir is empty afterwards. A failure that survives isolation and that this change did not introduce is reported, not fixed.
