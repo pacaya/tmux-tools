@@ -68,6 +68,11 @@ contract:
   - The JSON names are `min_pane_cols`, `min_pane_rows` and `below_floor`.
   - The concise key spelling is the implementer's choice, but the minima must not be spelled `min_cols`/`min_rows` (PRD-260801-0656-01 § Reporting surface keeps reported names distinct from registry names).
   - `status --format raw` stays byte-for-byte unchanged, and so does the not-in-tmux output.
+- Registry load in `launch` and `status`:
+  - `launch` loads the registry before it creates the pane. `status` loads it only for `concise` and `json` inside tmux; `status --format raw` and the not-in-tmux output never load it.
+  - When `agents.toml` exists but cannot be read or parsed, `launch` and `status` print one stderr line `warning: agent registry <path>: <error>; using built-in floors` and continue with the built-in registry only. The load failure does not change their exit status or their stdout fields.
+  - Per-entry load warnings go to stderr as `warning: agent <name>: <detail>`, as `spawn-agent` prints them.
+  - `spawn-agent` and `wait-idle` keep failing on an unreadable or unparsable `agents.toml`.
 - README.md's agent-registry documentation must state:
   - The surface fields `min_cols`/`min_rows`, and that agent-level values bind to the pre-surface rendering.
   - That the 58×16 default is an assumption, not a measurement.
@@ -90,6 +95,7 @@ contract:
 - [ ] Given a window that holds no `@tt-agent` pane and is crowded below 58 columns, when `launch --format json` places into it, then the output has the `below_floor` field with value `false`. Observable at the CLI seam.
 - [ ] Given a window that holds a pane registered with `@tt-agent` and is crowded by direct `tmux split-window` calls, with no spawn involved, when `status` points at it, then it reports the window below floor. When `status` points at a roomy window that holds the same registration, it reports the window not below floor. Observable at the CLI seam in `concise` and `json`. In `json` the fields are named `min_pane_cols`, `min_pane_rows` and `below_floor`.
 - [ ] `status --format raw` output is byte-for-byte identical before and after this change for the same pane.
+- [ ] Given the private test server and an unparsable `agents.toml` injected through `XDG_CONFIG_HOME`, when `launch --cmd <shell> --format json` runs, then it exits 0, creates exactly one pane, its JSON has `below_floor`, and stderr contains a line that starts with `warning: agent registry`. When `status --format json` runs against that pane, then it exits 0, its JSON has `below_floor`, and stderr contains the same warning. When `status --format raw` runs, then its stdout and stderr are byte-for-byte the same as with no `agents.toml`. Observable at the CLI seam.
 - [ ] README.md's agent-registry documentation states: the surface fields `min_cols`/`min_rows`, and that agent-level values bind to the pre-surface rendering; that the 58×16 default is an assumption; the surface each shipped floor was measured against, and that the coupling with `ready_regex`/`ready_lines` is not enforced; that the measurement recorded no agent versions, and that `validated_version` does not cover floors. Structural check on README.md. Fails before this change.
 
 **Verification and release:** `cargo test --workspace --features test-fixtures` passes against an isolated tmux server (PRD-260801-0656-01 § How to run the suite). A failure that survives isolation and that this change did not introduce is reported, not fixed.
