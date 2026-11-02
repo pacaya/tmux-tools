@@ -2,7 +2,7 @@
 id: ISSUE-261102-0157-01
 kind: issue
 category: bug
-status: needs-triage
+status: ready-for-agent
 brief_contract: agent-brief.v3
 context: tmux-tools
 summary: The unparsable-agents.toml floors test compares two status --format raw outputs that differ when tmux renames the window between the calls
