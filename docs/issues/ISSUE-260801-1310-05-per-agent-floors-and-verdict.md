@@ -69,7 +69,7 @@ contract:
   - The concise key spelling is the implementer's choice, but the minima must not be spelled `min_cols`/`min_rows` (PRD-260801-0656-01 § Reporting surface keeps reported names distinct from registry names).
   - `status --format raw` stays byte-for-byte unchanged, and so does the not-in-tmux output.
 - Registry load in `launch` and `status`:
-  - `launch` loads the registry before it creates the pane. `status` loads it only for `concise` and `json` inside tmux; `status --format raw` and the not-in-tmux output never load it.
+  - `launch` loads the registry before it creates the pane. `status` loads it whenever it renders a pane in `concise` or `json`, including `--target` with `TMUX` unset; only `status --format raw` and the not-in-tmux output never load it.
   - When `agents.toml` exists but cannot be read or parsed, `launch` and `status` print one stderr line `warning: agent registry <path>: <error>; using built-in floors` and continue with the built-in registry only. The load failure does not change their exit status or their stdout fields.
   - Per-entry load warnings go to stderr as `warning: agent <name>: <detail>`, as `spawn-agent` prints them.
   - `spawn-agent` and `wait-idle` keep failing on an unreadable or unparsable `agents.toml`.
