@@ -70,13 +70,14 @@ contract:
 **Acceptance:**
 - [ ] Given a pane in the isolated tmux server that `spawn-agent` or `launch --name` created, when `self --format json` runs in that pane, then stdout is `{"host":"tmux","driven":true,"name":<its name>,"agent":<its agent or null>}`, observable at stdout.
 - [ ] Given an unregistered pane, `self --format json` reports `driven: false` and `name: null`. Given no `$TMUX`, it reports `host: "tmux", driven: false`.
-- [ ] Given a pane whose session has an attached client, when `notify --title T --body B --target <name>` runs, then the client's tty receives `ESC P tmux; ESC ESC ]777;notify;T;B BEL ESC \` and the verb exits 0, observable at that tty and the exit code.
+- [ ] Given a pane whose session has an attached client, when `notify --title T --body B --target <name>` runs, then the bytes written to the client's tty contain `ESC P tmux; ESC ESC ]777;notify;T;B BEL ESC \` and the verb exits 0, observable at that tty and the exit code.
 - [ ] Given a pane whose session has no attached client, `notify --title T --body B --target <name>` exits 0 and stderr is `notify: not delivered on tmux`.
-- [ ] Given a session with an attached client and the override setting `notify` false, `notify --title T --body B --target <name>` exits 0, stderr is `notify: not delivered on tmux`, and the client's tty receives no bytes.
+- [ ] Given a session with an attached client and the override setting `notify` false, `notify --title T --body B --target <name>` exits 0, stderr is `notify: not delivered on tmux`, and the bytes written to the client's tty contain no `]777;notify;` sequence.
 - [ ] Given `TMUX_PANE` unset, `notify --title T --body B` without `--target` exits 1 and stderr names `TMUX_PANE` (P7.1).
-- [ ] Given a pane whose session has an attached client, `notify --title T --body B` without `--target`, run in that pane, exits 0 and the client's tty receives the P7.2 bytes.
-- [ ] Given the override sets `rebalance` false, `rebalance` exits 3, stderr is `unsupported: rebalance on tmux`, and the window layout is unchanged. Given `tile` false, `launch --split tile` exits 3, stderr is `unsupported: --split tile on tmux`, and no pane is created. Given `size` false, `launch --size <n>` exits 3, stderr is `unsupported: --size on tmux`, and no pane is created.
-- [ ] Given a window with no `@tt-tiled` option and the override setting `tile` false, a flagless `launch` run in that window exits 0, prints nothing about tiling on stderr, and the window still has no `@tt-tiled` option. (With `tile` true, the same launch sets it.)
+- [ ] Given a pane whose session has an attached client, `notify --title T --body B` without `--target`, run in that pane, exits 0 and the bytes written to the client's tty contain the P7.2 sequence.
+- [ ] Given `--title 'a;b'` and a body that contains ESC and BEL, the delivered sequence carries the title `a,b` and the body without bytes 0x00–0x1F or 0x7F (the `notify-tmux.sh` sanitisation that P7.2 adopts).
+- [ ] Given the override sets `rebalance` false, `rebalance` exits 3, stderr is `unsupported: rebalance on tmux`, and the window layout is unchanged. Given `tile` false, `launch --split tile` exits 3, stderr is `unsupported: --split tile on tmux`, and no pane is created. Given `size` false, `launch --size <n>` exits 3, stderr is `unsupported: --size on tmux`, and no pane is created. `spawn-agent --split tile` and `spawn-agent --size <n>` behave the same way.
+- [ ] Given a window that holds a pane registered from the launch's cwd and has no `@tt-tiled` option: with `tile` true, a flagless `launch` run in that window retiles it and sets `@tt-tiled`; with the override setting `tile` false, the same launch exits 0, prints nothing about tiling on stderr, does not retile, and the window still has no `@tt-tiled` option.
 - [ ] For every verb that supports `--format json`, the result has `host: "tmux"`. `status`, `list`, `wait-idle` and `prompt` results have `host_state: null`, and `prompt` results have `submit: "assumed"`.
 - [ ] Every assertion that existed in `tests/integration.rs` before this issue still passes; only the added JSON keys differ.
 
@@ -85,3 +86,4 @@ contract:
 **Out of scope:** `TMUX_TOOLS_HOST` and host detection beyond today's tmux behaviour; the Orca backend; changes to the harness `notify-tmux.sh` and other hooks.
 
 ## Triage Notes
+- 2026-11-07 dispatch readiness: not promoted; stays `needs-triage`. Unresolved maintainer choices: Q36 (notify write path, P7.2), Q37 (notify client when several are attached), Q38 (standalone BEL after the notify sequence), Q39 (where `list --format json` carries `host` and `host_state`, P3.5 / `## Contracts`).
