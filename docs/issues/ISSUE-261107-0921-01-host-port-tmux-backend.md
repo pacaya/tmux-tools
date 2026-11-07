@@ -2,7 +2,7 @@
 id: ISSUE-261107-0921-01
 kind: issue
 category: enhancement
-status: needs-triage
+status: ready-for-agent
 brief_contract: agent-brief.v3
 context: tmux-tools
 summary: every verb reaches tmux only through a pane-level Host port whose only backend is tmux, with no change in behaviour
@@ -52,8 +52,8 @@ contract:
 
 **Acceptance:**
 - [ ] Given the isolated tmux server, when the existing suite runs, then every existing test passes and no expected value in `tests/integration.rs` changed (P2.4), observable at `cargo test --workspace --features test-fixtures --no-fail-fast` and in the diff.
-- [ ] `core/src/tmux.rs` does not exist. In `src/cmd/`, `src/main.rs`, `src/util.rs` and `core/src/` outside `core/src/host/tmux/`, no code starts the tmux process, builds a tmux argv in any form (full subcommand name or alias), or names a tmux option, including `@tt-*` pane options and the `@tt-tiled` window option; Outside `core/src/host/tmux/`, code refers to no item of that module except the tmux backend type: every match of `rg -n 'tmux::' src/cmd src/main.rs src/util.rs core/src --glob '!core/src/host/tmux/**'` names only the tmux backend type, and `rg -n '"@tt-' src/cmd src/main.rs src/util.rs core/src --glob '!core/src/host/tmux/**'` finds no match. `src/bin/tt-vendor-smoke.rs` is exempt (P2.2); `src/bin/tt-fake-tui.rs` builds no tmux command.
-- [ ] At no public path of `tmux-tools-core` (the crate root or any public module) can a caller reach `TmuxInvocation`, `with_invocation`, `set_global_invocation`, the tmux command runner, `DEFAULT_TMUX_COMMAND_TIMEOUT`, `stream::capture_ansi`, or any other item of `core/src/host/tmux/` except the tmux backend type. No public module named `stream` exists, and no `tmux` module exists at the crate root. The `Host` port, `Host`, `HostCapabilities`, the tmux backend type, and the modules `agents`, `format`, `idle`, `layout`, `names` and `target` are public, observable in `cargo doc -p tmux-tools-core` output.
+- [ ] `core/src/tmux.rs` does not exist. In `src/` and `core/src/` outside `core/src/host/tmux/` and `src/bin/tt-vendor-smoke.rs` (P2.2 exception), no code starts the tmux process, builds a tmux argv or format string in any form (full subcommand name or alias), or reads or writes a tmux option, including `@tt-*` pane options and the `@tt-tiled` window option. User-facing message text that P2.4 keeps unchanged is not a read or write. Outside `core/src/host/tmux/`, code refers to no item of that module, under any path or alias, except the tmux backend type: every match of `rg -n 'tmux::|::tmux\b|[{,]\s*tmux\b|^\s*tmux\b' src core/src --glob '!core/src/host/tmux/**' --glob '!src/bin/tt-vendor-smoke.rs'` names only the tmux backend type, and `rg -n '["{]@tt-' src core/src --glob '!core/src/host/tmux/**' --glob '!src/bin/tt-vendor-smoke.rs'` finds no match. `src/bin/tt-fake-tui.rs` builds no tmux command.
+- [ ] At no public path of `tmux-tools-core` (the crate root or any public module) can a caller reach `TmuxInvocation`, `with_invocation`, `set_global_invocation`, the tmux command runner, `DEFAULT_TMUX_COMMAND_TIMEOUT`, `stream::capture_ansi`, or any other item of `core/src/host/tmux/` except the tmux backend type. No public module named `stream` exists, and no `tmux` module exists at the crate root. The `Host` port, `Host`, `HostCapabilities`, the tmux backend type, and the modules `agents`, `format`, `idle`, `layout`, `names` and `target` are public, observable in `cargo doc -p tmux-tools-core --all-features` output, and no public item in `core/src` carries `#[doc(hidden)]`.
 
 **Verification and release:** `cargo test --workspace --features test-fixtures --no-fail-fast` passes with the decoy environment (`TMUX=/nonexistent/tt-decoy,1,0 TMUX_PANE=%999999 TMUX_TMPDIR=<empty temp dir>`), and the temp dir is empty afterwards. A failure that survives isolation and that this change did not introduce is reported, not fixed. No release of its own.
 
