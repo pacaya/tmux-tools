@@ -2,7 +2,7 @@
 id: ISSUE-261107-0921-03
 kind: issue
 category: enhancement
-status: needs-triage
+status: ready-for-agent
 brief_contract: agent-brief.v3
 context: tmux-tools
 summary: an Orca host backend serves every required verb, selected by TMUX_TOOLS_HOST or ORCA_TERMINAL_HANDLE, with a Pane record registry and a per-backend contract suite
@@ -130,8 +130,8 @@ Live run (opt-in switch, from inside an Orca terminal, Orca runtime reachable):
 - [ ] For a driven agent, `status --format json` `host_state` follows the P9.10 mapping of that pane's `orca worktree ps --json` row; it is never `idle`.
 - [ ] With a shimmed `orca worktree ps --json` and a static pane screen, and neither `--until` nor `--idle-seconds` given: while the pane's row is `working`, or its main state is `done` with a subagent `working`, neither `wait-idle` nor the `prompt` settle ends before its timeout; a `done` or `blocked` row ends `wait-idle`; a `done` or `blocked` row ends the `prompt` settle only when its `stateStartedAt` is after the submission, and a `done` row whose `stateStartedAt` is before the submission does not end it.
 - [ ] `prompt --format json` to a driven agent reports `submit: "confirmed"` when the receipt's stages include `turn_started`. Shimmed receipts give: only `input_accepted` → `"accepted"`; provider `unsupported` → `"assumed"`; error `agent_prompt_blocked`, observation `permission`, or `accepted: false` → exit 1 with the reason on stderr and a single `terminal send`; observation `incarnation_replaced` → exit 1 with `prompt target restarted`. `prompt --timeout 0.2` passes `--wait-submit 1`, and `prompt --timeout 5000` passes `--wait-submit 3600`.
-- [ ] Given a shimmed `orca status` whose capabilities lack `terminal.prompt-delivery.v1`, `prompt --target <name> <text>` exits 1, stderr names `terminal.prompt-delivery.v1`, and the shim records no `terminal send` call; on the same runtime, `send --target <name> y` writes `y` and `capture --target <name>` exits 0.
-- [ ] On Orca, `status --format json` has the keys `window_index`, `pane`, `min_pane_cols`, `min_pane_rows` and `below_floor`, each `null`, and `window` equal to the pane's tab id; every `list --format json` row has the key `last_activity` with value `null`; `spawn-agent --format json` and `launch --format json` have the keys `relocated`, `min_pane_cols`, `min_pane_rows` and `below_floor`, each `null`, and `window_id` equal to the new pane's tab id. For each of these verbs, the key set equals the key set of the same verb on tmux.
+- [ ] Given a shimmed `orca status` whose capabilities lack `terminal.prompt-delivery.v1`, `prompt --target <name> <text>` exits 1 for a one-line text and for a multi-line text to a bracketed-paste Surface, stderr names `terminal.prompt-delivery.v1`, and the shim records no `terminal send` call; on the same runtime, `send --target <name> y` writes `y` and `capture --target <name>` exits 0.
+- [ ] On Orca, `status --format json` has the keys `window_index`, `pane`, `min_pane_cols`, `min_pane_rows` and `below_floor`, each `null`, and `window` equal to the pane's tab id; every `list --format json` row has the key `last_activity` with value `null`; `spawn-agent --format json` and `launch --format json` have the keys `relocated`, `window_id`, `min_pane_cols`, `min_pane_rows` and `below_floor`, each `null`. For each of these verbs, the key set equals the key set of the same verb on tmux.
 - [ ] Every `prompt --format json` result on Orca has `complete: false`. `capture --all` on Orca prints no full-screen notice.
 - [ ] Given a driven agent whose Host state is `done`, `wait-idle --until <regex that never matches> --timeout 3` does not end before its timeout.
 - [ ] `rebalance` exits 3 with `unsupported: rebalance on orca`; `launch --split tile` exits 3 with `unsupported: --split tile on orca`; `launch --size <n>` exits 3 with `unsupported: --size on orca`; none creates a pane. `notify` exits 0 with `notify: not delivered on orca` on stderr.
@@ -145,3 +145,4 @@ Live run (opt-in switch, from inside an Orca terminal, Orca runtime reachable):
 - 2026-11-07 Q40–Q47 and Q50 settled in `PRD-261107-0825-01` P4.1, P4.3, P4.5, P6.2, P9.1, P9.3, P9.6, P9.7, P9.10–P9.12, P11.4 and `## Contracts`; Q48 and Q49 settled in this brief.
 - 2026-11-07 dispatch readiness after Q40–Q50: not promoted; stays `needs-triage`. Unresolved: Q52 (`list` and name resolution on an incomplete Orca pane list, `PRD-261107-0825-01` `orca-list-incomplete`), Q53 (Orca values of JSON fields with no Orca source, `orca-json-fields`), Q54 (`prompt` on an Orca runtime without `terminal.prompt-delivery.v1`, `orca-no-prompt-delivery`).
 - 2026-11-07 Q52–Q54 settled in `PRD-261107-0825-01` P4.5, P9.6, P9.12, P9.13 and `## Contracts`.
+- 2026-11-07 dispatch readiness after Q52–Q54: one consolidated repair (P9.6 order, P9.13 `window_id`) and targeted recheck passed; `ready-for-agent`.
