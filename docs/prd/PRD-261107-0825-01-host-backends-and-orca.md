@@ -85,7 +85,7 @@ Every term in this clause is added to `CONTEXT.md` with its code home. These exi
 
 ### P2 — One pane-level Host port
 
-1. `core` defines one `Host` port with pane-level operations: create (new pane, split, or window), list, capture (screen and history from a mark), send text, send keys, close, read and write registration, host state, notify, set title, capabilities, and the layout operations gated by `tile`: apply tiled layout, read window and pane geometry, read and write Layout intent, and move a pane to a new window.
+1. `core` defines one `Host` port with pane-level operations: create (new pane, split, or window), list, capture (screen and history from a mark), send text, send keys, close, read and write registration, host state, notify, capabilities, and the layout operations gated by `tile`: apply tiled layout, read window and pane geometry, read and write Layout intent, and move a pane to a new window.
 2. `src/cmd/*`, `core/src/layout.rs`, `core/src/target.rs`, `core/src/names.rs`, and `core/src/stream.rs` reach a host only through this port. No module outside a backend builds host commands. Tile, `rebalance`, Floor, Effective floor, Ceiling, and Overflow window logic stays in `core/src/layout.rs` and runs only on a host with `tile`.
 3. `core/src/tmux.rs` and all tmux command construction become internals of the tmux backend.
 4. With the tmux backend selected, every verb keeps its current output and exit behavior; the existing `tests/integration.rs` suite passes without changed expectations.
@@ -116,8 +116,8 @@ Every term in this clause is added to `CONTEXT.md` with its code home. These exi
 
 ### P5 — Required and optional verbs
 
-1. Required verbs: `spawn-agent`, `launch`, `prompt`, `wait-idle`, `capture`, `send`, `send-enter`, `escape`, `interrupt`, `kill`, `list`, `status`, `notify`, `self`. A backend that cannot serve every required verb does not ship.
-2. Optional verbs: `rebalance` and `title`, and the placement options `--split tile` and `--size`.
+1. Required verbs: `spawn-agent`, `launch`, `execute`, `prompt`, `wait-idle`, `capture`, `send`, `send-enter`, `escape`, `interrupt`, `kill`, `list`, `status`, `notify`, `self`. A backend that cannot serve every required verb does not ship.
+2. Optional verb: `rebalance`. Optional placement options: `--split tile` and `--size`.
 3. Capabilities are evaluated on each invocation. An optional verb or option invoked on a host whose capabilities lack it exits 3 and prints `unsupported: <verb> on <host>` on stderr, with no side effect.
 4. The automatic tile after a spawn is skipped without a message on a host without `tile`; the host controls the layout.
 5. A required verb whose host feature is optional (P6, P7) uses its fallback and never exits 3.
@@ -150,10 +150,10 @@ Every term in this clause is added to `CONTEXT.md` with its code home. These exi
 5. `interrupt` sends the resolved Surface's `interrupt_key` through the item 4 translation, and keeps every current refusal rule (quit hazard, surface-unvalidated pane). It never uses `terminal send --interrupt`.
 6. Before it sends, `prompt` determines delivery with the three outcomes of PRD-260918-0323-01 P1: guaranteed when Orca reports the pane as a running, recognized agent on a host that brackets agent prompts; refused before any transmission when the Surface declares bracketed paste, the text is multi-line, and that is not established; unavailable otherwise. [OPEN: orca-paste-determination] Submission observation and the `submit_confirmation` capability never replace this determination. A guaranteed or unavailable prompt is sent with `terminal send --text <prompt> --enter --wait-submit <seconds>`. An ambiguous transport failure is retried once with the reported `--retry-request` ID and never resent otherwise.
 7. `kill` resolves the name to a live handle and runs `terminal close --terminal <handle>`. The self-pane refusal and the Ownership check apply before close.
-8. `title` uses `terminal set-pane-title`; the `title` capability is true only while `orca status` reports the desktop available, so without it `title` exits 3 (P5.3).
+8. The tab title is the pane name from item 2 and is display only (P4.1). The tool has no title verb.
 9. `launch` passes the command as `--command`; the Orca login shell stays after the command exits, which satisfies Keep-alive wrap. `--bare` runs `exec <cmd>` so the pane closes with the command.
 10. Native state comes from Orca's agent state for the pane. [OPEN: orca-agent-state]
-11. Capabilities: `native_state` and `submit_confirmation` true; `title` per item 8; `tile`, `rebalance`, `size`, `notify` false. The `submit` mapping: an Orca receipt that reports submission or turn start → `confirmed`; the queued or input-accepted receipt on timeout → `accepted`; provider `old-host` → `assumed`.
+11. Capabilities: `native_state` and `submit_confirmation` true; `tile`, `rebalance`, `size`, `notify` false. The `submit` mapping: an Orca receipt that reports submission or turn start → `confirmed`; the queued or input-accepted receipt on timeout → `accepted`; provider `old-host` → `assumed`.
 
 ### P10 — Backend contract tests
 
@@ -184,7 +184,7 @@ Every term in this clause is added to `CONTEXT.md` with its code home. These exi
 
 - **`Host`** — enum: `Tmux`, `Orca`.
 - **`HostSelection`** — `host: Host`; `source: SelectionSource`, where `SelectionSource` is `Override` | `Detected(env_var: String)` | `Default`.
-- **`HostCapabilities`** — `native_state: bool`, `submit_confirmation: bool`, `notify: bool`, `tile: bool`, `rebalance: bool`, `size: bool`, `title: bool`.
+- **`HostCapabilities`** — `native_state: bool`, `submit_confirmation: bool`, `notify: bool`, `tile: bool`, `rebalance: bool`, `size: bool`.
 - **`PaneRecord`** — `schema: "tmux-tools.pane.v1"`, `name: String`, `host: Host`, `server_id: String`, `handle: Option<String>` (`None` = reservation), `agent: Option<String>`, `access: Option<String>`, `surface: Option<String>`, `surface_unvalidated: bool`, `cwd: PathBuf`, `launched_at: String` (RFC 3339).
 - **`PaneLiveness`** — enum: `Live`, `Dead`, `OrphanReservation`.
 
