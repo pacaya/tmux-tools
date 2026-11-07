@@ -98,7 +98,7 @@ Every term in this clause is added to `CONTEXT.md` with its code home. These exi
 2. Otherwise the first match selects: `$TMUX` set → `tmux`; `ORCA_TERMINAL_HANDLE` set → `orca`. Later PRDs add `REX_BLOCK` → `rex` and `HC_TERMINAL_ID` → `herdr`, in that order, after `orca`.
 3. When nothing matches, the host is `tmux` with today's behavior, including the Managed session outside tmux.
 4. When the selected host's CLI or runtime is unreachable, the invocation fails with exit 1 and names the host and the selection source. It never falls back to another host.
-5. Every `--format json` result carries `host`.
+5. Every `--format json` result that is a JSON object carries `host`. `list --format json` stays a top-level array: each row carries `host` and `host_state`, and an empty list `[]` carries no `host`.
 
 ### P4 — Pane names and the registry
 
@@ -133,7 +133,7 @@ Every term in this clause is added to `CONTEXT.md` with its code home. These exi
 ### P7 — The notify verb
 
 1. `notify --title <T> --body <B> [--target <name>]` shows a desktop notification for the target pane, or for the calling pane when `--target` is absent. On tmux, without `--target` and with `TMUX_PANE` unset, the verb exits 1 and names `TMUX_PANE`.
-2. The tmux backend writes OSC 777 through tmux passthrough to the client tty of the pane's session, the behavior of the harness `notify-tmux.sh`. When the session has no attached client, the verb exits 0 and prints `notify: not delivered on tmux` on stderr.
+2. The tmux backend writes the tmux-wrapped OSC 777 sequence `ESC P tmux; ESC ESC ]777;notify;<T>;<B> BEL ESC \` to the tty of the target pane. tmux unwraps it through passthrough and writes `ESC ]777;notify;<T>;<B> BEL` to the client tty. This is the main path of the harness `notify-tmux.sh`, with its sanitisation: `<T>` and `<B>` lose bytes 0x00–0x1F and 0x7F, and `;` becomes `,`. The verb does not write the standalone BEL that `notify-tmux.sh` writes after the sequence. When the session has no attached client, the verb exits 0 and prints `notify: not delivered on tmux` on stderr.
 3. Orca has no notification command; on Orca, notifications come from Orca's own agent hooks, and `notify` follows item 4.
 4. On a host without `notify`, the verb exits 0 and prints `notify: not delivered on <host>` on stderr.
 
@@ -195,7 +195,7 @@ Every term in this clause is added to `CONTEXT.md` with its code home. These exi
 - **Registry file** — path per P4.3; content is `PaneRecord` as one JSON object, keys as the field names above, `host` lowercase.
 - **Verb `notify`** — `notify --title <T> --body <B> [--target <name>]`; behavior per P7.
 - **Verb `self`** — `self --format json` → `{"host": "tmux"|"orca", "driven": bool, "name": string|null, "agent": string|null}`.
-- **Changed JSON results** — every `--format json` result adds `host`; `status`, `list`, `wait-idle`, and `prompt` add `host_state: "working"|"blocked"|"done"|"idle"|null`; `prompt` adds `submit: "confirmed"|"accepted"|"assumed"`.
+- **Changed JSON results** — every `--format json` object result adds `host`; `status`, `wait-idle`, and `prompt` add `host_state: "working"|"blocked"|"done"|"idle"|null`; `list --format json` stays a top-level array, each row adds `host` and `host_state` with the same values, and an empty list `[]` carries no `host`; `prompt` adds `submit: "confirmed"|"accepted"|"assumed"`.
 - **Exit code 3** — `unsupported` for an optional verb on a host that lacks it (P5.3). Exit 0 and 1 keep their meaning.
 
 ## Verification and release
