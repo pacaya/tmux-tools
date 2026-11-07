@@ -90,7 +90,7 @@ Every term in this clause is added to `CONTEXT.md` with its code home. These exi
 3. `core/src/tmux.rs` and all tmux command construction become internals of the tmux backend.
 4. With the tmux backend selected, every verb keeps its current output and exit behavior; the existing `tests/integration.rs` suite passes without changed expectations.
 5. Rules that are tmux facts stay in the tmux backend: Managed session, Bracketed paste transport, and storing Layout intent as the `@tt-tiled` window option.
-6. The public library API of `tmux-tools-core` is the `Host` port, `HostSelection`, `HostCapabilities`, and the backends. The current public tmux paths (`tmux`, `stream`, `TmuxInvocation`) are not kept for compatibility.
+6. The public library API of `tmux-tools-core` gains the `Host` port, `HostSelection`, `HostCapabilities`, and the backends. The current public tmux paths (`tmux`, `stream`, `TmuxInvocation`, `with_invocation`, `set_global_invocation`) are not kept for compatibility. `agents`, `format`, `idle`, `layout`, `names`, and `target` stay public and reach a host only through the port.
 
 ### P3 — Host selection
 
@@ -110,7 +110,7 @@ Every term in this clause is added to `CONTEXT.md` with its code home. These exi
    - handle listed → `live`;
    - handle not listed → `dead`: the record is deleted and the result reports the name as dead;
    - no handle and older than the spawn timeout → `orphan-reservation`: the record is deleted.
-   No other state is valid. A dead name is never resolved to another pane. A record with no handle that is younger than the spawn timeout is a spawn in progress: resolving its name fails with exit 1 and `spawn in progress: <name>`, `list` omits it, and reconciliation leaves it in place.
+   The spawn timeout is a fixed 120 seconds. No other state is valid. A dead name is never resolved to another pane. A record with no handle that is younger than the spawn timeout is a spawn in progress: resolving its name fails with exit 1 and `spawn in progress: <name>`, `list` omits it, and reconciliation leaves it in place.
 6. There is no daemon and no global lock. Host event streams are read only while the invocation that needs them runs.
 7. Ownership on a registry host reads the Pane record: the record exists, and its `cwd` matches the current working directory where both are known.
 
@@ -133,7 +133,7 @@ Every term in this clause is added to `CONTEXT.md` with its code home. These exi
 ### P7 — The notify verb
 
 1. `notify --title <T> --body <B> [--target <name>]` shows a desktop notification for the target pane, or for the calling pane when `--target` is absent.
-2. The tmux backend writes OSC 777 through tmux passthrough to the client tty of the pane's session, the behavior of the harness `notify-tmux.sh`.
+2. The tmux backend writes OSC 777 through tmux passthrough to the client tty of the pane's session, the behavior of the harness `notify-tmux.sh`. When the session has no attached client, the verb exits 0 and prints `notify: not delivered on tmux` on stderr.
 3. Orca has no notification command; on Orca, notifications come from Orca's own agent hooks, and `notify` follows item 4.
 4. On a host without `notify`, the verb exits 0 and prints `notify: not delivered on <host>` on stderr.
 
@@ -176,7 +176,7 @@ Every term in this clause is added to `CONTEXT.md` with its code home. These exi
 - New homes: `core/src/host/mod.rs` (port, `Host`, `HostSelection`, `HostCapabilities`), `core/src/host/tmux/` (current `tmux.rs` and tmux command construction), `core/src/host/orca.rs`, `core/src/registry.rs` (`PaneRecord`, `PaneLiveness`), `src/cmd/notify.rs`, `src/cmd/self_.rs`; `tests/integration.rs` becomes the per-backend contract suite.
 - Planned-record dependencies: none.
 - Active-plan overlaps: none in this repository. Repository `claude` owns the consuming harness PRD, which declares `implementation_after` this PRD.
-- Library consumers: `SilverBond` depends on `tmux-tools-core` pinned to a Git revision and uses `TmuxInvocation`, `tmux::DEFAULT_TMUX_COMMAND_TIMEOUT`, `stream::capture_ansi`, and `agents`; P2.6 breaks these paths for its next update.
+- Library consumers: `SilverBond` depends on `tmux-tools-core` pinned to a Git revision and uses `TmuxInvocation`, `tmux::DEFAULT_TMUX_COMMAND_TIMEOUT`, `stream::capture_ansi`, and `agents`; P2.6 breaks the first three paths for its next update.
 
 ## Contracts
 
