@@ -86,7 +86,7 @@ Every term in this clause is added to `CONTEXT.md` with its code home. These exi
 ### P2 — One pane-level Host port
 
 1. `core` defines one `Host` port with pane-level operations: create (new pane, split, or window), list, capture (screen and history from a mark), send text, send keys, close, read and write registration, host state, notify, capabilities, and the layout operations gated by `tile`: apply tiled layout, read window and pane geometry, read and write Layout intent, and move a pane to a new window.
-2. `src/cmd/*`, `core/src/layout.rs`, `core/src/target.rs`, `core/src/names.rs`, and `core/src/stream.rs` reach a host only through this port. No module outside a backend builds host commands. Tile, `rebalance`, Floor, Effective floor, Ceiling, and Overflow window logic stays in `core/src/layout.rs` and runs only on a host with `tile`.
+2. `src/cmd/*`, `core/src/layout.rs`, `core/src/target.rs`, `core/src/names.rs`, and `core/src/stream.rs` reach a host only through this port. No module outside a backend builds host commands. Exception: `src/bin/tt-vendor-smoke.rs` (PRD-260918-0323-01 P8) keeps its own private tmux server and commands. Tile, `rebalance`, Floor, Effective floor, Ceiling, and Overflow window logic stays in `core/src/layout.rs` and runs only on a host with `tile`.
 3. `core/src/tmux.rs` and all tmux command construction become internals of the tmux backend.
 4. With the tmux backend selected, every verb keeps its current output and exit behavior; the existing `tests/integration.rs` suite passes without changed expectations.
 5. Rules that are tmux facts stay in the tmux backend: Managed session, Bracketed paste transport, and storing Layout intent as the `@tt-tiled` window option.
@@ -118,7 +118,7 @@ Every term in this clause is added to `CONTEXT.md` with its code home. These exi
 
 1. Required verbs: `spawn-agent`, `launch`, `execute`, `prompt`, `wait-idle`, `capture`, `send`, `send-enter`, `escape`, `interrupt`, `kill`, `list`, `status`, `notify`, `self`. A backend that cannot serve every required verb does not ship.
 2. Optional verb: `rebalance`. Optional placement options: `--split tile` and `--size`.
-3. Capabilities are evaluated on each invocation. An optional verb or option invoked on a host whose capabilities lack it exits 3 and prints `unsupported: <verb> on <host>` on stderr, with no side effect.
+3. Capabilities are evaluated on each invocation. An optional verb or option invoked on a host whose capabilities lack it exits 3 and prints `unsupported: <verb> on <host>` on stderr, with no side effect. For an option, `<verb>` is the option as written: `unsupported: --split tile on <host>`, `unsupported: --size on <host>`.
 4. The automatic tile after a spawn is skipped without a message on a host without `tile`; the host controls the layout.
 5. A required verb whose host feature is optional (P6, P7) uses its fallback and never exits 3.
 
@@ -132,7 +132,7 @@ Every term in this clause is added to `CONTEXT.md` with its code home. These exi
 
 ### P7 — The notify verb
 
-1. `notify --title <T> --body <B> [--target <name>]` shows a desktop notification for the target pane, or for the calling pane when `--target` is absent.
+1. `notify --title <T> --body <B> [--target <name>]` shows a desktop notification for the target pane, or for the calling pane when `--target` is absent. On tmux, without `--target` and with `TMUX_PANE` unset, the verb exits 1 and names `TMUX_PANE`.
 2. The tmux backend writes OSC 777 through tmux passthrough to the client tty of the pane's session, the behavior of the harness `notify-tmux.sh`. When the session has no attached client, the verb exits 0 and prints `notify: not delivered on tmux` on stderr.
 3. Orca has no notification command; on Orca, notifications come from Orca's own agent hooks, and `notify` follows item 4.
 4. On a host without `notify`, the verb exits 0 and prints `notify: not delivered on <host>` on stderr.
