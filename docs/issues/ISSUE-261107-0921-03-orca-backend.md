@@ -104,6 +104,7 @@ contract:
 **Acceptance:**
 Default run (`cargo test --workspace --features test-fixtures`, no `orca` on `PATH`):
 - [ ] The contract suite passes on tmux, and the run passes with no `orca` executable on `PATH`.
+- [ ] Every assertion that was in `tests/integration.rs` before this issue still runs on tmux and passes with unchanged expected values (P2.4); only the JSON keys that ISSUE-261107-0921-02 added differ.
 - [ ] Given `TMUX_TOOLS_HOST=foo`, any verb exits 1 and stderr names `tmux` and `orca`.
 - [ ] Given `$TMUX` and `ORCA_TERMINAL_HANDLE` both set, `self --format json` stdout has `host: "tmux"`. Given `TMUX_TOOLS_HOST=tmux` and only `ORCA_TERMINAL_HANDLE` set, stdout has `host: "tmux"`.
 - [ ] Given only `ORCA_TERMINAL_HANDLE` set and no reachable Orca runtime, `list` exits 1, stderr names `orca` and `ORCA_TERMINAL_HANDLE` as the selection source, and no tmux pane or session is created.
@@ -125,4 +126,4 @@ Live run (opt-in switch, from inside an Orca terminal, Orca runtime reachable):
 **Out of scope:** Rex and Herdr backends; harness skill, hook, guard and `teammateMode` changes; moving `SilverBond` to the port.
 
 ## Triage Notes
-- Unresolved, resolve at dispatch readiness: `PRD-261107-0825-01` open questions `orca-runtime-id`, `orca-paste-determination`, `orca-live-render`, `orca-agent-state`.
+- 2026-11-07 dispatch readiness: not promoted; stays `needs-triage`. Orca 1.4.252 evidence answers the four `PRD-261107-0825-01` open questions (`orca-runtime-id`, `orca-paste-determination`, `orca-live-render`, `orca-agent-state`) against the PRD's assumptions; each consequence needs a maintainer choice. Unresolved: Q40 (Pane record identity across an Orca restart), Q41 (truncated `terminal list` in reconciliation), Q42 (pane name to registry file name), Q43 (Host state mapping, freshness, subagents, `--until` precedence), Q44 (pre-send paste determination), Q45 (Completeness on Orca), Q46 (`submit` receipt mapping and `--wait-submit` value), Q47 (Orca addressing and `list` fields), Q48 (P10.3 expected results and the ambiguous-split trigger), Q49 (live-run environment and owner of the GUI checks), Q50 (owner of the README library section).
