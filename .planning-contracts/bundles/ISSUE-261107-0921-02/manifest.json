@@ -1,133 +1,133 @@
 {
-  "approval_id": "dispatch-20261107T123103Z",
+  "approval_id": "dispatch-20261107T220235Z",
   "approval_object": "approval.json",
-  "approval_sha256": "93c361fd2649581c9e3669d1eed81edbc6fc269347ca0985b80ddfc8ee20036a",
+  "approval_sha256": "f1d469c3d56882ea2a809fbe35fd6b169ae048fb9ba1b7a6bce7e191eb6c02cc",
   "entries": [
     {
-      "approved_revision": "384e86c33690416638ebf8bb91034cc146e5a6ef",
-      "bytes": 7991,
-      "object": "objects/bb6a210bfa5944f9b2badb56508ce0acc0b536bd5fc48f6d95fe88b5f6d5ecd2.md",
+      "approved_revision": "82a5356741912287686299f51b06b40c46b0da68",
+      "bytes": 8486,
+      "object": "objects/b713cd91574b78d4655fb99b9c05f56b2fe1f6fde4cb9b8d1cd5af5722381f4c.md",
       "origin": {
         "path": "docs/issues/ISSUE-261107-0921-02-self-notify-unsupported-host-fields.md",
         "repository": "tmux-tools",
-        "revision": "c2e7808eeaa3b74eb1147b7cbd516d8eb7d4dbea"
+        "revision": "664ca32313e1e4e8e77ac874e976ab0763657736"
       },
       "role": "issue",
-      "sha256": "bb6a210bfa5944f9b2badb56508ce0acc0b536bd5fc48f6d95fe88b5f6d5ecd2",
+      "sha256": "b713cd91574b78d4655fb99b9c05f56b2fe1f6fde4cb9b8d1cd5af5722381f4c",
       "target": "tmux-tools:ISSUE-261107-0921-02"
     },
     {
-      "approved_revision": "c2e7808eeaa3b74eb1147b7cbd516d8eb7d4dbea",
-      "bytes": 1839,
-      "object": "objects/0acf84ff6d214241d91293771b5bcb04da2025f33bc6f86896ab0c4f48bebe91.md",
+      "approved_revision": "664ca32313e1e4e8e77ac874e976ab0763657736",
+      "bytes": 1921,
+      "object": "objects/2dcaeaca0b58367d93fe50b56bb4f48c229f945537dd24be4bf26cb0306616b6.md",
       "origin": {
         "path": "docs/prd/PRD-261107-0825-01-host-backends-and-orca.md",
         "repository": "tmux-tools",
-        "revision": "c2e7808eeaa3b74eb1147b7cbd516d8eb7d4dbea"
+        "revision": "664ca32313e1e4e8e77ac874e976ab0763657736"
       },
       "role": "source",
-      "sha256": "0acf84ff6d214241d91293771b5bcb04da2025f33bc6f86896ab0c4f48bebe91",
+      "sha256": "2dcaeaca0b58367d93fe50b56bb4f48c229f945537dd24be4bf26cb0306616b6",
       "target": "tmux-tools:PRD-261107-0825-01#contracts"
     },
     {
-      "approved_revision": "c2e7808eeaa3b74eb1147b7cbd516d8eb7d4dbea",
+      "approved_revision": "664ca32313e1e4e8e77ac874e976ab0763657736",
       "bytes": 1261,
       "object": "objects/6886dd1c2efbdd1e7a3f7e7517de2f776154bdeea2537bfb994de40259ddc6bc.md",
       "origin": {
         "path": "docs/prd/PRD-261107-0825-01-host-backends-and-orca.md",
         "repository": "tmux-tools",
-        "revision": "c2e7808eeaa3b74eb1147b7cbd516d8eb7d4dbea"
+        "revision": "664ca32313e1e4e8e77ac874e976ab0763657736"
       },
       "role": "source",
       "sha256": "6886dd1c2efbdd1e7a3f7e7517de2f776154bdeea2537bfb994de40259ddc6bc",
       "target": "tmux-tools:PRD-261107-0825-01#p1-definitions"
     },
     {
-      "approved_revision": "c2e7808eeaa3b74eb1147b7cbd516d8eb7d4dbea",
-      "bytes": 595,
-      "object": "objects/d38cae95b0c0f2d30c00dfc88a60d4805b04aa0c299c268039a823bcd58087e8.md",
+      "approved_revision": "664ca32313e1e4e8e77ac874e976ab0763657736",
+      "bytes": 846,
+      "object": "objects/e89d33cff298b7fb9f0b0d219cf7b826de7afcb6de8bfc30b7e4bb30465f22a5.md",
       "origin": {
         "path": "docs/prd/PRD-261107-0825-01-host-backends-and-orca.md",
         "repository": "tmux-tools",
-        "revision": "c2e7808eeaa3b74eb1147b7cbd516d8eb7d4dbea"
+        "revision": "664ca32313e1e4e8e77ac874e976ab0763657736"
       },
       "role": "source",
-      "sha256": "d38cae95b0c0f2d30c00dfc88a60d4805b04aa0c299c268039a823bcd58087e8",
+      "sha256": "e89d33cff298b7fb9f0b0d219cf7b826de7afcb6de8bfc30b7e4bb30465f22a5",
       "target": "tmux-tools:PRD-261107-0825-01#p11-rollout"
     },
     {
-      "approved_revision": "c2e7808eeaa3b74eb1147b7cbd516d8eb7d4dbea",
+      "approved_revision": "664ca32313e1e4e8e77ac874e976ab0763657736",
       "bytes": 1686,
       "object": "objects/57dfaef1b2a9e0c453e377e6b8b7f07730d8e891de67ab911255357cea195271.md",
       "origin": {
         "path": "docs/prd/PRD-261107-0825-01-host-backends-and-orca.md",
         "repository": "tmux-tools",
-        "revision": "c2e7808eeaa3b74eb1147b7cbd516d8eb7d4dbea"
+        "revision": "664ca32313e1e4e8e77ac874e976ab0763657736"
       },
       "role": "source",
       "sha256": "57dfaef1b2a9e0c453e377e6b8b7f07730d8e891de67ab911255357cea195271",
       "target": "tmux-tools:PRD-261107-0825-01#p2-host-port"
     },
     {
-      "approved_revision": "c2e7808eeaa3b74eb1147b7cbd516d8eb7d4dbea",
+      "approved_revision": "664ca32313e1e4e8e77ac874e976ab0763657736",
       "bytes": 866,
       "object": "objects/f9e205e8b5a0046153da498982bd63d179b48d390062414e75e01487a48b0bef.md",
       "origin": {
         "path": "docs/prd/PRD-261107-0825-01-host-backends-and-orca.md",
         "repository": "tmux-tools",
-        "revision": "c2e7808eeaa3b74eb1147b7cbd516d8eb7d4dbea"
+        "revision": "664ca32313e1e4e8e77ac874e976ab0763657736"
       },
       "role": "source",
       "sha256": "f9e205e8b5a0046153da498982bd63d179b48d390062414e75e01487a48b0bef",
       "target": "tmux-tools:PRD-261107-0825-01#p3-selection"
     },
     {
-      "approved_revision": "c2e7808eeaa3b74eb1147b7cbd516d8eb7d4dbea",
+      "approved_revision": "664ca32313e1e4e8e77ac874e976ab0763657736",
       "bytes": 914,
       "object": "objects/126f8593490e6c1e977cd250f022086d9b8e12236740621981f2238d89d8acbe.md",
       "origin": {
         "path": "docs/prd/PRD-261107-0825-01-host-backends-and-orca.md",
         "repository": "tmux-tools",
-        "revision": "c2e7808eeaa3b74eb1147b7cbd516d8eb7d4dbea"
+        "revision": "664ca32313e1e4e8e77ac874e976ab0763657736"
       },
       "role": "source",
       "sha256": "126f8593490e6c1e977cd250f022086d9b8e12236740621981f2238d89d8acbe",
       "target": "tmux-tools:PRD-261107-0825-01#p5-verb-classes"
     },
     {
-      "approved_revision": "c2e7808eeaa3b74eb1147b7cbd516d8eb7d4dbea",
+      "approved_revision": "664ca32313e1e4e8e77ac874e976ab0763657736",
       "bytes": 1337,
       "object": "objects/8116a17457d9e0d4d77810f04fb8d25e9ceb7d9648425937e1a10758ecba2389.md",
       "origin": {
         "path": "docs/prd/PRD-261107-0825-01-host-backends-and-orca.md",
         "repository": "tmux-tools",
-        "revision": "c2e7808eeaa3b74eb1147b7cbd516d8eb7d4dbea"
+        "revision": "664ca32313e1e4e8e77ac874e976ab0763657736"
       },
       "role": "source",
       "sha256": "8116a17457d9e0d4d77810f04fb8d25e9ceb7d9648425937e1a10758ecba2389",
       "target": "tmux-tools:PRD-261107-0825-01#p6-host-state"
     },
     {
-      "approved_revision": "c2e7808eeaa3b74eb1147b7cbd516d8eb7d4dbea",
+      "approved_revision": "664ca32313e1e4e8e77ac874e976ab0763657736",
       "bytes": 1098,
       "object": "objects/314e45ba7b329a7205cffe4ca13f1ef0295742983604de237a67bb2c2cddf9f4.md",
       "origin": {
         "path": "docs/prd/PRD-261107-0825-01-host-backends-and-orca.md",
         "repository": "tmux-tools",
-        "revision": "c2e7808eeaa3b74eb1147b7cbd516d8eb7d4dbea"
+        "revision": "664ca32313e1e4e8e77ac874e976ab0763657736"
       },
       "role": "source",
       "sha256": "314e45ba7b329a7205cffe4ca13f1ef0295742983604de237a67bb2c2cddf9f4",
       "target": "tmux-tools:PRD-261107-0825-01#p7-notify"
     },
     {
-      "approved_revision": "c2e7808eeaa3b74eb1147b7cbd516d8eb7d4dbea",
+      "approved_revision": "664ca32313e1e4e8e77ac874e976ab0763657736",
       "bytes": 381,
       "object": "objects/c9b5c2c4a75da7c6af673a9c3e73e9295a84bae0f5e841abd0790f711207e329.md",
       "origin": {
         "path": "docs/prd/PRD-261107-0825-01-host-backends-and-orca.md",
         "repository": "tmux-tools",
-        "revision": "c2e7808eeaa3b74eb1147b7cbd516d8eb7d4dbea"
+        "revision": "664ca32313e1e4e8e77ac874e976ab0763657736"
       },
       "role": "source",
       "sha256": "c9b5c2c4a75da7c6af673a9c3e73e9295a84bae0f5e841abd0790f711207e329",
