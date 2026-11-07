@@ -109,9 +109,9 @@ Every term in this clause is added to `CONTEXT.md` with its code home. These exi
 5. Every invocation that resolves or lists records checks them against the host's pane list. The list is complete when the host reports it as not truncated and with no omitted host (Orca: `truncated` is not true and `hostScope.omittedHostIds` is empty).
    - handle listed → `live`;
    - handle not listed, and the list is complete → `dead`: the record is deleted and the result reports the name as dead;
-   - handle not listed, and the list is incomplete → the record stays, and resolving that name fails with exit 1 and `pane list incomplete: <name>` on stderr; [OPEN: orca-list-incomplete]
+   - handle not listed, and the list is incomplete → the record stays; resolving that name fails with exit 1 and `pane list incomplete: <name>` on stderr, and `list` shows that name as a row with `status: "unknown"`;
    - no handle and older than the spawn timeout → `orphan-reservation`: the record is deleted.
-   The spawn timeout is a fixed 120 seconds. No other state is valid. A dead name is never resolved to another pane. A record with no handle that is younger than the spawn timeout is a spawn in progress: resolving its name fails with exit 1 and `spawn in progress: <name>`, `list` omits it, and reconciliation leaves it in place.
+   On an incomplete list, a name whose handle is listed is `live` and resolves as usual; only names whose handle is not listed fail. When the list is incomplete, `list` prints `list incomplete: <host>` on stderr (`list incomplete: orca` on Orca). The spawn timeout is a fixed 120 seconds. No other state is valid. A dead name is never resolved to another pane. A record with no handle that is younger than the spawn timeout is a spawn in progress: resolving its name fails with exit 1 and `spawn in progress: <name>`, `list` omits it, and reconciliation leaves it in place.
 6. There is no daemon and no global lock. Host event streams are read only while the invocation that needs them runs.
 7. Ownership on a registry host reads the Pane record: the record exists, and its `cwd` matches the current working directory where both are known.
 
@@ -149,13 +149,14 @@ Every term in this clause is added to `CONTEXT.md` with its code home. These exi
 3. `capture` reads `orca terminal read --screen` for the visible screen, and `orca terminal read --cursor <n> --limit <n>` for history. The History mark is the read cursor taken before submission. History reads page with `nextCursor` while `limited` is true and `nextCursor` differs from `latestCursor`, through the settle point; `latestCursor` is never used as a paging token. Orca reports no pane width and no full-screen (alternate-screen) state, so the conditions of PRD-260918-0323-01 P7 cannot be established: every `prompt` result on Orca reports Completeness false, and README states this. A recorded Surface never decides Completeness. On Orca, `capture --all` prints no full-screen notice. Turn observation is true when `busy_regex` matches a screen read, or Host state `working` is seen, between submission and settle.
 4. `send` keeps its current meaning. Without `--literal`, each argument is classified by tmux's own key grammar (`key_string_lookup_string` in tmux `key-string.c`): an argument that tmux parses as a key, including single characters, `^x`, and `C-`/`M-`/`S-` modifiers, is sent as the bytes tmux's xterm key output (`input-keys.c`) produces for it in normal cursor and keypad mode; any other argument is literal text. `--literal` sends every argument as text. `--enter` and `--verify` keep their behavior. The backend writes the bytes with `terminal send --text` and no `--enter`. Known limitation, stated in README: Orca does not expose a pane's application cursor or keypad mode, so cursor and keypad keys always send their normal-mode bytes. `send-enter` sends `\r`; `escape` sends `\x1b`.
 5. `interrupt` sends the resolved Surface's `interrupt_key` through the item 4 translation, and keeps every current refusal rule (quit hazard, surface-unvalidated pane). It never uses `terminal send --interrupt`.
-6. Before it sends, `prompt` determines delivery with the three outcomes of PRD-260918-0323-01 P1. Delivery is guaranteed when all of these hold: `terminal show` reports an `agentIdentity` equal to the pane's registered agent; `orca worktree ps --json` reports the pane's agent row (item 10) with `hasLivePty: true` and a main-agent state; and the `orca status` capabilities include `terminal.prompt-delivery.v1`. This is a proxy: Orca decides on the server whether to bracket, and no field it reports before sending reproduces that check. README states the remaining risk: Orca can still write the raw text, and a shell in the pane then runs each line. Delivery is refused before any transmission when the Surface declares bracketed paste, the text is multi-line, and delivery is not guaranteed; it is unavailable otherwise. Submission observation and the `submit_confirmation` capability never replace this determination. A guaranteed or unavailable prompt is sent with `terminal send --text <prompt> --enter --wait-submit <seconds>`, where `<seconds>` is the `prompt` settle timeout (`--timeout`, else `TMUX_TOOLS_TIMEOUT`, else 120) rounded up to whole seconds and clamped to 1–3600. [OPEN: orca-no-prompt-delivery] An ambiguous transport failure is retried once with the reported `--retry-request` ID and never resent otherwise. The error `agent_prompt_blocked`, the observation `permission`, and a receipt with `accepted: false` end the prompt with exit 1 and the reason on stderr (for `accepted: false`, its `refusedReason`), with no retry. The observation `incarnation_replaced` ends it with exit 1 and `prompt target restarted` on stderr.
+6. Before it sends, `prompt` determines delivery with the three outcomes of PRD-260918-0323-01 P1. Delivery is guaranteed when all of these hold: `terminal show` reports an `agentIdentity` equal to the pane's registered agent; `orca worktree ps --json` reports the pane's agent row (item 10) with `hasLivePty: true` and a main-agent state; and the `orca status` capabilities include `terminal.prompt-delivery.v1`. This is a proxy: Orca decides on the server whether to bracket, and no field it reports before sending reproduces that check. README states the remaining risk: Orca can still write the raw text, and a shell in the pane then runs each line. Delivery is refused before any transmission when the Surface declares bracketed paste, the text is multi-line, and delivery is not guaranteed; it is unavailable otherwise. Submission observation and the `submit_confirmation` capability never replace this determination. A guaranteed or unavailable prompt is sent with `terminal send --text <prompt> --enter --wait-submit <seconds>`, where `<seconds>` is the `prompt` settle timeout (`--timeout`, else `TMUX_TOOLS_TIMEOUT`, else 120) rounded up to whole seconds and clamped to 1–3600. When the `orca status` capabilities lack `terminal.prompt-delivery.v1`, `prompt` exits 1 before any transmission and stderr names `terminal.prompt-delivery.v1`; it never sends without `--wait-submit` and never reports `submit: "assumed"` for this case. This rule applies only to `prompt`; every other verb works as usual on such a runtime. An ambiguous transport failure is retried once with the reported `--retry-request` ID and never resent otherwise. The error `agent_prompt_blocked`, the observation `permission`, and a receipt with `accepted: false` end the prompt with exit 1 and the reason on stderr (for `accepted: false`, its `refusedReason`), with no retry. The observation `incarnation_replaced` ends it with exit 1 and `prompt target restarted` on stderr.
 7. `kill` resolves the name to a live handle and runs `terminal close --terminal <handle>`. The self-pane refusal and the Ownership check apply before close. After a successful close, `kill` deletes the Pane record.
 8. The tab title is the pane name from item 2 and is display only (P4.1). The tool has no title verb.
 9. `launch` passes the command as `--command`; the Orca login shell stays after the command exits, which satisfies Keep-alive wrap. `--bare` runs `exec <cmd>` so the pane closes with the command.
 10. Host state comes from `orca worktree ps --json`: the agent row in `result.worktrees[].agents[]` whose `paneKey` equals `<tabId>:<leafId>` of the pane (from `terminal show`). Main-agent state `working` → `working`; `blocked` and `waiting` → `blocked`; `done` → `done`; no row, or `hasLivePty: false` → `null`. Orca never yields `idle`. While any entry of the row's `subagents[]` has state `working`, Host state is `working`. In the settle step of `prompt`, a Host state ends the settle only when the row's `stateStartedAt` is after the submission.
 11. Capabilities: `native_state` and `submit_confirmation` true; `tile`, `rebalance`, `size`, `notify` false. The `submit` mapping, first match: provider `unsupported` or `old-host`, or observation `unsupported` → `assumed`; stages include `turn_started` → `confirmed`; stages are only `input_accepted` → `accepted`.
-12. `list`, with or without `--all`, shows the Pane records under the current `server_id`, after the P4.5 check. In `list` rows on Orca, `session` is the pane's worktree id and `pane` is its handle; a live record has `status: running`. A dead name appears in one result as a row with `status: dead`, and its record is then deleted (P4.5). In a result that carries a `window` value, it is the pane's tab id. [OPEN: orca-json-fields]
+12. `list`, with or without `--all`, shows the Pane records under the current `server_id`, after the P4.5 check. In `list` rows on Orca, `session` is the pane's worktree id and `pane` is its handle; a live record has `status: running`. A dead name appears in one result as a row with `status: dead`, and its record is then deleted (P4.5). A record whose handle is not listed on an incomplete list has `status: unknown` (P4.5). In a result that carries a `window` or `window_id` value, it is the pane's tab id.
+13. On Orca, every `--format json` key that the result has on tmux is kept, with value `null` when Orca has no source for it, so every host gives the same keys. These keys are `null` on Orca: in `status`, `window_index`, `pane`, `min_pane_cols`, `min_pane_rows`, `below_floor`; in `list` rows, `last_activity`; in `spawn-agent` and `launch`, `relocated`, `min_pane_cols`, `min_pane_rows`, `below_floor`.
 
 ### P10 — Backend contract tests
 
@@ -170,6 +171,7 @@ Every term in this clause is added to `CONTEXT.md` with its code home. These exi
 2. `self`, `notify`, exit code 3, and the `host` and `host_state` fields land next, on tmux.
 3. The Orca backend lands last.
 4. The release that contains the Orca backend bumps the minor version and updates README's verb summary, Configuration (`TMUX_TOOLS_HOST`), a host section that states the Orca limits of P4.3, P9.3, P9.4 and P9.6, and the `## Library: configurable invocation` section, which describes the public API of P2.6 instead of the removed tmux paths.
+5. Step 2 adds a README note to the `notify` description: under tmux, delivery needs the tmux option `allow-passthrough` set to `on` (only a pane that is visible in an attached client) or `all` (any pane), and the outer terminal must support OSC 777.
 
 ## Codebase fit
 
@@ -197,7 +199,7 @@ Every term in this clause is added to `CONTEXT.md` with its code home. These exi
 - **Registry file** — path per P4.3; content is `PaneRecord` as one JSON object, keys as the field names above, `host` lowercase.
 - **Verb `notify`** — `notify --title <T> --body <B> [--target <name>]`; behavior per P7.
 - **Verb `self`** — `self --format json` → `{"host": "tmux"|"orca", "driven": bool, "name": string|null, "agent": string|null}`.
-- **Changed JSON results** — every `--format json` object result adds `host`; `status`, `wait-idle`, and `prompt` add `host_state: "working"|"blocked"|"done"|"idle"|null`; `list --format json` stays a top-level array, each row adds `host` and `host_state` with the same values, and an empty list `[]` carries no `host`; `prompt` adds `submit: "confirmed"|"accepted"|"assumed"`.
+- **Changed JSON results** — every `--format json` object result adds `host`; `status`, `wait-idle`, and `prompt` add `host_state: "working"|"blocked"|"done"|"idle"|null`; `list --format json` stays a top-level array, each row adds `host` and `host_state` with the same values, and an empty list `[]` carries no `host`; `prompt` adds `submit: "confirmed"|"accepted"|"assumed"`; `list` row `status` adds `unknown` (P4.5); on Orca, the keys of P9.13 are `null`.
 - **Exit code 3** — `unsupported` for an optional verb or option on a host that lacks it (P5.3), and for `--session` and `--window` on Orca (P9.1). Exit 0 and 1 keep their meaning.
 
 ## Verification and release
@@ -222,23 +224,7 @@ Release check per step of P11: the existing suite passes unchanged after step 1.
 
 ## Open Questions
 
-### orca-list-incomplete
-- question: When the Orca pane list is incomplete, how does `list` show a record whose handle is not listed, and does a listed handle still resolve (P4.5)?
-- dimension: contracts/integrations
-- resolve-by: during-triage
-- owner: this PRD
-
-### orca-json-fields
-- question: Which values do the `--format json` fields that have no Orca source carry on Orca: `status` (`window_index`, `pane`, `min_pane_cols`, `min_pane_rows`, `below_floor`), `list` `last_activity`, and `spawn-agent`/`launch` `relocated` and `window`?
-- dimension: contracts/integrations
-- resolve-by: during-triage
-- owner: this PRD
-
-### orca-no-prompt-delivery
-- question: How does `prompt` send on an Orca runtime whose `orca status` capabilities lack `terminal.prompt-delivery.v1`, where the Orca CLI rejects `--wait-submit` and `--retry-request` with `incompatible_runtime` and sends nothing (P9.6, P9.11)?
-- dimension: contracts/integrations
-- resolve-by: during-triage
-- owner: this PRD
+None.
 
 ## Notes
 
@@ -254,6 +240,6 @@ Release check per step of P11: the existing suite passes unchanged after step 1.
 | architecture shape | decided | P2 |
 | stack | n/a | brownfield Rust workspace — existing conventions ratified |
 | data/schema | decided | P4.3; ## Contracts |
-| contracts/integrations | deferred | open-questions: orca-list-incomplete, orca-json-fields, orca-no-prompt-delivery |
+| contracts/integrations | decided | P4.5; P9.6; P9.12; P9.13; ## Contracts |
 | UX (if UI) | n/a | CLI only; output formats per ## Contracts |
 | testing/seams | decided | P10 |
