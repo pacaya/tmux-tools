@@ -218,7 +218,7 @@ Release check per step of P11: the existing suite passes unchanged after step 1.
 - Rex and Herdr backends (later PRDs, same port).
 - Renaming `tmux-tools`.
 - Agent-to-agent messaging, Orca `orchestration`.
-- Claude Code teammate panes (`teammateMode`, `orca claude-teams`).
+- Claude Code teammate panes: owned by PRD-261108-0447-01 (tmux-tools tmux shim).
 - Harness skill, hook, and guard changes (harness PRD in repository `claude`).
 - Moving `SilverBond` to the `Host` port (work in the `SilverBond` repository).
 
