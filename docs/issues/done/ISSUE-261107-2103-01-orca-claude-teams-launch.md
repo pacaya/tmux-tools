@@ -2,7 +2,7 @@
 id: ISSUE-261107-2103-01
 kind: issue
 category: enhancement
-status: draft
+status: wontfix
 brief_contract: agent-brief.v3
 context: tmux-tools
 summary: on Orca, spawn-agent claude starts Claude through orca claude-teams, so a driven Claude lead gets Orca teammate panes
@@ -41,3 +41,4 @@ contract:
 ## Triage Notes
 - 2026-11-07 created as `draft` by maintainer decision Q55b: needs a live test before it becomes the default; not part of the `PRD-261107-0825-01` release.
 - 2026-11-08 superseded by `tmux-tools:PRD-261108-0447-01` (P9; Q67): Claude is not started with `orca claude-teams`; stays `draft` until replaced.
+- 2026-11-08 `wontfix`: superseded by `ISSUE-261108-2323-02`.
