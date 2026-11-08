@@ -142,7 +142,6 @@ This clause adds a first rule to PRD-261107-0825-01 P3 and owns that rule.
 2. When `TT_TEAM` is set and its Team record does not exist, the invocation fails with exit 1 and `team not found: <id>` on stderr.
 3. Inside a team, the calling pane is the Leader pane handle from the Team record. `TMUX_PANE` is never read inside a team. This applies to every verb that acts on the calling pane, including `self`, `notify` without `--target`, the self-pane refusal, and placement without `--target`.
 4. Inside a team on tmux, the tmux backend runs real tmux by the absolute path and with the server socket (`-S`) that the Team record holds (P4.2). It never resolves `tmux` through `PATH` and never reads `$TMUX`.
-5. The fake `TMUX` value never selects the tmux host.
 
 ### P4 — Team record and team directory
 
@@ -160,7 +159,7 @@ This clause adds a first rule to PRD-261107-0825-01 P3 and owns that rule.
 
 1. The Shim is a symbolic link `bin/tmux` to the canonical path of the running `tmux-tools` binary. `tmux-tools` started with `argv[0]` basename `tmux` runs as the Shim. The Shim with `TT_TEAM` unset exits 1 with `tmux: not inside a tmux-tools team` on stderr.
 2. The Shim is a thin front end over the Host port. It never runs tmux itself and builds no host command (PRD-261107-0825-01 P2.2). It acts only on the panes of its own Team: the Leader and the Teammate panes whose registration `team` is `TT_TEAM`. A target outside the Team exits 1 with `tmux: can't find pane: <target>`.
-3. Global options before the command: `-S <path>`, `-L <name>`, and `-f <file>` are accepted and ignored. `-V` prints `tmux 3.4` and exits 0.
+3. Global options before the command: `-S <path>`, `-L <name>`, and `-f <file>` are accepted and ignored. `-V` prints `tmux 3.4` and exits 0. The Shim parses argv with this grammar, for global options and for each command: a word that starts with `-` and is not `-` or `--` is a cluster of one-letter flags; a flag that takes a value takes the rest of the cluster (`-t%2`, `-l30%`) or, when nothing is left, the next word; `--` ends the flags; the first word that is not a flag ends the flags. The words after the flags are the command name (global level), the pane command (`split-window`, `respawn-pane`), the keys (`send-keys`), or the format (`display-message`). A word `;` or a word that ends in `\;` is a command separator (item 8).
 4. Targets (`-t`): a Shim id `%N`; the window `@0`; the session `tt-team-<id>`; and `tt-team-<id>:@0`, `tt-team-<id>:@0.%N`, `@0.%N`. A window or session target means the Leader where a pane is needed. Every Team has one fake session `tt-team-<id>` (`session_id` `$0`) with one fake window `@0` (`window_index` 0, `window_name` `team`) that holds all its panes.
 5. Format strings (`-F`, `display-message -p`): the Shim expands `#{pane_id}` (Shim id), `#{window_id}`, `#{window_index}`, `#{window_name}`, `#{session_name}`, `#{session_id}`, `#{pane_title}` (stored title or empty), and the 8 fields of Claude's image-support probe: `client_termtype` empty, `allow-passthrough` `off`, `focus-events` `off`, `pane_top` `0`, `pane_left` `0`, `status` `off`, `status-position` `bottom`, `window_bigger` `0`. Every other `#{…}` expands to the empty string. Text outside `#{…}` is copied.
 6. Commands with real work:
@@ -173,16 +172,16 @@ This clause adds a first rule to PRD-261107-0825-01 P3 and owns that rule.
    - `capture-pane -p [-J] [-S <start>] [-E <end>] [-t <target>]` prints the pane through `capture`; `-S` with a negative number or `-` adds history. Without `-p` it exits 1 with `tmux: capture-pane needs -p`.
    - `has-session [-t <target>]` exits 0 for its own session or no target; else exit 1 with `tmux: can't find session: <target>`.
    - `select-pane -T <title> [-t <target>]` stores the title as display data (P6.4). `select-pane` without `-T` is accepted and ignored.
-7. Commands accepted and ignored with exit 0 and no output: `set-option` (every flag), `select-layout`, `resize-pane`. The size flag `-l` of `split-window` and every size or layout request are dropped and never reach the host, so the Shim never causes exit 3 (PRD-261107-0825-01 P5.3).
+7. Commands accepted and ignored with exit 0 and no output, each with every flag and argument: `set-option`, `select-layout`, `resize-pane`. The size flag `-l` of `split-window` and every size or layout request are dropped and never reach the host, so the Shim never causes exit 3 (PRD-261107-0825-01 P5.3).
 8. Errors: `new-session` and `new-window` exit 1 with `tmux: unsupported command: <cmd>`. Every other command name, alias, or `;` separator exits 1 with `tmux: unsupported command: <cmd>`. A flag that item 6 or 7 does not list for that command exits 1 with `tmux: unsupported flag <flag>`. The Shim exits only 0 or 1 and writes errors only to stderr as `tmux: <message>`.
 9. Every refusal (item 2, 6, or 8) appends one line to `shim.log`: RFC 3339 time, pid, `refused`, the message, and the argv as one JSON array. With `TT_SHIM_DEBUG=1`, every invocation appends a line with outcome `ok` or `refused`.
 
 ### P6 — Teammate panes
 
 1. `split-window` holds `team.lock`, takes the next teammate number `k` (from 1), and creates a pane through the Host port next to the target pane: `-h` is a horizontal split, `-v` (the default) a vertical split. The new pane gets Shim id `%<k+1>` and name `<leader name>.tm<k>`. When the result does not match the name rule of PRD-261107-0825-01 P4.1 or is longer than 100 bytes, or the Leader has no name, the name is `team-<team id>.tm<k>`. When that name is already reserved, `k` advances and the Shim tries again. The reservation and handle rules of PRD-261107-0825-01 P4.4 apply. `-c` and `-e` are applied to the pane command as `cd '<dir>' && env K=V … <command>`, with POSIX shell quoting.
-2. `respawn-pane -k` holds `team.lock`, creates the new pane next to the old pane with the new command, then closes the old pane. The Teammate pane keeps its name and Shim id; its Pane registration gets the new handle by write-to-temp and atomic rename. When the create fails, the old pane stays and the Shim exits 1.
+2. `respawn-pane -k` holds `team.lock`, creates the new pane next to the old pane with the new command, then closes the old pane. The Teammate pane keeps its name and Shim id. The new pane gets the full Teammate registration (name, Shim id, `team`, `parent`, `title`, `claude_agent_name`, `claude_team_name`, `agent`) through the Pane registration write of the host (PRD-261107-0825-01 P4: `@tt-*` options on tmux, the Pane record on a registry host). Respawn uses only the existing create, registration, and close operations of the Host port on every host; no Host port operation is added. When the create fails, the old pane stays and the Shim exits 1.
 3. Every Teammate pane command runs in the Close-on-success wrap: exit 0 closes the pane; any other exit keeps a shell in the pane so the output stays readable (tmux `remain-on-exit failed`). The wrap is the same on every host; no Host port option is added for it. On Orca, the wrap uses `exec` as `launch --bare` does (PRD-261107-0825-01 P9.9). `[OPEN: orca-close-on-clean-exit]`
-4. A Teammate pane is a normal Pane registration with these extra fields: `team` (team id), `parent` (Leader name, or `null` when the Leader has no name), `shim_id`, `title` (from `select-pane -T`), `claude_agent_name` and `claude_team_name` (from `--agent-name` and `--team-name` in the `respawn-pane` command). `title`, `claude_agent_name`, and `claude_team_name` are display data and never resolve a Target. `agent` is `null` after `split-window` and `claude` after a `respawn-pane` whose command runs the Claude binary of the Team record. Ownership of a Teammate pane follows PRD-261107-0825-01 P4.7 and the tmux rule; the Shim's own check is the `team` match of item P5.2.
+4. A Teammate pane is a normal Pane registration with these extra fields: `team` (team id), `parent` (Leader name, or `null` when the Leader has no name), `shim_id`, `title` (from `select-pane -T`), `claude_agent_name` and `claude_team_name` (from `--agent-name` and `--team-name` in the `respawn-pane` command). `title`, `claude_agent_name`, and `claude_team_name` are display data and never resolve a Target. `agent` is `null` after `split-window` and `claude` after a `respawn-pane` whose command runs the Claude binary of the Team record. The Shim reads the `respawn-pane` command as follows. When the command is one word, it is split into words with POSIX shell quoting limited to blanks, single quotes, double quotes, and backslash, with no expansion; the words `&&`, `||`, `;`, and `|` separate commands. The Claude command is the first command whose first word, after `cd <dir>` commands and after `env` and its `K=V` words, is the Team's `ClaudeBinary.path`, or canonicalizes to it (a word without `/` is resolved through the Leader's `PATH`). `--agent-name <v>`, `--agent-name=<v>`, `--team-name <v>`, and `--team-name=<v>` are read from the words of that command. When the split fails or no Claude command is found, `claude_agent_name` and `claude_team_name` are `null`, `agent` is `null`, and the respawn continues. Ownership of a Teammate pane follows PRD-261107-0825-01 P4.7 and the tmux rule; the Shim's own check is the `team` match of item P5.2.
 5. Teammate panes get the host's normal pane environment. The Shim does not give them `TT_TEAM`, `TT_HOST`, the fake `TMUX`, or the shim directory on `PATH`.
 
 ### P7 — Parent on every create
@@ -196,7 +195,7 @@ This clause adds a first rule to PRD-261107-0825-01 P3 and owns that rule.
 1. `self --format json` adds `team` (team id or `null`), `role` (`leader`, `teammate`, or `null`), and `parent` (`parent` of the calling pane's registration, or `null`). `role` is `leader` when `TT_TEAM` is set; else `teammate` when the calling pane's registration has a `team`; else `null`.
 2. `list --format json` rows add `parent`, `team`, `shim_id` (each `null` when absent) and `orphan` (bool). The text table adds a `PARENT` column after `AGENT`; an Orphan row shows `orphan:<parent>`, or `orphan` when `parent` is `null`.
 3. A row is `orphan: true` when one of these holds:
-   - its `parent` is not `null` and the parent name does not resolve to a live pane, or resolves to a pane whose `launched_at` is later than the row's `launched_at`;
+   - its `parent` is not `null` and the parent name does not resolve to a live pane, or resolves to a pane whose `launched_at` is later than the row's `launched_at` (`launched_at` is the `@tt-launched-at` option on tmux and the Pane record field on a registry host);
    - it has a `team` and that Team's `leader.lock` is not held or its team directory does not exist.
    `orphan` is reported only; no verb closes a pane because it is an Orphan.
 4. `kill --target <name>` acts on a Teammate pane or an Orphan as on any pane. `kill` of a Leader closes no Teammate pane. `prompt` and `send` into a Teammate pane are allowed as on any pane.
@@ -210,11 +209,11 @@ This clause adds a first rule to PRD-261107-0825-01 P3 and owns that rule.
 
 ### P10 — Contract tests per Claude version
 
-1. A trace fixture per Claude version, `tests/fixtures/claude-teams/<version>.jsonl`, holds every tmux argv that this Claude version sends in teammate mode, with the expected exit code and output pattern. The first fixture is for Claude 2.1.319.
+1. The Claude version key is the first blank-separated word of `ClaudeBinary.version` (`2.1.319` for `2.1.319 (Claude Code)`). The fixture name, the P10.5 match, and the P10.5 warning use this key. A trace fixture per Claude version, `tests/fixtures/claude-teams/<version key>.jsonl`, holds every tmux argv that this Claude version sends in teammate mode, with the expected exit code and output pattern. The first fixture is for Claude 2.1.319.
 2. The default `cargo test --workspace --features test-fixtures` run replays each fixture through the real binary started as `tmux` (P5.1), inside a Team on the isolated tmux test server, with no Orca. A fake `claude` script on `PATH` replays the fixture and exits 0 or 1; the tests check P2.5, P6, P7, and P8 through the CLI (`list --format json`, `self --format json`).
 3. An opt-in live test (environment switch, never by default) runs the real `claude` under `claude-teams` on the isolated tmux server with `TT_SHIM_DEBUG=1`, makes it spawn one teammate, and fails when `shim.log` has a `refused` line or when the Claude version has no fixture. A new Claude version gets its fixture from this run.
 4. The Shim fails closed: an unknown command or flag exits 1 (P5.8); the Shim never guesses.
-5. When the Claude version that the Launcher records has no fixture in the binary's build, the Launcher prints `claude-teams: claude <version> not contract-tested` on stderr once and continues.
+5. When the Claude version that the Launcher records has no fixture in the binary's build, the Launcher prints `claude-teams: claude <version key> not contract-tested` on stderr once and continues.
 6. The Orca contract run of PRD-261107-0825-01 P10.2 adds: a Team with one teammate whose pane shows in `orca terminal list` and in `tmux-tools list` with `team` and `parent`; a clean leader exit that closes the teammate; a leader crash that leaves an Orphan that `list` reports. Each run closes every pane it created and ends with no leaked pane (PRD-261107-0825-01 P10.4).
 
 ### P11 — Rollout order
@@ -230,7 +229,7 @@ This clause adds a first rule to PRD-261107-0825-01 P3 and owns that rule.
 - Conventions: `CONTEXT.md` glossary; ADR-260919-0146-01 (surfaces); PRD-261107-0825-01 P2.2 (no host commands outside a backend).
 - New homes: `src/cmd/claude_teams.rs` (Launcher); `src/shim/mod.rs` (argv parser, dispatch) and `src/shim/format.rs` (format expansion); `core/src/team.rs` (`TeamRecord`, team directory, locks, Orphan test); `argv[0]` dispatch in `src/main.rs`; `tests/claude_teams.rs`; `tests/fixtures/claude-teams/2.1.319.jsonl`.
 - Planned-record dependencies: `implementation_after` ISSUE-261107-0921-03 (Orca backend, which needs ISSUE-261107-0921-01 and -02); `requires` the PRD-261107-0825-01 clauses in frontmatter.
-- Active-plan overlaps: ISSUE-261107-0921-01, -02, -03 (ready-for-agent; the same host selection, registry, `self`, and `list` code). ISSUE-261107-2103-01 (draft) is superseded. Repository `claude`, PRD-261108-0235-01: open questions `teammate-child-signal` and `orca-teammate-panes`; its hooks read `$TMUX_PANE` and run `tmux display-message`, which inside a Leader reach the Shim.
+- Active-plan overlaps: ISSUE-261107-0921-01, -02, -03 (the same host selection, registry, `self`, and `list` code). ISSUE-261107-2103-01 is superseded. Repository `claude`, PRD-261108-0235-01: open questions `teammate-child-signal` and `orca-teammate-panes`; its hooks read `$TMUX_PANE` and run `tmux display-message`, which inside a Leader reach the Shim.
 
 ## Contracts
 
@@ -258,7 +257,7 @@ This clause adds a first rule to PRD-261107-0825-01 P3 and owns that rule.
 - **Teammate pane name** — `<leader name>.tm<k>`; fallback `team-<team id>.tm<k>` when invalid, longer than 100 bytes, or no leader name.
 - **Changed JSON** — `self --format json` adds `team: string|null`, `role: "leader"|"teammate"|null`, `parent: string|null` (this PRD owns the extension of PRD-261107-0825-01 P8). `list --format json` rows add `parent`, `team`, `shim_id` (`string|null`) and `orphan: bool` (P8.3, including a `team` whose team directory does not exist).
 - **Changed text** — `list` table adds column `PARENT` after `AGENT`; an Orphan shows `orphan:<parent>` or `orphan`.
-- **Stderr warning** — `claude-teams: claude <version> not contract-tested` (P10.5).
+- **Stderr warning** — `claude-teams: claude <version key> not contract-tested` (P10.5).
 - **Pane command of `spawn-agent claude` on Orca** — `<tmux-tools path> claude-teams -- <claude args>` (P9.1).
 
 ## Verification and release
@@ -268,7 +267,8 @@ The epic is done when all of these hold:
 1. The P10.2 replay suite passes on tmux in the default test run, and the P10.3 live run on tmux has no `refused` line for Claude 2.1.319.
 2. On a live Orca runtime, `spawn-agent claude --name lead` gives a Leader whose teammate shows in `orca terminal list` and in `tmux-tools list --format json` as `lead.tm1` with `team` and `parent: "lead"`; `prompt`, `wait-idle`, and `kill` work on `lead`.
 3. A clean `/exit` of the Leader closes every Teammate pane. A killed Leader leaves Teammate panes that `list` reports as `orphan: true`, and `kill --target <name>` closes them.
-4. After each run, neither `tmux-tools list` nor the host's own pane list shows a leaked pane.
+4. On tmux, after P11 step 3, `spawn-agent claude --name lead` gives the same outcome as item 2: teammate `lead.tm1` in `tmux-tools list --format json` with `team` and `parent: "lead"`; `prompt`, `wait-idle`, and `kill` work on `lead`.
+5. After each run, neither `tmux-tools list` nor the host's own pane list shows a leaked pane.
 
 Rollback is reverting the release. A previous version ignores the new Pane record fields and `@tt-*` options; team directories left on disk are inert.
 
