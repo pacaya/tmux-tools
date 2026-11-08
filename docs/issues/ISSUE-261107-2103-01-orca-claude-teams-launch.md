@@ -40,3 +40,4 @@ contract:
 
 ## Triage Notes
 - 2026-11-07 created as `draft` by maintainer decision Q55b: needs a live test before it becomes the default; not part of the `PRD-261107-0825-01` release.
+- 2026-11-08 superseded by `tmux-tools:PRD-261108-0447-01` (P9; Q67): Claude is not started with `orca claude-teams`; stays `draft` until replaced.
