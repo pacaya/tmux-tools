@@ -5,7 +5,6 @@ status: draft
 scale: epic
 stakes: internal
 contracts: approved 2026-11-08
-gate: passed 2026-11-08
 contexts: [tmux-tools]
 terms: [Host, Host backend, Host selection, Pane record, Pane registration, Pane liveness, Ownership, Target, Keep-alive wrap, Surface, Team, Team record, Leader, Teammate pane, Launcher, Shim, Shim id, Parent, Orphan, Close-on-success wrap]
 contract:
@@ -221,9 +220,9 @@ This clause adds a first rule to PRD-261107-0825-01 P3 and owns that rule.
 ### P11 — Rollout order
 
 1. The Launcher, the Shim, P3, P4, P6, P7, and P8, with the P10.2 tests on tmux. `claude-teams` works by hand on tmux and Orca.
-2. P9.1 on Orca, after the `orca-close-on-clean-exit` and `orca-leader-agent-state` live checks pass and P10.6 passes.
-3. P9.1 on tmux, after step 2.
-4. Each step bumps the minor version. README documents `claude-teams`, the fake `TMUX` and shim `PATH` in the Leader's child processes (a `tmux` command run by the Leader or its tools reaches the Shim), the new `list` and `self` fields, and the Claude-version warning. README states that the harness hooks must call `tmux-tools self` instead of `tmux display-message` before the Launcher is used: the Shim has no compatibility path for `#{@tt-*}` formats and expands them to the empty string (P5.5). README also states the fail-open start of P2.7, that `shim-debug/` directories (P4.5) stay until the user deletes them, and the limit of P6.1: on tmux, when a window has no space for a new pane, a teammate start fails with `tmux: no space for a new pane`.
+2. P9.1 on Orca, after the `orca-close-on-clean-exit` and `orca-leader-agent-state` live checks pass and P10.6 passes, and after harness PRD-261108-0235-01 rollout steps 2 (hooks) and 3 (text and scripts) are released.
+3. P9.1 on tmux, after step 2, and after harness PRD-261108-0235-01 rollout steps 2 (hooks) and 3 (text and scripts) are released.
+4. Each step bumps the minor version. README documents `claude-teams`, the fake `TMUX` and shim `PATH` in the Leader's child processes (a `tmux` command run by the Leader or its tools reaches the Shim), the new `list` and `self` fields, and the Claude-version warning. README states that harness PRD-261108-0235-01 rollout steps 2 (hooks) and 3 (text and scripts) must be released before the Launcher is used, because inside a Leader `$TMUX` and `tmux` reach the Shim; the harness hooks must call `tmux-tools self` instead of `tmux display-message`, as the Shim has no compatibility path for `#{@tt-*}` formats and expands them to the empty string (P5.5). README also states the fail-open start of P2.7, that `shim-debug/` directories (P4.5) stay until the user deletes them, and the limit of P6.1: on tmux, when a window has no space for a new pane, a teammate start fails with `tmux: no space for a new pane`.
 5. The harness `cl` alias becomes `tmux-tools claude-teams -- --dangerously-skip-permissions` only after step 1 is released and after harness PRD-261108-0235-01 rollout steps 2 (hooks) and 3 (text and scripts) are released. Repository `claude` owns the alias change.
 
 ## Codebase fit
@@ -231,8 +230,8 @@ This clause adds a first rule to PRD-261107-0825-01 P3 and owns that rule.
 - Reuse: the Host port, `HostSelection`, and the tmux and Orca backends (PRD-261107-0825-01 P2, P3, P9; planned in ISSUE-261107-0921-01 and ISSUE-261107-0921-03); the window and pane geometry read of the Host port (today `core/src/layout.rs` `measure`, moved behind the port by ISSUE-261107-0921-01) for P6.1 on tmux; `core/src/registry.rs` `PaneRecord` and P4.4 reservation (planned); `core/src/names.rs` name rule and `@tt-*` keys; `src/cmd/safety.rs` and `names::pane_is_owned`; the `send` key translation (P9.4); `tests/integration.rs` isolated tmux harness.
 - Conventions: `CONTEXT.md` glossary; ADR-260919-0146-01 (surfaces); PRD-261107-0825-01 P2.2 (no host commands outside a backend).
 - New homes: `src/cmd/claude_teams.rs` (Launcher); `src/shim/mod.rs` (argv parser, dispatch) and `src/shim/format.rs` (format expansion); `core/src/team.rs` (`TeamRecord`, team directory, locks, Orphan test); `argv[0]` dispatch in `src/main.rs`; `tests/claude_teams.rs`; `tests/fixtures/claude-teams/2.1.319.jsonl`; `src/bin/tt-fixture.rs` with its `[[bin]]` entry in `Cargo.toml` (`required-features = ["test-fixtures"]`).
-- Planned-record dependencies: `implementation_after` ISSUE-261107-0921-03 (Orca backend, which needs ISSUE-261107-0921-01 and -02); `requires` the PRD-261107-0825-01 clauses in frontmatter.
-- Active-plan overlaps: ISSUE-261107-0921-01, -02, -03 (the same host selection, registry, `self`, and `list` code). ISSUE-261107-2103-01 is superseded. Repository `claude`, PRD-261108-0235-01: its hooks read `$TMUX_PANE` and run `tmux display-message`, which inside a Leader reach the Shim.
+- Planned-record dependencies: `implementation_after` ISSUE-261107-0921-03 (Orca backend, which needs ISSUE-261107-0921-01 and -02); `requires` the PRD-261107-0825-01 clauses in frontmatter. Harness PRD-261108-0235-01 is not an `implementation_after`: its rollout steps 2 and 3 hold only the release of P11 steps 2 and 3 and the alias change of P11.5; the work of P11 steps 2 and 3 may start after step 1.
+- Active-plan overlaps: ISSUE-261107-0921-01, -02, -03 (the same host selection, registry, `self`, and `list` code). ISSUE-261107-1229-01 (Orca pane identity across a restart: the Orca Pane record, the Team record fields `server_id` and `TeamLeader.handle`, and the lookup of the Leader's Pane registration by its handle). ISSUE-261107-2103-01 is superseded. Repository `claude`, PRD-261108-0235-01: its hooks read `$TMUX_PANE` and run `tmux display-message`, which inside a Leader reach the Shim.
 
 ## Contracts
 
