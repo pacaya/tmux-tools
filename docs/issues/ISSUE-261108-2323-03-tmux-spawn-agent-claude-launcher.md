@@ -2,7 +2,7 @@
 id: ISSUE-261108-2323-03
 kind: issue
 category: enhancement
-status: needs-triage
+status: ready-for-agent
 brief_contract: agent-brief.v3
 context: tmux-tools
 summary: on tmux, spawn-agent claude starts Claude through tmux-tools claude-teams, so a driven Leader's teammates are tmux-tools panes
@@ -73,3 +73,8 @@ contract:
 **Verification and release:** The default `cargo test --workspace --features test-fixtures` run passes. Release only when the P11.3 conditions hold: step 2 (`ISSUE-261108-2323-02`) is released, and harness `PRD-261108-0235-01` rollout steps 2 (`claude:ISSUE-261109-0201-02`, hooks) and 3 (`claude:ISSUE-261109-0201-04`, text and scripts) are released. Rollback is reverting the release.
 
 **Out of scope:** Orca behavior (`ISSUE-261108-2323-02`); Launcher, Shim, and Team behavior (`ISSUE-261108-2323-01`); harness hook, skill, and `cl` alias changes (repository `claude`).
+
+## Triage Notes
+
+- 2026-11-09: dispatch readiness passed; `needs-triage` → `ready-for-agent`. `implementation_after` `ISSUE-261108-2323-02` is `done` (installed `tmux-tools` 0.6.2). Release conditions (P11.3) hold: harness `claude:ISSUE-261109-0201-02` and `-04` are `done`.
+- The existing test `spawn_agent_claude_on_tmux_runs_the_binary_directly` asserts the step-2 tmux behavior; this issue's first acceptance item replaces it.
