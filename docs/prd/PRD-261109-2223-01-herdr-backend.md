@@ -142,13 +142,13 @@ Under Herdr, panes that `tmux-tools` creates are invisible in the Herdr window a
 1. The Pane registration is stored as hc labels on the terminal: each `RegistrationKey` is the label `tt.<key in snake_case>` with a string value (`tt.surface_unvalidated` is `"true"` or `"false"`); an absent label is `None`. The label `where` is set to the tmux-tools pane name. Herdr uses no Pane record (`uses_pane_records()` is false).
 2. Name validation stays PRD-261107-0825-01 P4.1. Uniqueness among live terminals comes from the hc name: when `hc run` reports that the name is taken, the spawn fails with exit 1 and no terminal is created. A name is free again when its terminal is removed (P4.4).
 3. The `tt.parent` label follows PRD-261108-0447-01 P7.
-4. A terminal in state `finished` that carries `tt.name` is dead. Every invocation that resolves, lists, or spawns a name first removes, by hc address, each dead terminal that carries that name (`hc rm`); `list` shows each removed name once with `status: dead`. A verb that resolves only a dead name fails with exit 1 as for an unknown name. A spawn of that name then proceeds. Terminals are always resolved and removed by hc address, never by hc name.
+4. A terminal in state `finished` that carries `tt.name` is dead. Every invocation that resolves, lists, or spawns a name first removes, by hc address, each dead terminal that carries that name (`hc rm`); `list` shows each removed name once with `status: dead`. A verb that resolves only a dead name fails with exit 1 as for an unknown name, and that value is never tried as an hc address after that (P7.6). A dead name never resolves to another terminal. A spawn of that name then proceeds. Terminals are always resolved and removed by hc address, never by hc name.
 5. Ownership reads the `tt.*` labels: `tt.name` is present, and `tt.cwd` matches the current working directory where both are known.
 
 ### P5 — Capture, send, and keys
 
 1. `capture` uses `hc read --lines <n>`; `--lines 0` gives the visible screen. A read with `complete: false` is never reported as complete. The History mark, the Completeness conditions, the `hc read` call that serves `capture --all`, and whether the PRD-260918-0323-01 P4 no-scrollback notice fires on Herdr follow `[OPEN: herdr-history-mark]`.
-2. `send` keeps its PRD-261107-0825-01 P9.4 meaning. Each argument that tmux's key grammar parses as a key is sent as the matching `hc keys` key name. Literal text without Enter is sent through `hc keys`, one key per character. Every argument is checked before anything is sent: a key name with no `hc keys` name ends the verb with exit 1 and stderr `cannot type on herdr: <argument as written>`; a character that `hc keys` rejects ends it with exit 1 and stderr `cannot type on herdr: U+<XXXX>` (uppercase hex, at least four digits). The `hc` error result decides that a character cannot be typed. Nothing is sent when either check fails. `--enter` adds the key `enter`.
+2. `send` keeps its PRD-261107-0825-01 P9.4 meaning. Each argument that tmux's key grammar parses as a key is sent as the matching `hc keys` key name. Literal text without Enter is sent through `hc keys`, one key per character. Every argument is checked before anything is sent: a key name with no `hc keys` name ends the verb with exit 1 and stderr `cannot type on herdr: <argument as written>`; a character outside the typeable set ends it with exit 1 and stderr `cannot type on herdr: U+<XXXX>` (uppercase hex, at least four digits). The typeable set is printable ASCII (0x20–0x7E) until `[OPEN: herdr-keys-charset]` is resolved. Nothing is sent when either check fails. When `hc keys` still rejects a key during the send, the verb exits 1 with the same message; only then can part of the input be sent. `--enter` adds the key `enter`.
 3. `send-enter` sends the key `enter`; `escape` sends the key `esc`.
 4. `interrupt` sends the resolved Surface's `interrupt_key` through P5.2 and keeps every current refusal rule. It never uses `hc interrupt`.
 
@@ -240,6 +240,9 @@ How is the History mark taken on Herdr, when is Completeness true, which `hc rea
 ### herdr-bracketed-paste
 Does `hc send` wrap the text in bracketed paste when the program has mode 2004 on? A live check in a private core decides; a pass makes delivery guaranteed for an agent pane whose Host state is not `null`, and lifts the P6.6 refusal for it. · dimension: contracts/integrations · resolve-by: during-triage · owner: agent (live check), maintainer approves the resolution
 
+### herdr-keys-charset
+Which characters does `hc keys` type as single keys? A live check in a private core decides the typeable set of P5.2. Default if not resolved: printable ASCII (0x20–0x7E). · dimension: contracts/integrations · resolve-by: during-triage · owner: agent (live check), maintainer approves the resolution
+
 ## Dimension Scan
 
 | Dimension | Verdict | Citation |
@@ -250,7 +253,7 @@ Does `hc send` wrap the text in bracketed paste when the program has mode 2004 o
 | architecture shape | n/a | ratifies the PRD-261107-0825-01 Host port; no new boundary |
 | stack | n/a | no new stack; `hc` CLI only (P2.4) |
 | data/schema | decided | P4.1; Contracts |
-| contracts/integrations | decided | P2–P7; Contracts; deferred items `herdr-history-mark`, `herdr-bracketed-paste` |
+| contracts/integrations | decided | P2–P7; Contracts; deferred items `herdr-history-mark`, `herdr-bracketed-paste`, `herdr-keys-charset` |
 | UX (if UI) | decided | P3 (window placement); Verification item 3 |
 | testing/seams | decided | P8 |
 
