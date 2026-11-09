@@ -9,7 +9,7 @@ use tmux_tools_core::{
     target,
 };
 
-use crate::CommonArgs;
+use crate::{cmd::hosted, CommonArgs};
 
 #[derive(Args, Debug)]
 pub struct SendArgs {
@@ -148,7 +148,7 @@ fn render_output(args: &SendArgs, pane: &str, attempts: usize, verified: bool) -
                 verified,
                 attempts,
             };
-            println!("{}", serde_json::to_string(&output)?);
+            println!("{}", serde_json::to_string(&hosted(&output))?);
         }
         Format::Concise | Format::Raw => {
             println!("sent attempts={attempts} verified={verified}");

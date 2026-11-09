@@ -3,7 +3,7 @@ use clap::Args;
 use serde::Serialize;
 use tmux_tools_core::{
     format::{self, Format, MISSING_GLYPH},
-    host::{self, ListScope, PaneListing as PaneRow},
+    host::{self, Host, HostState, ListScope, PaneListing as PaneRow},
 };
 
 #[derive(Args, Debug)]
@@ -18,6 +18,7 @@ pub struct ListArgs {
 
 #[derive(Serialize)]
 struct ListJsonRow {
+    host: Host,
     name: Option<String>,
     agent: Option<String>,
     session: String,
@@ -26,6 +27,7 @@ struct ListJsonRow {
     launched: Option<String>,
     status: String,
     last_activity: Option<i64>,
+    host_state: Option<HostState>,
 }
 
 pub fn run(args: &ListArgs) -> Result<()> {
@@ -166,19 +168,24 @@ fn format_activity(activity: Option<i64>, now: i64) -> String {
 }
 
 fn render_json(rows: &[PaneRow]) -> Result<()> {
-    let json_rows: Vec<ListJsonRow> = rows
+    let host = host::current();
+    let json_rows = rows
         .iter()
-        .map(|row| ListJsonRow {
-            name: row.name.clone(),
-            agent: row.agent.clone(),
-            session: row.session.clone(),
-            pane: pane_label(row),
-            access: row.access.clone(),
-            launched: row.launched_at.clone(),
-            status: pane_status(row),
-            last_activity: row.last_activity,
+        .map(|row| {
+            Ok(ListJsonRow {
+                host: host.host(),
+                name: row.name.clone(),
+                agent: row.agent.clone(),
+                session: row.session.clone(),
+                pane: pane_label(row),
+                access: row.access.clone(),
+                launched: row.launched_at.clone(),
+                status: pane_status(row),
+                last_activity: row.last_activity,
+                host_state: host.host_state(&row.pane_id)?,
+            })
         })
-        .collect();
+        .collect::<Result<Vec<_>>>()?;
 
     println!("{}", serde_json::to_string_pretty(&json_rows)?);
     Ok(())
@@ -239,6 +246,7 @@ mod tests {
         };
 
         let json_row = ListJsonRow {
+            host: Host::Tmux,
             name: row.name.clone(),
             agent: row.agent.clone(),
             session: row.session.clone(),
@@ -247,6 +255,7 @@ mod tests {
             launched: row.launched_at.clone(),
             status: pane_status(&row),
             last_activity: row.last_activity,
+            host_state: None,
         };
 
         let json = serde_json::to_string(&json_row).unwrap();
@@ -259,6 +268,7 @@ mod tests {
     #[test]
     fn json_row_last_activity_null_when_missing() {
         let json_row = ListJsonRow {
+            host: Host::Tmux,
             name: None,
             agent: None,
             session: "s".into(),
@@ -267,6 +277,7 @@ mod tests {
             launched: None,
             status: "running".into(),
             last_activity: None,
+            host_state: None,
         };
 
         let json = serde_json::to_string(&json_row).unwrap();

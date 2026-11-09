@@ -397,9 +397,13 @@ pub fn place(
     let creation = resolve_creation(launch_target, layout.splits(), in_tmux)?;
 
     // Eligibility comes from the window as it stood before this split, so placing a
-    // pane never grants the authority to retile the window it lands in.
+    // pane never grants the authority to retile the window it lands in. On a host
+    // without `tile` the automatic tile is skipped silently: the host controls the
+    // layout.
     let tile = match (layout, &creation) {
-        (Layout::Tile, Creation::Split(target)) => window_has_owned_pane(target, registration.cwd)?,
+        (Layout::Tile, Creation::Split(target)) if host::current().capabilities().tile => {
+            window_has_owned_pane(target, registration.cwd)?
+        }
         _ => false,
     };
 
@@ -650,8 +654,10 @@ fn measured_window(
                 }
                 set_tiled_marker(pane_id)
             }
-            Layout::Split { .. } => clear_tiled_marker(pane_id),
-            Layout::Tile | Layout::NewWindow => Ok(()),
+            Layout::Split { .. } if host::current().capabilities().tile => {
+                clear_tiled_marker(pane_id)
+            }
+            Layout::Tile | Layout::Split { .. } | Layout::NewWindow => Ok(()),
         };
         if unless_pane_gone(pane_id, layout_step)?.is_none() {
             return Ok(None);
@@ -752,8 +758,9 @@ pub fn window_guard(target: &str, current_cwd: Option<&str>) -> Result<WindowGua
 /// What [`remove_pane`] did besides destroying the pane.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Removal {
-    /// The window guard, evaluated on the pane's window before the pane was destroyed.
-    pub guard: WindowGuard,
+    /// The window guard, evaluated on the pane's window before the pane was destroyed;
+    /// `None` on a host without `tile`, which reads no Layout intent and never retiles.
+    pub guard: Option<WindowGuard>,
     /// Whether the window was retiled: the guard held and the pane was not the
     /// window's last.
     pub retiled: bool,
@@ -767,12 +774,24 @@ pub struct Removal {
 /// the retile reach tmux as one command sequence, so the retile completes even when
 /// the destroyed pane is the caller's own and the calling process is hung up with it.
 /// A pane that is its window's last takes the window with it; no retile is sent.
+/// On a host without `tile` the pane is closed with no guard read and no retile.
 pub fn remove_pane(pane_id: &str, current_cwd: Option<&str>) -> Result<Removal> {
+    let host = host::current();
+    if !host.capabilities().tile {
+        host.close_pane(pane_id, None)?;
+        return Ok(Removal {
+            guard: None,
+            retiled: false,
+        });
+    }
     let state = read_window_state(pane_id)?;
     let guard = state.guard(current_cwd);
     let retiled = guard.holds() && state.panes.len() > 1;
-    host::current().close_pane(pane_id, retiled.then_some(state.window_id.as_str()))?;
-    Ok(Removal { guard, retiled })
+    host.close_pane(pane_id, retiled.then_some(state.window_id.as_str()))?;
+    Ok(Removal {
+        guard: Some(guard),
+        retiled,
+    })
 }
 
 /// What the window guard reads about one window.

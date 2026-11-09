@@ -9,9 +9,12 @@ use tmux_tools_core::{
 };
 
 use crate::{
-    cmd::launch::{
-        concise_landing_fields, destination, invoking_cwd, warn_if_unmeasured, wrap_keep_open,
-        WindowJson,
+    cmd::{
+        hosted,
+        launch::{
+            concise_landing_fields, destination, invoking_cwd, require_placement_options,
+            warn_if_unmeasured, wrap_keep_open, WindowJson,
+        },
     },
     util::rfc3339_utc_now,
     CommonArgs,
@@ -68,6 +71,7 @@ struct SpawnAgentJson<'a> {
 }
 
 pub fn run(args: &SpawnAgentArgs) -> Result<()> {
+    require_placement_options(args.split, args.size.is_some())?;
     let (registry, warnings) = Registry::load()?;
     for warning in &warnings {
         eprintln!("warning: agent {}: {}", warning.agent, warning.detail);
@@ -198,7 +202,7 @@ fn render_output(
                 relocated: landing.relocated,
                 window: WindowJson::of(landing),
             };
-            println!("{}", serde_json::to_string(&output)?);
+            println!("{}", serde_json::to_string(&hosted(&output))?);
         }
         Format::Raw => println!("{}", landing.pane_id),
     }

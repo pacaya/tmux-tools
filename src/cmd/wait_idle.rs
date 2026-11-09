@@ -6,6 +6,7 @@ use std::time::Duration;
 use tmux_tools_core::{
     agents,
     format::Format,
+    host::{self, Host, HostState},
     idle::{
         bottom_non_blank_lines, resolve_timeout, validate_seconds, wait_for_idle, IdleConfig,
         IdleReason, SurfacePatterns, DEFAULT_READY_SCAN_LINES, DEFAULT_READY_STABLE_SECONDS,
@@ -42,12 +43,14 @@ pub struct WaitIdleArgs {
 
 #[derive(Serialize)]
 struct WaitIdleJson<'a> {
+    host: Host,
     target: &'a str,
     name: Option<&'a str>,
     reason: &'static str,
     duration_ms: u128,
     idle_for: f64,
     final_capture: &'a str,
+    host_state: Option<HostState>,
 }
 
 pub fn run(args: &WaitIdleArgs) -> Result<()> {
@@ -91,13 +94,16 @@ pub fn run(args: &WaitIdleArgs) -> Result<()> {
         ),
         Format::Json => {
             let name = names::get(&pane, names::KEY_NAME)?;
+            let host = host::current();
             let output = WaitIdleJson {
+                host: host.host(),
                 target: &pane,
                 name: name.as_deref(),
                 reason: outcome.reason.as_str(),
                 duration_ms: outcome.duration.as_millis(),
                 idle_for: outcome.idle_for.as_secs_f64(),
                 final_capture: &outcome.final_capture,
+                host_state: host.host_state(&pane)?,
             };
             println!("{}", serde_json::to_string(&output)?);
         }

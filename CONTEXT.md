@@ -9,7 +9,9 @@ the whole glossary.
 
 **Host backend** [adapter] — the implementation of the Host port for one [[Host]]. The tmux backend is the only one; tmux facts ([[Managed session]], [[Bracketed paste transport]], the `@tt-*` storage of [[Pane registration]], and [[Layout intent]] as `@tt-tiled`) live in it. _Avoid_: driver, plugin. ↔ core/src/host/tmux/ (`TmuxHost`)
 
-**Host capabilities** [VO] — the optional features a [[Host backend]] supports: `native_state`, `submit_confirmation`, `notify`, `tile`, `rebalance`, `size`. The tmux backend supports `tile`, `rebalance` and `size`. _Avoid_: features, flags. ↔ core/src/host/mod.rs (`HostCapabilities`)
+**Host capabilities** [VO] — the optional features a [[Host backend]] supports: `native_state`, `submit_confirmation`, `notify`, `tile`, `rebalance`, `size`. The tmux backend supports `notify`, `tile`, `rebalance` and `size`. Capabilities are read on each invocation: an optional verb or option (`rebalance`, `--split tile`, `--size`) on a host that lacks it exits 3 with `unsupported: <verb> on <host>`, and the automatic tile after a spawn is skipped silently on a host without `tile`. _Avoid_: features, flags. ↔ core/src/host/mod.rs (`HostCapabilities`, `Unsupported`)
+
+**Host state** [VO] — the agent state a [[Host]] itself reports for a pane: `working`, `blocked`, `done` or `idle`, or `null` when it reports none. Separate from [[Pane state]]; the tmux backend always reports `null`. `status`, `list`, `wait-idle` and `prompt` report it as `host_state` in JSON. _Avoid_: agent status, native state. ↔ core/src/host/mod.rs (`HostState`, `HostPort::host_state`)
 
 ## Panes and sessions
 

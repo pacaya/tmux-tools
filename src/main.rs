@@ -1,14 +1,14 @@
 use anyhow::Result;
 use clap::{Args, Parser, Subcommand};
-use tmux_tools_core::Format;
+use tmux_tools_core::{host::Unsupported, Format};
 
 mod cmd;
 mod util;
 
 use crate::cmd::{
     capture::CaptureArgs, escape::EscapeArgs, execute::ExecuteArgs, interrupt::InterruptArgs,
-    kill::KillArgs, launch::LaunchArgs, list::ListArgs, prompt::PromptArgs,
-    rebalance::RebalanceArgs, send::SendArgs, send_enter::SendEnterArgs,
+    kill::KillArgs, launch::LaunchArgs, list::ListArgs, notify::NotifyArgs, prompt::PromptArgs,
+    rebalance::RebalanceArgs, self_::SelfArgs, send::SendArgs, send_enter::SendEnterArgs,
     spawn_agent::SpawnAgentArgs, status::StatusArgs, wait_idle::WaitIdleArgs,
 };
 
@@ -40,6 +40,9 @@ enum Commands {
     List(ListArgs),
     Status(StatusArgs),
     Rebalance(RebalanceArgs),
+    Notify(NotifyArgs),
+    #[command(name = "self")]
+    SelfPane(SelfArgs),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -89,10 +92,26 @@ impl tmux_tools_core::target::TargetArgs for CommonArgs {
     }
 }
 
+/// The exit code of an optional verb or option the host lacks.
+const EXIT_UNSUPPORTED: i32 = 3;
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    match cli.command {
+    match run(cli.command) {
+        Err(error) => match error.downcast_ref::<Unsupported>() {
+            Some(unsupported) => {
+                eprintln!("{unsupported}");
+                std::process::exit(EXIT_UNSUPPORTED);
+            }
+            None => Err(error),
+        },
+        Ok(()) => Ok(()),
+    }
+}
+
+fn run(command: Commands) -> Result<()> {
+    match command {
         Commands::Launch(args) => crate::cmd::launch::run(&args)?,
         Commands::Send(args) => crate::cmd::send::run(&args)?,
         Commands::SendEnter(args) => crate::cmd::send_enter::run(&args)?,
@@ -107,6 +126,8 @@ fn main() -> Result<()> {
         Commands::List(args) => crate::cmd::list::run(&args)?,
         Commands::Status(args) => crate::cmd::status::run(&args)?,
         Commands::Rebalance(args) => crate::cmd::rebalance::run(&args)?,
+        Commands::Notify(args) => crate::cmd::notify::run(&args)?,
+        Commands::SelfPane(args) => crate::cmd::self_::run(&args)?,
     }
 
     Ok(())

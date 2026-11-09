@@ -12,7 +12,10 @@ use tmux_tools_core::{
     names, target,
 };
 
-use crate::{cmd::spawn_agent::shell_quote, CommonArgs};
+use crate::{
+    cmd::{hosted, spawn_agent::shell_quote},
+    CommonArgs,
+};
 
 const POLL_INTERVAL: Duration = Duration::from_millis(250);
 const LOOKBACKS: [Option<u32>; 4] = [Some(100), Some(500), Some(2000), None];
@@ -280,7 +283,7 @@ fn render_started(
                 start_marker,
                 end_marker,
             };
-            println!("{}", serde_json::to_string(&output)?);
+            println!("{}", serde_json::to_string(&hosted(&output))?);
         }
         Format::Concise | Format::Raw => println!("started"),
     }
@@ -317,7 +320,7 @@ fn render_outcome(args: &ExecuteArgs, pane: &str, outcome: &ExecuteOutcome) -> R
                 duration_ms: outcome.duration.as_millis(),
                 timed_out: outcome.timed_out,
             };
-            println!("{}", serde_json::to_string(&output)?);
+            println!("{}", serde_json::to_string(&hosted(&output))?);
         }
         Format::Raw => print!("{}", outcome.output),
     }

@@ -3,7 +3,10 @@ use clap::Args;
 use serde::Serialize;
 use tmux_tools_core::{format::Format, host, target};
 
-use crate::{cmd::safety, CommonArgs};
+use crate::{
+    cmd::{hosted, safety},
+    CommonArgs,
+};
 
 const VERB: &str = "send-enter";
 
@@ -39,7 +42,7 @@ pub fn run(args: &SendEnterArgs) -> Result<()> {
                 target: &pane,
                 key: "Enter",
             };
-            println!("{}", serde_json::to_string(&output)?);
+            println!("{}", serde_json::to_string(&hosted(&output))?);
         }
         Format::Raw => println!(),
     }

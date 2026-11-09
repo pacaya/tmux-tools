@@ -4,7 +4,7 @@ use serde::Serialize;
 use std::env;
 use tmux_tools_core::{
     format::Format,
-    host::{self, PaneSummary as StatusRow},
+    host::{self, Host, HostState, PaneSummary as StatusRow},
     layout::{self, WindowReport},
     target,
 };
@@ -19,6 +19,7 @@ pub struct StatusArgs {
 
 #[derive(Serialize)]
 struct StatusJson {
+    host: Host,
     session: String,
     window: String,
     window_index: u64,
@@ -35,11 +36,14 @@ struct StatusJson {
     min_pane_rows: u32,
     /// Whether the pane's window is below its effective floor.
     below_floor: bool,
+    host_state: Option<HostState>,
 }
 
 #[derive(Serialize)]
 struct NotInTmuxJson {
+    host: Host,
     in_tmux: bool,
+    host_state: Option<HostState>,
 }
 
 pub fn run(args: &StatusArgs) -> Result<()> {
@@ -73,7 +77,12 @@ fn render_not_in_tmux(format: Format) -> Result<()> {
         Format::Json => {
             println!(
                 "{}",
-                serde_json::to_string_pretty(&NotInTmuxJson { in_tmux: false })?
+                serde_json::to_string_pretty(&NotInTmuxJson {
+                    host: host::current().host(),
+                    in_tmux: false,
+                    // No pane, so no Host state.
+                    host_state: None,
+                })?
             );
         }
         Format::Concise | Format::Raw => println!("not in tmux"),
@@ -105,7 +114,9 @@ fn render_concise(row: &StatusRow, window: &WindowReport) {
 }
 
 fn render_json(row: &StatusRow, window: &WindowReport) -> Result<()> {
+    let host = host::current();
     let json = StatusJson {
+        host: host.host(),
         session: row.session.clone(),
         window: row.window_name.clone(),
         window_index: row.window_index.parse().with_context(|| {
@@ -129,6 +140,7 @@ fn render_json(row: &StatusRow, window: &WindowReport) -> Result<()> {
         min_pane_cols: window.min_pane_cols,
         min_pane_rows: window.min_pane_rows,
         below_floor: window.below_floor,
+        host_state: host.host_state(&row.pane_id)?,
     };
 
     println!("{}", serde_json::to_string_pretty(&json)?);

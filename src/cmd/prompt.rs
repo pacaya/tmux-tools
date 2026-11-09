@@ -6,14 +6,17 @@ use std::thread;
 use std::time::Duration;
 use tmux_tools_core::{
     format::{render_capture, strip_ansi, Format},
-    host::{self, CaptureRange, HistoryProbe as PaneProbe},
+    host::{self, CaptureRange, HistoryProbe as PaneProbe, HostState, Submission},
     idle::{
         resolve_timeout, validate_seconds, wait_for_idle, IdleConfig, DEFAULT_READY_STABLE_SECONDS,
     },
     names, target,
 };
 
-use crate::{cmd::send::dispatch_enter, cmd::wait_idle::surface_info_for, CommonArgs};
+use crate::{
+    cmd::{hosted, send::dispatch_enter, wait_idle::surface_info_for},
+    CommonArgs,
+};
 
 #[derive(Args, Debug)]
 pub struct PromptArgs {
@@ -48,6 +51,8 @@ struct PromptJson<'a> {
     turn_observed: bool,
     /// P7 completeness: whether everything after the history mark could be supplied.
     complete: bool,
+    host_state: Option<HostState>,
+    submit: Submission,
 }
 
 /// The structured refusal reported for JSON output. The command still exits
@@ -60,6 +65,8 @@ struct PromptRefusalJson<'a> {
     prompt_sent: &'a str,
     one_submission_delivery: &'static str,
     error: &'a str,
+    /// A refusal submits nothing, so it carries no `submit`; the host state is not read.
+    host_state: Option<HostState>,
 }
 
 /// P1's three reported outcomes. `Refused` carries the message so the caller can
@@ -195,6 +202,7 @@ pub fn run(args: &PromptArgs) -> Result<()> {
         Format::Json => {
             let name = names::get(&pane, names::KEY_NAME)?;
             let rendered = render_capture(&output_since_prompt, Format::Concise);
+            let host = host::current();
             let output = PromptJson {
                 target: &pane,
                 name: name.as_deref(),
@@ -205,8 +213,11 @@ pub fn run(args: &PromptArgs) -> Result<()> {
                 one_submission_delivery: delivery_str,
                 turn_observed,
                 complete,
+                host_state: host.host_state(&pane)?,
+                // Without `submit_confirmation` the host gives no observation.
+                submit: Submission::Assumed,
             };
-            println!("{}", serde_json::to_string(&output)?);
+            println!("{}", serde_json::to_string(&hosted(&output))?);
         }
         Format::Raw => print!("{output_since_prompt}"),
     }
@@ -258,8 +269,9 @@ fn report_refusal(format: Format, pane: &str, text: &str, message: &str) -> Resu
             prompt_sent: text,
             one_submission_delivery: "refused",
             error: message,
+            host_state: None,
         };
-        println!("{}", serde_json::to_string(&output)?);
+        println!("{}", serde_json::to_string(&hosted(&output))?);
     }
     Ok(())
 }

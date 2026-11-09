@@ -7,13 +7,14 @@
 use anyhow::Result;
 
 use crate::host::{
-    CaptureRange, HistoryProbe, Host, HostCapabilities, HostPort, ListScope, PaneDescription,
-    PaneListing, RegistrationKey, ScreenCapture, SplitDirection, WindowHome,
+    CaptureRange, Delivery, HistoryProbe, Host, HostCapabilities, HostPort, HostState, ListScope,
+    PaneDescription, PaneListing, RegistrationKey, ScreenCapture, SplitDirection, WindowHome,
 };
 use crate::layout::WindowGeometry;
 use crate::names::Registered;
 
 mod listing;
+mod notify;
 mod pane_io;
 mod registration;
 mod runner;
@@ -34,14 +35,17 @@ impl HostPort for TmuxHost {
     }
 
     fn capabilities(&self) -> HostCapabilities {
-        HostCapabilities {
+        let capabilities = HostCapabilities {
             native_state: false,
             submit_confirmation: false,
-            notify: false,
+            notify: true,
             tile: true,
             rebalance: true,
             size: true,
-        }
+        };
+        #[cfg(feature = "test-fixtures")]
+        let capabilities = crate::host::with_test_override(capabilities);
+        capabilities
     }
 
     fn is_command_failure(&self, error: &anyhow::Error) -> bool {
@@ -178,6 +182,15 @@ impl HostPort for TmuxHost {
 
     fn window_registrations(&self, target: &str) -> Result<Vec<Registered>> {
         registration::window_registrations(target)
+    }
+
+    fn host_state(&self, _pane: &str) -> Result<Option<HostState>> {
+        // tmux reports no agent state for a pane.
+        Ok(None)
+    }
+
+    fn notify(&self, pane: &str, title: &str, body: &str) -> Result<Delivery> {
+        notify::notify(pane, title, body)
     }
 
     fn apply_tiled_layout(&self, target: &str) -> Result<()> {

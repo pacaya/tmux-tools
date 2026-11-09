@@ -119,6 +119,8 @@ struct CliOptions<'a> {
     /// and `TMUX` at its session, for a test whose calling pane is not the harness
     /// pane.
     caller_pane: Option<&'a str>,
+    /// Extra environment variables for the CLI, set after the mode's own.
+    env: &'a [(&'a str, &'a str)],
 }
 
 /// Per-process counter for `tt-tests-<pid>-<n>` server labels.
@@ -410,6 +412,9 @@ impl IsolatedTmuxServer {
         }
         if let Some(cwd) = options.cwd {
             command.current_dir(cwd);
+        }
+        for (key, value) in options.env {
+            command.env(key, value);
         }
         command
     }
@@ -4945,6 +4950,14 @@ args = []
         "the JSON field must report the refusal; payload: {}",
         json_out.stdout
     );
+    assert_host_tmux(&refusal, "prompt refusal");
+    assert_single_host_key(&json_out.stdout, "prompt refusal");
+    assert_host_state_null(&refusal, "prompt refusal");
+    assert!(
+        refusal.get("submit").is_none(),
+        "a refusal submits nothing, so it must carry no submit: {}",
+        json_out.stdout
+    );
     assert!(
         json_out.stderr.to_lowercase().contains("refus"),
         "the refusal must be reported on stderr; got: {:?}",
@@ -9450,7 +9463,11 @@ fn status_not_in_tmux_output_is_unchanged_and_loads_no_registry() {
     for (format, expected) in [
         ("concise", "not in tmux\n"),
         ("raw", "not in tmux\n"),
-        ("json", "{\n  \"in_tmux\": false\n}\n"),
+        // ISSUE-261107-0921-02 adds `host` and `host_state`; nothing else changes.
+        (
+            "json",
+            "{\n  \"host\": \"tmux\",\n  \"in_tmux\": false,\n  \"host_state\": null\n}\n",
+        ),
     ] {
         let out = server.cli_env(&["status", "--format", format], broken.path());
         out.assert_success(&format!("status --format {format} outside tmux"));
@@ -10867,7 +10884,10 @@ fn retiling_kill_output_is_unchanged_in_every_format() {
 
         let expected = match format {
             "concise" => format!("killed pane={pane} name={name}\n"),
-            "json" => format!("{{\"pane_id\":\"{pane}\",\"name\":\"{name}\",\"agent\":null}}\n"),
+            // ISSUE-261107-0921-02 adds `host`; nothing else changes.
+            "json" => format!(
+                "{{\"host\":\"tmux\",\"pane_id\":\"{pane}\",\"name\":\"{name}\",\"agent\":null}}\n"
+            ),
             _ => format!("{pane}\n"),
         };
         assert_eq!(out.stdout, expected, "kill --format {format} stdout");
@@ -12361,4 +12381,884 @@ fn rebalance_reports_not_below_floor_when_the_tiled_agent_pane_meets_its_surface
     );
 
     assert_rebalance_verdict(&server, &fixture, false);
+}
+
+// ---------------------------------------------------------------------------
+// ISSUE-261107-0921-02 — the `self` and `notify` verbs, exit 3 for an optional verb
+// or option a host lacks, and the `host`, `host_state` and `submit` JSON fields, on
+// tmux. A test-only capability override (`--features test-fixtures`) sets tmux
+// capabilities false for one invocation.
+// ---------------------------------------------------------------------------
+
+/// The test-only environment variable that sets the named tmux capabilities false.
+#[cfg(feature = "test-fixtures")]
+const CAPABILITIES_OFF: &str = "TMUX_TOOLS_TEST_CAPABILITIES_OFF";
+
+/// Run the CLI inside tmux with `env` added to its environment.
+fn cli_with_env(server: &IsolatedTmuxServer, args: &[&str], env: &[(&str, &str)]) -> CmdOutput {
+    server.run_cli(
+        args,
+        CliOptions {
+            env,
+            ..CliOptions::default()
+        },
+    )
+}
+
+/// Acceptance: `self --format json` in a pane `launch --name` created reports it driven,
+/// with its name and a null agent, as one exact JSON object.
+#[test]
+fn self_in_a_launched_pane_reports_it_driven_with_its_name() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    let launched = server.cli(&launch_args("selfie", &[]));
+    let pane = launched_pane_id(&launched, "launch --name selfie");
+
+    let out = server.cli_from_pane(&["self", "--format", "json"], &pane, None);
+
+    out.assert_success("self --format json in a launched pane");
+    assert_eq!(
+        out.stdout.trim(),
+        r#"{"host":"tmux","driven":true,"name":"selfie","agent":null}"#
+    );
+}
+
+/// Acceptance: `self --format json` in a pane `spawn-agent` created reports its agent.
+#[cfg(feature = "test-fixtures")]
+#[test]
+fn self_in_a_spawned_agent_pane_reports_its_name_and_agent() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    let config = fake_tui_agent_config();
+    let spawned = server.cli_env(
+        &[
+            "spawn-agent",
+            "tt-fake-tui",
+            "--bare",
+            "--name",
+            "self-agent",
+            "--format",
+            "json",
+        ],
+        config.xdg(),
+    );
+    let pane = launched_pane_id(&spawned, "spawn-agent --name self-agent");
+
+    let out = server.cli_from_pane(&["self", "--format", "json"], &pane, None);
+
+    out.assert_success("self --format json in a spawned pane");
+    assert_eq!(
+        out.stdout.trim(),
+        r#"{"host":"tmux","driven":true,"name":"self-agent","agent":"tt-fake-tui"}"#
+    );
+}
+
+/// Acceptance: in an unregistered pane `self` reports `driven: false` and `name: null`.
+#[test]
+fn self_in_an_unregistered_pane_reports_it_not_driven() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+
+    let out = server.cli(&["self", "--format", "json"]);
+
+    out.assert_success("self --format json in the unregistered harness pane");
+    assert_eq!(
+        out.stdout.trim(),
+        r#"{"host":"tmux","driven":false,"name":null,"agent":null}"#
+    );
+}
+
+/// Acceptance: without `$TMUX`, `self` reports `host: "tmux", driven: false`.
+#[test]
+fn self_outside_tmux_reports_host_tmux_not_driven() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_outside();
+
+    let out = server.cli(&["self", "--format", "json"]);
+
+    out.assert_success("self --format json outside tmux");
+    assert_eq!(
+        out.stdout.trim(),
+        r#"{"host":"tmux","driven":false,"name":null,"agent":null}"#
+    );
+}
+
+/// The session of the notify cases' pane, which an [`AttachedClient`] shows.
+const NOTIFY_SESSION: &str = "notify-client";
+
+/// The name registered on the notify cases' pane.
+const NOTIFY_NAME: &str = "notify-pane";
+
+/// The bytes tmux writes to the client tty for `notify --title T --body B`.
+const NOTIFY_T_B: &[u8] = b"\x1b]777;notify;T;B\x07";
+
+/// The prefix of every OSC 777 notify sequence.
+const NOTIFY_PREFIX: &[u8] = b"]777;notify;";
+
+/// Per-process counter for client output files and sentinels.
+static NEXT_CLIENT: AtomicUsize = AtomicUsize::new(0);
+
+/// A tmux client attached to one session of an [`IsolatedTmuxServer`] through a pty
+/// that `script` records: every byte tmux writes to the client's tty lands in a file in
+/// the server's `TMUX_TMPDIR`. Dropping it ends the client.
+struct AttachedClient {
+    child: std::process::Child,
+    output: std::path::PathBuf,
+}
+
+impl AttachedClient {
+    /// Attach a client to `session` and wait until tmux lists it.
+    fn attach(server: &IsolatedTmuxServer, session: &str) -> Self {
+        let n = NEXT_CLIENT.fetch_add(1, Ordering::SeqCst);
+        let output = server.tmpdir().join(format!("client-{n}.bin"));
+        let target = format!("={session}");
+        let mut command = Command::new("script");
+        #[cfg(target_os = "macos")]
+        command
+            .arg("-q")
+            .arg("-F")
+            .arg(&output)
+            .arg(real_tmux_path())
+            .args(["-L", server.label(), "attach-session", "-t", &target]);
+        #[cfg(not(target_os = "macos"))]
+        command
+            .args(["-q", "-f", "-c"])
+            .arg(format!(
+                "'{}' -L '{}' attach-session -t '{target}'",
+                real_tmux_path(),
+                server.label()
+            ))
+            .arg(&output);
+        let child = command
+            .env("TERM", "xterm-256color")
+            .env("TMUX_TMPDIR", server.tmpdir())
+            .env_remove("TMUX")
+            .env_remove("TMUX_PANE")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn script for an attached client");
+        let client = Self { child, output };
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let clients = server.tmux(&["list-clients", "-t", &target, "-F", "#{client_tty}"]);
+            if clients.status == 0 && !clients.stdout.trim().is_empty() {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "a client must attach to {session}: {clients:?}"
+            );
+            thread::sleep(Duration::from_millis(50));
+        }
+        client
+    }
+
+    /// Every byte written to the client's tty so far.
+    fn bytes(&self) -> Vec<u8> {
+        std::fs::read(&self.output).unwrap_or_default()
+    }
+
+    /// Wait until the client's tty bytes contain `needle`; returns them.
+    fn wait_for(&self, needle: &[u8], ctx: &str) -> Vec<u8> {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let bytes = self.bytes();
+            if contains(&bytes, needle) {
+                return bytes;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "{ctx}: the client's tty never received {:?}; it holds {:?}",
+                String::from_utf8_lossy(needle),
+                String::from_utf8_lossy(&bytes)
+            );
+            thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    /// Write a plain-text sentinel to the tty of `pane` and wait until the client shows
+    /// it; returns the client's tty bytes. Bytes written to the pane's tty earlier have
+    /// been processed by tmux once the sentinel arrives.
+    fn after_sentinel(&self, server: &IsolatedTmuxServer, pane: &str) -> Vec<u8> {
+        let sentinel = format!("TT-SENTINEL-{}", NEXT_CLIENT.fetch_add(1, Ordering::SeqCst));
+        write_to_pane_tty(server, pane, format!("\r\n{sentinel}\r\n").as_bytes());
+        self.wait_for(sentinel.as_bytes(), "sentinel")
+    }
+}
+
+impl Drop for AttachedClient {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// Whether `haystack` contains `needle`.
+fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack
+        .windows(needle.len())
+        .any(|window| window == needle)
+}
+
+/// Write `bytes` to the tty of `pane`, as an application running in it would.
+fn write_to_pane_tty(server: &IsolatedTmuxServer, pane: &str, bytes: &[u8]) {
+    use std::io::Write;
+    let tty = tmux_format(server, pane, "#{pane_tty}");
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&tty)
+        .and_then(|mut file| file.write_all(bytes))
+        .unwrap_or_else(|e| panic!("write to the tty {tty} of {pane}: {e}"));
+}
+
+/// A detached session [`NOTIFY_SESSION`] whose one pane is registered as
+/// [`NOTIFY_NAME`] and has `allow-passthrough` set to `passthrough`; returns the pane.
+fn notify_pane(server: &IsolatedTmuxServer, passthrough: &str) -> String {
+    let created = server.tmux(&[
+        "new-session",
+        "-d",
+        "-s",
+        NOTIFY_SESSION,
+        "-x",
+        "80",
+        "-y",
+        "24",
+        "-P",
+        "-F",
+        "#{pane_id}",
+        "sleep",
+        "600",
+    ]);
+    created.assert_success("create the notify session");
+    let pane = created.stdout.trim().to_owned();
+    server
+        .tmux(&[
+            "set-option",
+            "-p",
+            "-t",
+            &pane,
+            "allow-passthrough",
+            passthrough,
+        ])
+        .assert_success("set allow-passthrough");
+    server
+        .tmux(&["set-option", "-p", "-t", &pane, "@tt-name", NOTIFY_NAME])
+        .assert_success("register the notify pane");
+    pane
+}
+
+/// `notify --title T --body B --target <NOTIFY_NAME>`.
+fn notify_t_b(server: &IsolatedTmuxServer, env: &[(&str, &str)]) -> CmdOutput {
+    cli_with_env(
+        server,
+        &[
+            "notify",
+            "--title",
+            "T",
+            "--body",
+            "B",
+            "--target",
+            NOTIFY_NAME,
+        ],
+        env,
+    )
+}
+
+/// Acceptance: with `allow-passthrough on` and the pane in the current window of an
+/// attached client, `notify` puts exactly `ESC ]777;notify;T;B BEL` on the client's
+/// tty — no other BEL — and exits 0.
+#[test]
+fn notify_with_passthrough_on_reaches_the_attached_client() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    let pane = notify_pane(&server, "on");
+    let client = AttachedClient::attach(&server, NOTIFY_SESSION);
+
+    let out = notify_t_b(&server, &[]);
+
+    out.assert_success("notify with allow-passthrough on");
+    assert_eq!(
+        out.stderr, "",
+        "a delivered notify prints nothing on stderr"
+    );
+    client.wait_for(NOTIFY_T_B, "notify with allow-passthrough on");
+    let bytes = client.after_sentinel(&server, &pane);
+    assert_eq!(
+        bytes.iter().filter(|byte| **byte == 0x07).count(),
+        1,
+        "the only BEL on the client's tty must end the notify sequence: {:?}",
+        String::from_utf8_lossy(&bytes)
+    );
+}
+
+/// Acceptance: with `allow-passthrough off`, the sequence goes to the pane's tty and
+/// tmux does not pass it to the client's tty.
+#[test]
+fn notify_with_passthrough_off_leaves_the_client_tty_without_the_sequence() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    let pane = notify_pane(&server, "off");
+    let client = AttachedClient::attach(&server, NOTIFY_SESSION);
+
+    let out = notify_t_b(&server, &[]);
+
+    out.assert_success("notify with allow-passthrough off");
+    let bytes = client.after_sentinel(&server, &pane);
+    assert!(
+        !contains(&bytes, NOTIFY_PREFIX),
+        "allow-passthrough off must keep the sequence off the client's tty: {:?}",
+        String::from_utf8_lossy(&bytes)
+    );
+}
+
+/// Acceptance: a pane whose session has no attached client is not delivered to.
+#[test]
+fn notify_without_an_attached_client_is_not_delivered() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    notify_pane(&server, "on");
+
+    let out = notify_t_b(&server, &[]);
+
+    out.assert_success("notify without an attached client");
+    assert_eq!(out.stderr.trim_end(), "notify: not delivered on tmux");
+}
+
+/// Acceptance: with the override setting `notify` false, nothing reaches the client and
+/// the verb reports it not delivered, with exit 0.
+#[cfg(feature = "test-fixtures")]
+#[test]
+fn notify_without_the_notify_capability_is_not_delivered() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    let pane = notify_pane(&server, "on");
+    let client = AttachedClient::attach(&server, NOTIFY_SESSION);
+
+    let out = notify_t_b(&server, &[(CAPABILITIES_OFF, "notify")]);
+
+    out.assert_success("notify with the notify capability off");
+    assert_eq!(out.stderr.trim_end(), "notify: not delivered on tmux");
+    let bytes = client.after_sentinel(&server, &pane);
+    assert!(
+        !contains(&bytes, NOTIFY_PREFIX),
+        "a host without notify must write no notify sequence: {:?}",
+        String::from_utf8_lossy(&bytes)
+    );
+}
+
+/// Acceptance: without `--target` and with `TMUX_PANE` unset, `notify` exits 1 and
+/// names `TMUX_PANE`.
+#[test]
+fn notify_without_target_or_tmux_pane_exits_1_naming_tmux_pane() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+
+    let out = server.cli_without_pane(
+        &["notify", "--title", "T", "--body", "B"],
+        HARNESS_SESSION,
+        Duration::from_secs(30),
+    );
+
+    assert_eq!(out.status, 1, "stderr: {}", out.stderr);
+    assert!(
+        out.stderr.contains("TMUX_PANE"),
+        "the error must name TMUX_PANE: {}",
+        out.stderr
+    );
+}
+
+/// Acceptance: without `--target`, `notify` run in a pane (`TMUX_PANE`) delivers for it.
+#[test]
+fn notify_without_target_delivers_for_the_calling_pane() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    let pane = notify_pane(&server, "on");
+    let client = AttachedClient::attach(&server, NOTIFY_SESSION);
+
+    let out = server.cli_from_pane(&["notify", "--title", "T", "--body", "B"], &pane, None);
+
+    out.assert_success("notify from the calling pane");
+    client.wait_for(NOTIFY_T_B, "notify from the calling pane");
+}
+
+/// Acceptance: `;` in the title becomes `,`, and control bytes leave the body.
+#[test]
+fn notify_sanitises_the_title_and_body() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    notify_pane(&server, "on");
+    let client = AttachedClient::attach(&server, NOTIFY_SESSION);
+
+    let out = server.cli(&[
+        "notify",
+        "--title",
+        "a;b",
+        "--body",
+        "x\x1by\x07z\x7f\x01w",
+        "--target",
+        NOTIFY_NAME,
+    ]);
+
+    out.assert_success("notify with a control-laden body");
+    client.wait_for(b"\x1b]777;notify;a,b;xyzw\x07", "sanitised notify");
+}
+
+/// Assert `out` is the exit 3 refusal `unsupported: <feature> on tmux`.
+#[cfg(feature = "test-fixtures")]
+fn assert_unsupported(out: &CmdOutput, feature: &str, ctx: &str) {
+    assert_eq!(
+        out.status, 3,
+        "{ctx}: expected exit 3\n--- stdout ---\n{}\n--- stderr ---\n{}",
+        out.stdout, out.stderr
+    );
+    assert_eq!(
+        out.stderr.trim_end(),
+        format!("unsupported: {feature} on tmux"),
+        "{ctx}: stderr"
+    );
+}
+
+/// Acceptance: with the override setting `rebalance` false, `rebalance` exits 3 naming
+/// itself and leaves the window's layout unchanged.
+#[cfg(feature = "test-fixtures")]
+#[test]
+fn rebalance_without_the_rebalance_capability_exits_3_and_leaves_the_window() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    let fixture = ragged_owned_marked(&server);
+    let before = window_rects(&server, &fixture.window);
+
+    let out = cli_with_env(
+        &server,
+        &["rebalance", "--target", &fixture.window, "--format", "json"],
+        &[(CAPABILITIES_OFF, "rebalance")],
+    );
+
+    assert_unsupported(&out, "rebalance", "rebalance without rebalance");
+    assert_eq!(
+        window_rects(&server, &fixture.window),
+        before,
+        "an unsupported rebalance must leave the window's layout unchanged"
+    );
+}
+
+/// Run `args` with the capability override `off` and assert exit 3 naming `feature`,
+/// with no pane created.
+#[cfg(feature = "test-fixtures")]
+fn assert_unsupported_placement(
+    server: &IsolatedTmuxServer,
+    args: &[&str],
+    xdg: Option<&std::path::Path>,
+    off: &str,
+    feature: &str,
+) {
+    let before = all_pane_ids(server);
+    let out = server.run_cli(
+        args,
+        CliOptions {
+            xdg,
+            env: &[(CAPABILITIES_OFF, off)],
+            ..CliOptions::default()
+        },
+    );
+    let ctx = format!("{args:?} without {off}");
+    assert_unsupported(&out, feature, &ctx);
+    assert_eq!(
+        all_pane_ids(server),
+        before,
+        "{ctx}: no pane may be created"
+    );
+}
+
+/// Acceptance: `launch --split tile` without `tile` and `launch --size` without `size`
+/// exit 3 and create no pane.
+#[cfg(feature = "test-fixtures")]
+#[test]
+fn launch_split_tile_and_size_without_their_capabilities_exit_3_without_a_pane() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+
+    assert_unsupported_placement(
+        &server,
+        &["launch", "--cmd", "sleep 600", "--split", "tile"],
+        None,
+        "tile",
+        "--split tile",
+    );
+    assert_unsupported_placement(
+        &server,
+        &["launch", "--cmd", "sleep 600", "--size", "30"],
+        None,
+        "size",
+        "--size",
+    );
+}
+
+/// Acceptance: `spawn-agent --split tile` without `tile` and `spawn-agent --size`
+/// without `size` exit 3 and create no pane.
+#[cfg(feature = "test-fixtures")]
+#[test]
+fn spawn_agent_split_tile_and_size_without_their_capabilities_exit_3_without_a_pane() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    let config = fake_tui_agent_config();
+
+    assert_unsupported_placement(
+        &server,
+        &["spawn-agent", "tt-fake-tui", "--bare", "--split", "tile"],
+        Some(config.xdg()),
+        "tile",
+        "--split tile",
+    );
+    assert_unsupported_placement(
+        &server,
+        &["spawn-agent", "tt-fake-tui", "--bare", "--size", "30"],
+        Some(config.xdg()),
+        "size",
+        "--size",
+    );
+}
+
+/// A new window whose one pane is registered from the harness cwd, without
+/// `@tt-tiled`; returns `(pane, window)`.
+#[cfg(feature = "test-fixtures")]
+fn owned_untiled_window(server: &IsolatedTmuxServer, name: &str) -> (String, String) {
+    let pane = new_window_pane(server);
+    register_name_and_cwd(server, &pane, name, &harness_cwd());
+    let window = window_of(server, &pane);
+    assert!(
+        !tiled_marker_present(server, &window),
+        "fixture: no @tt-tiled"
+    );
+    (pane, window)
+}
+
+/// A flagless `launch` run in `pane` with `env`.
+#[cfg(feature = "test-fixtures")]
+fn flagless_launch_from(
+    server: &IsolatedTmuxServer,
+    pane: &str,
+    env: &[(&str, &str)],
+) -> CmdOutput {
+    server.run_cli(
+        &["launch", "--cmd", "sleep 600", "--format", "json"],
+        CliOptions {
+            caller_pane: Some(pane),
+            env,
+            ..CliOptions::default()
+        },
+    )
+}
+
+/// Acceptance: a flagless `launch` in a window holding an owned pane retiles it and
+/// sets `@tt-tiled` with `tile`; without `tile` it exits 0 silently, does not retile,
+/// and sets no `@tt-tiled`.
+#[cfg(feature = "test-fixtures")]
+#[test]
+fn flagless_launch_skips_the_automatic_tile_without_the_tile_capability() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+
+    let (pane, window) = owned_untiled_window(&server, "tile-on");
+    let out = flagless_launch_from(&server, &pane, &[]);
+    out.assert_success("flagless launch with tile");
+    assert!(
+        tiled_marker_present(&server, &window),
+        "with tile the launch must set @tt-tiled"
+    );
+    assert_retiled(&server, &window, "flagless launch with tile");
+
+    let (pane, window) = owned_untiled_window(&server, "tile-off");
+    let out = flagless_launch_from(&server, &pane, &[(CAPABILITIES_OFF, "tile")]);
+    out.assert_success("flagless launch without tile");
+    assert_eq!(out.stderr, "", "skipping the tile prints nothing on stderr");
+    assert_eq!(
+        window_rects(&server, &window).len(),
+        2,
+        "the pane must land"
+    );
+    assert!(
+        !tiled_marker_present(&server, &window),
+        "without tile the window must keep no @tt-tiled"
+    );
+    assert_not_retiled(&server, &window, "flagless launch without tile");
+}
+
+/// Acceptance (P2.1, P2.2): without `tile`, `kill` in a marked, owned window closes the
+/// pane without retiling and leaves the Layout intent record as it was.
+#[cfg(feature = "test-fixtures")]
+#[test]
+fn kill_without_the_tile_capability_closes_the_pane_without_retiling() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    let fixture = tiled_fixture(&server, &owned_panes(5), true);
+    let pane = &fixture.panes[0];
+
+    let out = cli_with_env(
+        &server,
+        &["kill", "--target", pane],
+        &[(CAPABILITIES_OFF, "tile")],
+    );
+    out.assert_success("kill without tile");
+    assert!(
+        !all_pane_ids(&server).contains(pane),
+        "kill without tile must remove the pane"
+    );
+    assert!(
+        tiled_marker_present(&server, &fixture.window),
+        "kill without tile must not touch @tt-tiled"
+    );
+    assert_not_retiled(&server, &fixture.window, "kill without tile");
+}
+
+/// Acceptance (P2.1): without `tile`, `launch --split h` into a marked window writes no
+/// Layout intent: `@tt-tiled` stays set, where with `tile` it is cleared.
+#[cfg(feature = "test-fixtures")]
+#[test]
+fn split_launch_without_the_tile_capability_writes_no_layout_intent() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+
+    for (env, kept) in [(vec![], false), (vec![(CAPABILITIES_OFF, "tile")], true)] {
+        let fixture = tiled_fixture(&server, &owned_panes(2), true);
+        let out = server.run_cli(
+            &["launch", "--cmd", "sleep 600", "--split", "h"],
+            CliOptions {
+                caller_pane: Some(&fixture.panes[0]),
+                env: &env,
+                ..CliOptions::default()
+            },
+        );
+        out.assert_success(&format!("launch --split h with {env:?}"));
+        assert_eq!(
+            window_rects(&server, &fixture.window).len(),
+            3,
+            "{env:?}: the pane must land in the caller's window"
+        );
+        assert_eq!(
+            tiled_marker_present(&server, &fixture.window),
+            kept,
+            "{env:?}: @tt-tiled after launch --split h"
+        );
+    }
+}
+
+/// Assert `payload` (a JSON object) has `host: "tmux"`.
+fn assert_host_tmux(payload: &serde_json::Value, ctx: &str) {
+    assert_eq!(
+        payload.get("host").and_then(|value| value.as_str()),
+        Some("tmux"),
+        "{ctx}: the JSON object must carry host \"tmux\": {payload}"
+    );
+}
+
+/// Assert `payload` has a `host_state` key whose value is `null`.
+fn assert_host_state_null(payload: &serde_json::Value, ctx: &str) {
+    assert!(
+        payload
+            .get("host_state")
+            .is_some_and(|value| value.is_null()),
+        "{ctx}: the JSON object must carry host_state null: {payload}"
+    );
+}
+
+/// Assert raw JSON `stdout` names the `host` key exactly once: parsing into
+/// `serde_json::Value` keeps only the last of duplicate keys and would hide a repeat.
+fn assert_single_host_key(stdout: &str, ctx: &str) {
+    assert_eq!(
+        stdout.matches("\"host\":").count(),
+        1,
+        "{ctx}: the JSON object must carry exactly one host key: {stdout}"
+    );
+}
+
+/// The parsed JSON object of a successful `args` run, with exactly one `host` key.
+fn json_of(server: &IsolatedTmuxServer, args: &[&str], ctx: &str) -> serde_json::Value {
+    let out = server.cli(args);
+    let payload = json_payload(&out, ctx);
+    assert!(
+        payload.is_object(),
+        "{ctx}: expected a JSON object: {payload}"
+    );
+    assert_single_host_key(&out.stdout, ctx);
+    payload
+}
+
+/// Acceptance: every object result of a verb with `--format json` carries
+/// `host: "tmux"`; `status`, `wait-idle` and `prompt` carry `host_state: null`, and
+/// `prompt` carries `submit: "assumed"`.
+#[test]
+fn every_json_object_result_carries_host_and_the_waiting_verbs_host_state() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    let name = "json-host";
+
+    let launched = json_of(
+        &server,
+        &[
+            "launch",
+            "--cmd",
+            "bash --norc --noprofile",
+            "--name",
+            name,
+            "--bare",
+            "--format",
+            "json",
+        ],
+        "launch",
+    );
+    assert_host_tmux(&launched, "launch");
+    wait_for_pane_ready(&server, name, Duration::from_secs(5));
+
+    for (verb, args) in [
+        ("send", vec!["send", "--target", name, "true", "--enter"]),
+        ("capture", vec!["capture", "--target", name]),
+        ("capture --all", vec!["capture", "--target", name, "--all"]),
+        (
+            "execute",
+            vec!["execute", "--target", name, "true", "--timeout", "10"],
+        ),
+        (
+            "execute --no-wait",
+            vec!["execute", "--target", name, "true", "--no-wait"],
+        ),
+        ("escape", vec!["escape", "--target", name]),
+        ("send-enter", vec!["send-enter", "--target", name]),
+        ("interrupt", vec!["interrupt", "--target", name]),
+        ("self", vec!["self"]),
+    ] {
+        let mut args = args;
+        args.extend(["--format", "json"]);
+        assert_host_tmux(&json_of(&server, &args, verb), verb);
+    }
+
+    let status = json_of(
+        &server,
+        &["status", "--target", name, "--format", "json"],
+        "status",
+    );
+    assert_host_tmux(&status, "status");
+    assert_host_state_null(&status, "status");
+
+    let waited = json_of(
+        &server,
+        &[
+            "wait-idle",
+            "--target",
+            name,
+            "--idle-seconds",
+            "0.5",
+            "--timeout",
+            "15",
+            "--format",
+            "json",
+        ],
+        "wait-idle",
+    );
+    assert_host_tmux(&waited, "wait-idle");
+    assert_host_state_null(&waited, "wait-idle");
+
+    let prompted = json_of(
+        &server,
+        &[
+            "prompt",
+            "--target",
+            name,
+            "echo prompted",
+            "--idle-seconds",
+            "0.5",
+            "--timeout",
+            "15",
+            "--format",
+            "json",
+        ],
+        "prompt",
+    );
+    assert_host_tmux(&prompted, "prompt");
+    assert_host_state_null(&prompted, "prompt");
+    assert_eq!(
+        prompted.get("submit").and_then(|value| value.as_str()),
+        Some("assumed"),
+        "prompt without submit_confirmation must report submit \"assumed\": {prompted}"
+    );
+
+    // `rebalance` needs a marked window holding an owned pane.
+    let fixture = tiled_fixture(&server, &owned_panes(2), true);
+    let rebalanced = json_of(
+        &server,
+        &["rebalance", "--target", &fixture.window, "--format", "json"],
+        "rebalance",
+    );
+    assert_host_tmux(&rebalanced, "rebalance");
+
+    let killed = json_of(
+        &server,
+        &["kill", "--target", name, "--format", "json"],
+        "kill",
+    );
+    assert_host_tmux(&killed, "kill");
+}
+
+/// Acceptance: `status --format json` outside tmux without `--target` carries `host`
+/// and a null `host_state`.
+#[test]
+fn status_json_outside_tmux_carries_host_and_a_null_host_state() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_outside();
+
+    let status = json_of(
+        &server,
+        &["status", "--format", "json"],
+        "status outside tmux",
+    );
+
+    assert_host_tmux(&status, "status outside tmux");
+    assert_host_state_null(&status, "status outside tmux");
+}
+
+/// Acceptance: `spawn-agent --format json` carries `host`.
+#[cfg(feature = "test-fixtures")]
+#[test]
+fn spawn_agent_json_carries_host() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    let config = fake_tui_agent_config();
+
+    let out = server.cli_env(
+        &["spawn-agent", "tt-fake-tui", "--bare", "--format", "json"],
+        config.xdg(),
+    );
+
+    assert_host_tmux(&json_payload(&out, "spawn-agent"), "spawn-agent");
+}
+
+/// Acceptance: `list --format json` is a top-level array whose every row carries
+/// `host: "tmux"` and `host_state: null`; with no rows it prints `[]`.
+#[test]
+fn list_json_rows_carry_host_and_host_state_and_an_empty_list_is_an_empty_array() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+
+    let empty = server.cli(&["list", "--session", "no-such-session", "--format", "json"]);
+    empty.assert_success("list of a session without panes");
+    assert_eq!(empty.stdout.trim(), "[]");
+
+    server
+        .cli(&launch_args("listed-a", &[]))
+        .assert_success("launch listed-a");
+    server
+        .cli(&launch_args("listed-b", &[]))
+        .assert_success("launch listed-b");
+    let listed = server.cli(&["list", "--all", "--format", "json"]);
+    let rows = json_payload(&listed, "list --all");
+    let rows = rows
+        .as_array()
+        .expect("list JSON must be a top-level array");
+    assert!(rows.len() >= 3, "list --all must show every pane: {rows:?}");
+    for row in rows {
+        assert_host_tmux(row, "list row");
+        assert_host_state_null(row, "list row");
+    }
 }

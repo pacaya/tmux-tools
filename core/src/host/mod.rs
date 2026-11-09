@@ -10,11 +10,14 @@
 //!
 //! The operations are pane-level: create (a split or a new window), list, capture
 //! (screen and history from a mark), send text, send keys, close, read and write the
-//! Pane registration, capabilities, and the layout operations gated by
-//! [`HostCapabilities::tile`]: apply the tiled layout, read window and pane geometry,
-//! read and write Layout intent, and move a pane to another or a new window.
+//! Pane registration, Host state, notify, capabilities, and the layout operations
+//! gated by [`HostCapabilities::tile`]: apply the tiled layout, read window and pane
+//! geometry, read and write Layout intent, and move a pane to another or a new window.
+
+use std::fmt;
 
 use anyhow::Result;
+use serde::Serialize;
 
 use crate::layout::WindowGeometry;
 use crate::names::Registered;
@@ -24,9 +27,89 @@ mod tmux;
 pub use self::tmux::TmuxHost;
 
 /// The terminal program whose panes the tool drives.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Host {
     Tmux,
+}
+
+impl Host {
+    /// The host's name as the CLI reports it: `tmux`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Host::Tmux => "tmux",
+        }
+    }
+}
+
+impl fmt::Display for Host {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+/// The agent state a host itself reports for a pane. A host that reports none gives
+/// `None` (`null` in JSON). Separate from the Pane state `idle | busy | unknown`.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum HostState {
+    Working,
+    Blocked,
+    Done,
+    Idle,
+}
+
+/// What `prompt` knows of its submission (JSON `submit`).
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Submission {
+    /// The host observed the submission or the turn start.
+    Confirmed,
+    /// The host accepted the input but observed no submission within the wait.
+    Accepted,
+    /// The host gives no observation; every host without `submit_confirmation`.
+    Assumed,
+}
+
+/// Whether a desktop notification reached the host's client.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Delivery {
+    /// The notification was handed to the host for its client.
+    Delivered,
+    /// The host has no client to show it (on tmux: the pane's session has no attached
+    /// client).
+    NotDelivered,
+}
+
+/// An optional verb or option invoked on a host whose capabilities lack it. The CLI
+/// prints it as `unsupported: <feature> on <host>` and exits 3.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Unsupported {
+    /// The verb, or the option as written (`--split tile`, `--size`).
+    pub feature: &'static str,
+    pub host: Host,
+}
+
+impl fmt::Display for Unsupported {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "unsupported: {} on {}", self.feature, self.host)
+    }
+}
+
+impl std::error::Error for Unsupported {}
+
+/// `Ok` when `supported`; otherwise the [`Unsupported`] error for `feature` on the
+/// current host.
+pub fn require(supported: bool, feature: &'static str) -> Result<()> {
+    if supported {
+        Ok(())
+    } else {
+        Err(Unsupported {
+            feature,
+            host: current().host(),
+        }
+        .into())
+    }
 }
 
 /// The optional features a Host backend supports.
@@ -49,6 +132,39 @@ pub struct HostCapabilities {
 /// The backend the current invocation drives. Only the tmux backend exists.
 pub fn current() -> &'static dyn HostPort {
     &TmuxHost
+}
+
+/// The environment variable of the test-only capability override: a comma-separated
+/// list of capability names (`native_state`, `submit_confirmation`, `notify`, `tile`,
+/// `rebalance`, `size`) that are false for this invocation. Compiled only with the
+/// `test-fixtures` feature; a build without it ignores the variable.
+#[cfg(feature = "test-fixtures")]
+pub const TEST_CAPABILITIES_OFF: &str = "TMUX_TOOLS_TEST_CAPABILITIES_OFF";
+
+/// `capabilities` with every capability named in [`TEST_CAPABILITIES_OFF`] set false.
+/// An unknown name panics, so a mistyped test fails instead of passing vacuously.
+#[cfg(feature = "test-fixtures")]
+pub(crate) fn with_test_override(mut capabilities: HostCapabilities) -> HostCapabilities {
+    let Ok(names) = std::env::var(TEST_CAPABILITIES_OFF) else {
+        return capabilities;
+    };
+    for name in names
+        .split(',')
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+    {
+        let flag = match name {
+            "native_state" => &mut capabilities.native_state,
+            "submit_confirmation" => &mut capabilities.submit_confirmation,
+            "notify" => &mut capabilities.notify,
+            "tile" => &mut capabilities.tile,
+            "rebalance" => &mut capabilities.rebalance,
+            "size" => &mut capabilities.size,
+            other => panic!("{TEST_CAPABILITIES_OFF}: unknown capability {other:?}"),
+        };
+        *flag = false;
+    }
+    capabilities
 }
 
 /// One field of a Pane registration.
@@ -198,7 +314,7 @@ pub trait HostPort: Sync {
     /// Which host this backend drives.
     fn host(&self) -> Host;
 
-    /// The optional features this backend supports.
+    /// The optional features this backend supports, read on each call.
     fn capabilities(&self) -> HostCapabilities;
 
     /// Whether `error` (or an error it wraps) is a host command that ran and failed, as
@@ -328,6 +444,15 @@ pub trait HostPort: Sync {
     /// The name, agent and cwd registration of every pane in the window of `target`,
     /// as the ownership predicate reads them. Every other field is unset.
     fn window_registrations(&self, target: &str) -> Result<Vec<Registered>>;
+
+    // --- Host state and notify -----------------------------------------------------
+
+    /// The Host state of `pane`; `None` when the host reports none.
+    fn host_state(&self, pane: &str) -> Result<Option<HostState>>;
+
+    /// Show a desktop notification with `title` and `body` for `pane`. Called only on a
+    /// host with [`HostCapabilities::notify`].
+    fn notify(&self, pane: &str, title: &str, body: &str) -> Result<Delivery>;
 
     // --- Layout (gated by `tile`) --------------------------------------------------
 

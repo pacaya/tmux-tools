@@ -114,6 +114,7 @@ fn render_output(
         Format::Json => {
             let name = names::get(pane, names::KEY_NAME)?;
             let mut output = json!({
+                "host": host::current().host(),
                 "target": pane,
                 "name": name,
                 "output": rendered,

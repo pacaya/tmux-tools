@@ -2,12 +2,16 @@ use anyhow::{bail, Result};
 use clap::Args;
 use tmux_tools_core::{
     format::Format,
+    host,
     layout::{self, WindowGuard},
     target,
 };
 
 use crate::{
-    cmd::launch::{concise_window_fields, invoking_cwd, WindowJson},
+    cmd::{
+        hosted,
+        launch::{concise_window_fields, invoking_cwd, WindowJson},
+    },
     util::load_registry_for_floors,
     CommonArgs,
 };
@@ -25,6 +29,9 @@ pub struct RebalanceArgs {
 }
 
 pub fn run(args: &RebalanceArgs) -> Result<()> {
+    // An optional verb: on a host without it, exit 3 before any other step.
+    host::require(host::current().capabilities().rebalance, "rebalance")?;
+
     // Outside tmux a selector-less resolution would pick (and create) the managed
     // session; refuse before target resolution runs.
     if !has_selector(&args.common) && !target::in_tmux() {
@@ -49,7 +56,7 @@ pub fn run(args: &RebalanceArgs) -> Result<()> {
         Format::Concise => println!("rebalanced {}", concise_window_fields(&window)),
         Format::Json => println!(
             "{}",
-            serde_json::to_string(&WindowJson::from_report(&window))?
+            serde_json::to_string(&hosted(WindowJson::from_report(&window)))?
         ),
         Format::Raw => println!("{}", window.window_id),
     }

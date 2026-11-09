@@ -3,11 +3,13 @@ use clap::Args;
 use serde::Serialize;
 use tmux_tools_core::{
     format::Format,
+    host,
     layout::{self, Destination, Landing, Registration, Split, WindowReport},
     names,
 };
 
 use crate::{
+    cmd::hosted,
     util::{load_registry_for_floors, rfc3339_utc_now},
     CommonArgs,
 };
@@ -102,6 +104,7 @@ pub(crate) fn warn_if_unmeasured(landing: &Landing) {
 }
 
 pub fn run(args: &LaunchArgs) -> Result<()> {
+    require_placement_options(args.split, args.size.is_some())?;
     let cmd_for_tmux = if args.bare {
         args.cmd.clone()
     } else {
@@ -128,6 +131,19 @@ pub fn run(args: &LaunchArgs) -> Result<()> {
     )?;
 
     render_output(args, &landing, &launched_at)
+}
+
+/// The optional placement options of the spawning verbs: `--split tile` needs `tile`
+/// and `--size` needs `size`. On a host without one, exit 3 before any other step.
+pub(crate) fn require_placement_options(split: Option<Split>, size: bool) -> Result<()> {
+    let capabilities = host::current().capabilities();
+    if split == Some(Split::Tile) {
+        host::require(capabilities.tile, "--split tile")?;
+    }
+    if size {
+        host::require(capabilities.size, "--size")?;
+    }
+    Ok(())
 }
 
 /// The placement destination the spawning verbs' shared flags ask for.
@@ -190,7 +206,7 @@ fn render_output(args: &LaunchArgs, landing: &Landing, launched_at: &str) -> Res
                 relocated: landing.relocated,
                 window: WindowJson::of(landing),
             };
-            println!("{}", serde_json::to_string(&output)?);
+            println!("{}", serde_json::to_string(&hosted(&output))?);
         }
     }
 

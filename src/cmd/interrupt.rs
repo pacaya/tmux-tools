@@ -10,7 +10,7 @@ use tmux_tools_core::{
 
 use crate::{
     cmd::{
-        safety,
+        hosted, safety,
         wait_idle::{compile_patterns, interrupt_surface_for, InterruptSurface},
     },
     CommonArgs,
@@ -122,7 +122,7 @@ pub fn run(args: &InterruptArgs) -> Result<()> {
         Format::Concise => println!("sent {key} to {pane}"),
         Format::Json => {
             let output = InterruptJson { target: &pane, key };
-            println!("{}", serde_json::to_string(&output)?);
+            println!("{}", serde_json::to_string(&hosted(&output))?);
         }
         Format::Raw => println!(),
     }
@@ -194,7 +194,7 @@ fn refuse(format: Format, pane: &str, key: &str, message: String) -> Result<()> 
             key,
             error: &message,
         };
-        println!("{}", serde_json::to_string(&output)?);
+        println!("{}", serde_json::to_string(&hosted(&output))?);
     }
     Err(anyhow!(message))
 }
