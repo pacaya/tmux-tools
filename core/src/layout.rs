@@ -3,7 +3,7 @@
 //! This module is the single owner of placement. [`place`] resolves where a new
 //! pane goes, snapshots the ownership of the window it will split, creates it (split
 //! or new window), writes its whole registration, retiles the window when the
-//! snapshot made it eligible (or clears [`TILED_MARKER`] for explicit sizing), and
+//! snapshot made it eligible (or clears the Layout intent record for explicit sizing), and
 //! then measures the window it landed in. When that tiled window is below its
 //! effective floor, the new pane is relocated by trial (see [`place`]). It returns a
 //! [`Landing`]: the window the pane finally landed in. When the new pane no longer
@@ -13,7 +13,7 @@
 //! [`rebalance`] retiles a window and returns its measured geometry.
 //!
 //! It owns the window guard and kill-time reclamation: [`window_guard`] answers
-//! whether the tool may rearrange a window (it carries [`TILED_MARKER`] and holds a
+//! whether the tool may rearrange a window (it carries the Layout intent record and holds a
 //! pane this invocation owns), and [`remove_pane`] destroys a pane and, when that
 //! guard held before the destruction, retiles its window in the same tmux command
 //! sequence.
@@ -25,12 +25,12 @@
 //! only the pane a tiled placement creates is relocated; nothing here refuses a pane
 //! or repairs a window that is already below its floor.
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, Result};
 use std::env;
 
 use crate::agents::Registry;
-use crate::format::non_empty;
-use crate::{names, target, tmux};
+use crate::host::{self, SplitDirection, WindowHome};
+use crate::{names, target};
 
 /// The `--split` flag of the spawning verbs.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, clap::ValueEnum)]
@@ -61,25 +61,19 @@ pub enum Layout {
     /// window that did not is split horizontally with the new pane at
     /// [`FIRST_PANE_PERCENT`] and left as it is.
     Tile,
-    /// Explicit sizing intent: `tmux split-window` with the given direction flag and
-    /// optional size percentage for the new pane, no retile, and `@tt-tiled` cleared
-    /// on the window.
+    /// Explicit sizing intent: a split in the given direction with an optional size
+    /// percentage for the new pane, no retile, and Layout intent cleared on the window.
     Split {
-        direction: &'static str,
+        direction: SplitDirection,
         size: Option<u32>,
     },
-    /// Use `tmux new-window`.
+    /// A new window.
     NewWindow,
 }
 
 /// The width a tile placement gives the new pane when the window it splits held no
 /// owned pane: the first pane this tool puts into a window is placed as before tiling.
 pub const FIRST_PANE_PERCENT: u32 = 70;
-
-/// The `@tt-tiled` window option: present on a window this tool tiled, unset when a
-/// placement with explicit sizing intent targets it. It records what the tool did; it
-/// never gates placement.
-pub const TILED_MARKER: &str = "@tt-tiled";
 
 impl Layout {
     /// Whether this layout creates the pane by splitting a pane (as opposed to a new
@@ -130,11 +124,11 @@ pub fn resolve_layout(
             Layout::Tile
         }
         Some(Split::H) => Layout::Split {
-            direction: "-h",
+            direction: SplitDirection::Horizontal,
             size,
         },
         Some(Split::V) => Layout::Split {
-            direction: "-v",
+            direction: SplitDirection::Vertical,
             size,
         },
         Some(Split::Window) => Layout::NewWindow,
@@ -144,7 +138,7 @@ pub fn resolve_layout(
                 Layout::NewWindow
             } else if size.is_some() {
                 Layout::Split {
-                    direction: "-h",
+                    direction: SplitDirection::Horizontal,
                     size,
                 }
             } else {
@@ -359,10 +353,10 @@ fn apply_new_pane_registration(
 /// - [`Layout::Tile`]: before splitting, the target window's panes are snapshotted and
 ///   the window is eligible when the snapshot holds a pane [`names::pane_is_owned`]
 ///   reports as ours. An eligible window is split, then retiled with tmux's `tiled`
-///   layout and marked with [`TILED_MARKER`]. A window that is not eligible gets the
+///   layout and its Layout intent recorded. A window that is not eligible gets the
 ///   [`FIRST_PANE_PERCENT`]% horizontal split, no retile, and no marker change.
 /// - [`Layout::Split`] (explicit sizing intent): the split as asked, no retile, and
-///   [`TILED_MARKER`] unset on the window.
+///   the Layout intent record unset on the window.
 ///
 /// A pane created in a new window gets no layout step: the window holds only it.
 ///
@@ -409,21 +403,19 @@ pub fn place(
         _ => false,
     };
 
-    let tmux_args = match &creation {
+    let pane_id = match &creation {
         Creation::Split(target) => {
             let (direction, size) = match layout {
                 Layout::Split { direction, size } => (direction, size),
-                Layout::Tile if tile => ("-h", None),
-                Layout::Tile | Layout::NewWindow => ("-h", Some(FIRST_PANE_PERCENT)),
+                Layout::Tile if tile => (SplitDirection::Horizontal, None),
+                Layout::Tile | Layout::NewWindow => {
+                    (SplitDirection::Horizontal, Some(FIRST_PANE_PERCENT))
+                }
             };
-            split_window_args(command, direction, size, Some(target))
+            host::current().create_split(target, direction, size, command)?
         }
-        Creation::NewWindow(session_id) => new_window_args(command, Some(session_id)),
+        Creation::NewWindow(session_id) => host::current().create_window(session_id, command)?,
     };
-    let pane_id = tmux::run_checked_owned(&tmux_args)?.trim().to_owned();
-    if pane_id.is_empty() {
-        return Err(anyhow!("tmux launch command returned an empty pane id"));
-    }
 
     // Chosen before any write, so the landing reports it even when the pane is gone
     // before registration writes it.
@@ -473,7 +465,7 @@ struct Relocation {
 /// trial: nothing moved, and the search goes on.
 ///
 /// When no candidate keeps the pane, `break-pane -d` moves it into a new window of the
-/// origin's session, which is tiled and marked [`TILED_MARKER`]. A failed `break-pane`
+/// origin's session, which is tiled and records Layout intent. A failed `break-pane`
 /// while the pane still exists leaves it where it is (the origin, or the last rejected
 /// candidate); that window is retiled and reported.
 ///
@@ -556,10 +548,9 @@ fn landing_report(
     agent: Option<&AgentRegistration<'_>>,
     registry: &Registry,
 ) -> Result<Option<WindowReport>> {
-    let Some(output) = unless_pane_gone(pane_id, read_measurement(pane_id))? else {
+    let Some(mut geometry) = unless_pane_gone(pane_id, measure(pane_id))? else {
         return Ok(None);
     };
-    let mut geometry = parse_measurement(pane_id, &output)?;
     apply_new_pane_registration(&mut geometry.panes, pane_id, agent);
     Ok(Some(geometry.report(registry)))
 }
@@ -580,8 +571,8 @@ enum MoveStep {
 fn move_step(pane_id: &str, step: Result<()>) -> Result<MoveStep> {
     match step {
         Ok(()) => Ok(MoveStep::Moved),
-        Err(error) if error.downcast_ref::<tmux::CommandFailed>().is_some() => {
-            match pane_exists(pane_id) {
+        Err(error) if host::current().is_command_failure(&error) => {
+            match host::current().pane_exists(pane_id) {
                 Ok(true) => Ok(MoveStep::Refused),
                 Ok(false) => Ok(MoveStep::PaneGone),
                 Err(_) => Err(error),
@@ -591,34 +582,24 @@ fn move_step(pane_id: &str, step: Result<()>) -> Result<MoveStep> {
     }
 }
 
-/// The `#{session_id}` of the session `target` is in.
+/// The session id of the session `target` is in.
 fn session_of(target: &str) -> Result<String> {
-    let session = tmux::run_checked(&["display-message", "-p", "-t", target, "#{session_id}"])
-        .with_context(|| format!("cannot read the session of {target}"))?
-        .trim()
-        .to_owned();
-    if session.is_empty() {
-        return Err(anyhow!("tmux reported no session id for {target}"));
-    }
-    Ok(session)
+    host::current().session_of(target)
 }
 
 /// What the window guard reads about every window of `session` (a session id), each by
 /// [`read_window_state`].
 fn session_windows(session: &str) -> Result<Vec<WindowState>> {
-    let output = tmux::run_checked(&["list-windows", "-t", session, "-F", "#{window_id}"])
-        .with_context(|| format!("cannot list the windows of session {session}"))?;
-    output
-        .lines()
-        .map(str::trim)
-        .filter(|window_id| !window_id.is_empty())
-        .map(read_window_state)
+    host::current()
+        .session_windows(session)?
+        .iter()
+        .map(|window_id| read_window_state(window_id))
         .collect()
 }
 
 /// The overflow candidates among `windows` (one session's): every window other than
 /// `origin` on which the window guard holds against `current_cwd` — it carries
-/// [`TILED_MARKER`] and holds a pane this invocation owns — in ascending window index.
+/// the Layout intent record and holds a pane this invocation owns — in ascending window index.
 fn overflow_candidates<'a>(
     windows: &'a [WindowState],
     origin: &str,
@@ -635,21 +616,16 @@ fn overflow_candidates<'a>(
         .collect()
 }
 
-/// `join-pane -d` `pane_id` into `window_id`, splitting its active pane; the window is
-/// not selected.
+/// Move `pane_id` into `window_id`, splitting its active pane; the window is not
+/// selected.
 fn join_pane(pane_id: &str, window_id: &str) -> Result<()> {
-    tmux::run_checked(&["join-pane", "-d", "-s", pane_id, "-t", window_id])
-        .with_context(|| format!("cannot join pane {pane_id} into window {window_id}"))?;
-    Ok(())
+    host::current().join_pane(pane_id, window_id)
 }
 
-/// `break-pane -d` `pane_id` into a new window of `session` (a session id); the window
-/// is not selected.
+/// Move `pane_id` into a new window of `session` (a session id); the window is not
+/// selected.
 fn break_pane(pane_id: &str, session: &str) -> Result<()> {
-    let destination = format!("{session}:");
-    tmux::run_checked(&["break-pane", "-d", "-s", pane_id, "-t", &destination])
-        .with_context(|| format!("cannot break pane {pane_id} into a new window of {session}"))?;
-    Ok(())
+    host::current().break_pane(pane_id, session)
 }
 
 /// The placement steps after the split: write the registration on `pane_id`, apply
@@ -681,36 +657,28 @@ fn measured_window(
             return Ok(None);
         }
     }
-    let Some(output) = unless_pane_gone(pane_id, read_measurement(pane_id))? else {
-        return Ok(None);
-    };
-    parse_measurement(pane_id, &output).map(Some)
+    unless_pane_gone(pane_id, measure(pane_id))
 }
 
-/// `Some` of a placement step's value; `None` when the step failed on a tmux call that
-/// exited non-zero ([`tmux::CommandFailed`]) and `pane_id` is no longer on the server.
+/// `Some` of a placement step's value; `None` when the step failed on a host command
+/// that ran and failed ([`crate::host::HostPort::is_command_failure`]) and `pane_id` is no longer on
+/// the host.
 /// Any other failure — including one whose pane still exists, or whose existence
 /// cannot be read — is the step's own error.
 ///
-/// "Gone" is judged by the server's pane list rather than by tmux's error text, which
-/// differs per command (`no such pane`, `no such window`, `can't find pane`).
+/// "Gone" is judged by the host's pane list rather than by the host's error text, which
+/// differs per command.
 fn unless_pane_gone<T>(pane_id: &str, step: Result<T>) -> Result<Option<T>> {
     match step {
         Ok(value) => Ok(Some(value)),
-        Err(error) if error.downcast_ref::<tmux::CommandFailed>().is_some() => {
-            match pane_exists(pane_id) {
+        Err(error) if host::current().is_command_failure(&error) => {
+            match host::current().pane_exists(pane_id) {
                 Ok(false) => Ok(None),
                 Ok(true) | Err(_) => Err(error),
             }
         }
         Err(error) => Err(error),
     }
-}
-
-/// Whether the server lists `pane_id` among all its panes.
-fn pane_exists(pane_id: &str) -> Result<bool> {
-    let output = tmux::run_checked(&["list-panes", "-a", "-F", "#{pane_id}"])?;
-    Ok(output.lines().any(|line| line.trim() == pane_id))
 }
 
 /// Write the whole registration on `pane_id`, with `name` (from
@@ -743,32 +711,27 @@ fn register(pane_id: &str, name: &str, registration: &Registration<'_>) -> Resul
 /// `tiled` layout, then measure it.
 ///
 /// This applies the layout only: it neither checks ownership nor reads or writes
-/// [`TILED_MARKER`]; callers apply their own guards.
+/// the Layout intent record; callers apply their own guards.
 pub fn rebalance(target: &str) -> Result<WindowGeometry> {
     retile(target)?;
     measure(target)
 }
 
-/// tmux's layout name for the tiled arrangement this tool applies.
-const TILED_LAYOUT: &str = "tiled";
-
-/// Apply tmux's `tiled` layout to the window that `target` is in.
+/// Apply the tiled layout to the window that `target` is in.
 fn retile(target: &str) -> Result<()> {
-    tmux::run_checked(&["select-layout", "-t", target, TILED_LAYOUT])
-        .with_context(|| format!("cannot retile the window of {target}"))?;
-    Ok(())
+    host::current().apply_tiled_layout(target)
 }
 
 /// The window guard's answer: whether the tool may rearrange a window.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WindowGuard {
-    /// The window carries [`TILED_MARKER`] and holds a pane [`names::pane_is_owned`]
+    /// The window carries the Layout intent record and holds a pane [`names::pane_is_owned`]
     /// reports as ours.
     Holds,
-    /// The window does not carry [`TILED_MARKER`]: the tool did not arrange it. This is
+    /// The window does not carry the Layout intent record: the tool did not arrange it. This is
     /// the answer whenever the marker is absent, whatever the window's ownership.
     MarkerAbsent,
-    /// The window carries [`TILED_MARKER`] but holds no pane this invocation owns.
+    /// The window carries the Layout intent record but holds no pane this invocation owns.
     NoOwnedPane,
 }
 
@@ -780,7 +743,7 @@ impl WindowGuard {
 }
 
 /// Evaluate the window guard on the window that `target` (a pane or window target)
-/// is in: read its [`TILED_MARKER`] and apply [`names::pane_is_owned`], judged
+/// is in: read its Layout intent record and apply [`names::pane_is_owned`], judged
 /// against `current_cwd`, to every pane of the window.
 pub fn window_guard(target: &str, current_cwd: Option<&str>) -> Result<WindowGuard> {
     Ok(read_window_state(target)?.guard(current_cwd))
@@ -808,18 +771,8 @@ pub fn remove_pane(pane_id: &str, current_cwd: Option<&str>) -> Result<Removal> 
     let state = read_window_state(pane_id)?;
     let guard = state.guard(current_cwd);
     let retiled = guard.holds() && state.panes.len() > 1;
-    tmux::run_checked_owned(&removal_args(pane_id, &state.window_id, retiled))?;
+    host::current().close_pane(pane_id, retiled.then_some(state.window_id.as_str()))?;
     Ok(Removal { guard, retiled })
-}
-
-/// The tmux arguments that destroy `pane_id` and, when `retile` is set, retile
-/// `window_id` in the same command sequence.
-fn removal_args(pane_id: &str, window_id: &str, retile: bool) -> Vec<String> {
-    let mut args = vec!["kill-pane", "-t", pane_id];
-    if retile {
-        args.extend([";", "select-layout", "-t", window_id, TILED_LAYOUT]);
-    }
-    args.into_iter().map(str::to_owned).collect()
 }
 
 /// What the window guard reads about one window.
@@ -828,7 +781,7 @@ struct WindowState {
     window_id: String,
     /// The window's index in its session, the order of the overflow search.
     index: u32,
-    /// Whether the window carries [`TILED_MARKER`].
+    /// Whether the window carries the Layout intent record.
     marked: bool,
     /// The registration of every pane in the window, as the ownership predicate reads it.
     panes: Vec<names::Registered>,
@@ -858,15 +811,12 @@ fn guard_verdict(
     }
 }
 
-/// Read the window that `target` is in: its id and index, then its marker and its
+/// Read the window that `target` is in: its id and index, then its Layout intent and its
 /// panes' registrations by that id.
 fn read_window_state(target: &str) -> Result<WindowState> {
-    let format = format!("#{{window_id}}{FIELD_SEP}#{{window_index}}");
-    let output = tmux::run_checked(&["display-message", "-p", "-t", target, &format])
-        .with_context(|| format!("cannot read the window of {target}"))?;
-    let (window_id, index) = parse_window_identity(&output)
-        .with_context(|| format!("cannot read the window of {target}"))?;
-    let marked = tiled_marker_present(&window_id)?;
+    let host = host::current();
+    let (window_id, index) = host.window_identity(target)?;
+    let marked = host.read_layout_intent(&window_id)?;
     let panes = read_ownership_snapshot(&window_id)?;
     Ok(WindowState {
         window_id,
@@ -876,46 +826,15 @@ fn read_window_state(target: &str) -> Result<WindowState> {
     })
 }
 
-/// Parse a window's id and index, separated by [`FIELD_SEP`].
-fn parse_window_identity(output: &str) -> Result<(String, u32)> {
-    let line = output.trim_end_matches(['\r', '\n']);
-    let Some((window_id, index)) = line.split_once(FIELD_SEP) else {
-        return Err(anyhow!("unexpected tmux window line {line:?}"));
-    };
-    let window_id = window_id.trim();
-    if window_id.is_empty() {
-        return Err(anyhow!("tmux reported no window id in {line:?}"));
-    }
-    let index = index
-        .trim()
-        .parse()
-        .map_err(|_| anyhow!("unexpected window index {index:?}"))?;
-    Ok((window_id.to_owned(), index))
-}
-
-/// Whether the window that `target` is in carries [`TILED_MARKER`] itself (a global
-/// value is not the window's record). Presence is the test, whatever the value.
-fn tiled_marker_present(target: &str) -> Result<bool> {
-    let output = tmux::run_checked(&["show-options", "-w", "-q", "-t", target, TILED_MARKER])
-        .with_context(|| format!("cannot read the tiled marker of the window of {target}"))?;
-    Ok(output
-        .lines()
-        .any(|line| line.split_whitespace().next() == Some(TILED_MARKER)))
-}
-
-/// Set [`TILED_MARKER`] on the window that `target` is in.
+/// Record Layout intent "tiled" on the window that `target` is in.
 fn set_tiled_marker(target: &str) -> Result<()> {
-    tmux::run_checked(&["set-option", "-w", "-t", target, TILED_MARKER, "1"])
-        .with_context(|| format!("cannot mark the window of {target} tiled"))?;
-    Ok(())
+    host::current().write_layout_intent(target, true)
 }
 
-/// Unset [`TILED_MARKER`] on the window that `target` is in. Unsetting an absent
-/// option succeeds, so "cleared" and "never set" are one state.
+/// Clear Layout intent on the window that `target` is in. Clearing an absent record
+/// succeeds, so "cleared" and "never set" are one state.
 fn clear_tiled_marker(target: &str) -> Result<()> {
-    tmux::run_checked(&["set-option", "-w", "-u", "-t", target, TILED_MARKER])
-        .with_context(|| format!("cannot clear the tiled marker of the window of {target}"))?;
-    Ok(())
+    host::current().write_layout_intent(target, false)
 }
 
 /// Whether the window that `target` is in holds a pane [`names::pane_is_owned`]
@@ -929,117 +848,13 @@ fn window_has_owned_pane(target: &str, current_cwd: Option<&str>) -> Result<bool
 /// The registration of every pane in the window that `target` is in, as the
 /// ownership predicate reads it.
 fn read_ownership_snapshot(target: &str) -> Result<Vec<names::Registered>> {
-    let format = [names::KEY_NAME, names::KEY_AGENT, names::KEY_CWD]
-        .map(|key| format!("#{{{key}}}"))
-        .join(&FIELD_SEP.to_string());
-    let output = tmux::run_checked(&["list-panes", "-t", target, "-F", &format])
-        .with_context(|| format!("cannot read the panes of the window of {target}"))?;
-    parse_ownership_snapshot(&output)
+    host::current().window_registrations(target)
 }
-
-/// Parse ownership snapshot lines — `@tt-name`, `@tt-agent` and `@tt-cwd`, separated
-/// by [`FIELD_SEP`] — one per pane, into the registrations the ownership predicate
-/// reads. Every other registration field is left unset.
-fn parse_ownership_snapshot(output: &str) -> Result<Vec<names::Registered>> {
-    output
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .map(|line| {
-            let fields: Vec<&str> = line.trim_end_matches('\r').split(FIELD_SEP).collect();
-            let [name, agent, cwd] = fields[..] else {
-                return Err(anyhow!("unexpected tmux pane registration line {line:?}"));
-            };
-            // Trimmed as `names::read` trims, so both callers of the predicate see the
-            // same registration.
-            Ok(names::Registered {
-                name: non_empty(name.trim()),
-                agent: non_empty(agent.trim()),
-                access: None,
-                launched_at: None,
-                cwd: non_empty(cwd.trim()),
-                surface: None,
-                surface_unvalidated: false,
-            })
-        })
-        .collect()
-}
-
-/// Separates the fields of a measurement line. Registration values are user strings
-/// and may hold tabs; the unit separator does not occur in them.
-const FIELD_SEP: char = '\x1f';
 
 /// Every pane of the window `pane_id` (a pane or window target) is in, with its size
-/// and registration, as tmux reports them now.
+/// and registration, as the host reports them now.
 fn measure(pane_id: &str) -> Result<WindowGeometry> {
-    parse_measurement(pane_id, &read_measurement(pane_id)?)
-}
-
-/// The measurement's tmux call: the raw lines [`parse_measurement`] reads.
-fn read_measurement(pane_id: &str) -> Result<String> {
-    let format = [
-        "#{window_id}".to_owned(),
-        "#{pane_id}".to_owned(),
-        "#{pane_width}".to_owned(),
-        "#{pane_height}".to_owned(),
-        format!("#{{{}}}", names::KEY_AGENT),
-        format!("#{{{}}}", names::KEY_SURFACE),
-    ]
-    .join(&FIELD_SEP.to_string());
-    // `list-panes -t <pane>` lists the panes of that pane's window.
-    tmux::run_checked(&["list-panes", "-t", pane_id, "-F", &format])
-        .with_context(|| format!("cannot measure the window of pane {pane_id}"))
-}
-
-/// Parse the output of [`read_measurement`] for `pane_id`.
-fn parse_measurement(pane_id: &str, output: &str) -> Result<WindowGeometry> {
-    parse_window_geometry(output)
-        .with_context(|| format!("cannot measure the window of pane {pane_id}"))
-}
-
-/// Parse measurement lines — window id, pane id, width, height, `@tt-agent` and
-/// `@tt-surface`, separated by [`FIELD_SEP`] — one per pane of one window.
-fn parse_window_geometry(output: &str) -> Result<WindowGeometry> {
-    let mut window_id: Option<&str> = None;
-    let mut panes = Vec::new();
-    for line in output.lines().filter(|line| !line.trim().is_empty()) {
-        let fields: Vec<&str> = line.trim_end_matches('\r').split(FIELD_SEP).collect();
-        let [window, pane, cols, rows, agent, surface] = fields[..] else {
-            return Err(anyhow!("unexpected tmux pane geometry line {line:?}"));
-        };
-        if window.is_empty() {
-            return Err(anyhow!("tmux reported no window id in {line:?}"));
-        }
-        if pane.is_empty() {
-            return Err(anyhow!("tmux reported no pane id in {line:?}"));
-        }
-        match window_id {
-            None => window_id = Some(window),
-            Some(seen) if seen != window => {
-                return Err(anyhow!(
-                    "tmux listed panes of two windows ({seen}, {window})"
-                ))
-            }
-            Some(_) => {}
-        }
-        let cols: u32 = cols
-            .parse()
-            .map_err(|_| anyhow!("unexpected pane width {cols:?}"))?;
-        let rows: u32 = rows
-            .parse()
-            .map_err(|_| anyhow!("unexpected pane height {rows:?}"))?;
-        panes.push(PaneGeometry {
-            pane_id: pane.to_owned(),
-            cols,
-            rows,
-            agent: non_empty(agent),
-            surface: non_empty(surface),
-        });
-    }
-    let window_id = window_id.ok_or_else(|| anyhow!("tmux listed no panes"))?;
-    Ok(WindowGeometry {
-        window_id: window_id.to_owned(),
-        panes,
-    })
+    host::current().window_geometry(pane_id)
 }
 
 /// Resolved tmux target for pane creation.
@@ -1070,52 +885,26 @@ fn resolve_launch_target(
         if split {
             return Ok(Some(LaunchTarget::SplitPane(pane_id)));
         }
-        let session_id = destination_session_id(&pane_id, &format!("target pane {pane_id}"))?;
+        let session_id = host::current().new_window_session(WindowHome::TargetPane(&pane_id))?;
         return Ok(Some(LaunchTarget::WindowScope(session_id)));
     }
 
     if session.is_some() || window.is_some() {
         if split {
-            return Ok(Some(LaunchTarget::WindowScope(target::scoped_target(
-                session, window,
-            ))));
+            return Ok(Some(LaunchTarget::WindowScope(
+                host::current().scope_target(session, window),
+            )));
         }
         // A new window is placed in the scoped session; `--window` names no index for it.
-        let (scope, source) = match session {
-            Some(session) => (format!("{session}:"), format!("session {session:?}")),
-            None => (
-                target::managed_session_pane_target(),
-                format!("managed session {:?}", target::MANAGED_SESSION),
-            ),
+        let home = match session {
+            Some(session) => WindowHome::Session(session),
+            None => WindowHome::ManagedSession,
         };
-        let session_id = destination_session_id(&scope, &source)?;
+        let session_id = host::current().new_window_session(home)?;
         return Ok(Some(LaunchTarget::WindowScope(session_id)));
     }
 
     Ok(None)
-}
-
-/// The stable `#{session_id}` of the session that `pane_target` resolves to: the
-/// destination of a new-window placement. `new-window -t` accepts neither a pane id
-/// (tmux: `can't specify pane here`) nor a bare session name (tmux reads a numeric
-/// name such as `0` as a window index), so every new-window placement targets the
-/// session id, as the outside-tmux path does. `source` describes `pane_target` for
-/// the error.
-fn destination_session_id(pane_target: &str, source: &str) -> Result<String> {
-    let failed = || {
-        format!("new-window placement failed: cannot resolve the destination session of {source}")
-    };
-    let output = tmux::run(&["display-message", "-p", "-t", pane_target, "#{session_id}"])
-        .with_context(failed)?;
-    let session_id = output.stdout.trim();
-    if output.exit_code != 0 || session_id.is_empty() {
-        let reason = match output.stderr.trim() {
-            "" => "tmux reported no session id",
-            stderr => stderr,
-        };
-        return Err(anyhow!("{}: {reason}", failed()));
-    }
-    Ok(session_id.to_owned())
 }
 
 /// How the pane is created: every destination path of the spawning verbs resolves to
@@ -1147,20 +936,18 @@ fn resolve_creation(target: Option<LaunchTarget>, split: bool, in_tmux: bool) ->
             Creation::NewWindow(scope)
         }),
         None if in_tmux => {
-            // Pin the target to the calling pane via $TMUX_PANE. Without
-            // an explicit `-t`, tmux operates on the most-recently-active
-            // pane on the server, which races when other sessions are
-            // opened concurrently — the new pane lands in the wrong
-            // session.
+            // Pin the target to the calling pane via $TMUX_PANE. Without an
+            // explicit target the host acts on the most-recently-active pane
+            // on the server, which races when other sessions are opened
+            // concurrently — the new pane lands in the wrong session.
             let calling = target::calling_pane_id()
                 .ok_or_else(|| anyhow!("$TMUX is set but no calling pane id is available"))?;
             if split {
                 Ok(Creation::Split(calling))
             } else {
-                let source = format!("calling pane {calling}");
-                Ok(Creation::NewWindow(destination_session_id(
-                    &calling, &source,
-                )?))
+                Ok(Creation::NewWindow(
+                    host::current().new_window_session(WindowHome::CallingPane(&calling))?,
+                ))
             }
         }
         // Outside tmux: ensure the managed session exists, then add a fresh
@@ -1168,209 +955,10 @@ fn resolve_creation(target: Option<LaunchTarget>, split: bool, in_tmux: bool) ->
         // history limit before the command's window exists, so the command's
         // first line survives scrolling. The window is created by the session's
         // stable id, not by name, so it cannot land in a replacement session.
-        None => Ok(Creation::NewWindow(ensure_managed_session_atomic()?)),
+        None => Ok(Creation::NewWindow(
+            host::current().ensure_managed_session()?,
+        )),
     }
-}
-
-/// The history depth the spawning verbs give a session they create, so `prompt`
-/// can read a completed turn back out of scrollback even after it scrolls off screen.
-/// tmux's default is 2000. Cost is roughly 70 bytes per stored line (see README).
-pub const DEFAULT_HISTORY_LIMIT: u32 = 50_000;
-
-fn split_window_args(
-    cmd: &str,
-    split: &str,
-    size: Option<u32>,
-    target: Option<&str>,
-) -> Vec<String> {
-    let mut tmux_args = vec!["split-window".to_owned(), split.to_owned()];
-
-    if let Some(target) = target {
-        tmux_args.push("-t".to_owned());
-        tmux_args.push(target.to_owned());
-    }
-
-    if let Some(size) = size {
-        tmux_args.push("-p".to_owned());
-        tmux_args.push(size.to_string());
-    }
-
-    tmux_args.push("-P".to_owned());
-    tmux_args.push("-F".to_owned());
-    tmux_args.push("#{pane_id}".to_owned());
-    tmux_args.push(cmd.to_owned());
-    tmux_args
-}
-
-fn new_window_args(cmd: &str, target: Option<&str>) -> Vec<String> {
-    let mut tmux_args = vec!["new-window".to_owned()];
-    if let Some(target) = target {
-        tmux_args.push("-t".to_owned());
-        tmux_args.push(target.to_owned());
-    }
-    tmux_args.push("-P".to_owned());
-    tmux_args.push("-F".to_owned());
-    tmux_args.push("#{pane_id}".to_owned());
-    tmux_args.push(cmd.to_owned());
-    tmux_args
-}
-
-/// Ensure the managed `tmux-tools` session exists, tolerating concurrent callers, and
-/// return its stable `#{session_id}`.
-///
-/// We do *not* use `tmux new-session -d -A`: when the session already exists,
-/// `-A` falls through to `attach-session`, which requires a controlling
-/// terminal and fails with "open terminal failed: not a terminal" for any
-/// caller without a TTY (e.g. cargo test spawning the binary with piped
-/// stdio).
-///
-/// The managed session is always resolved by **exact** name (`=tmux-tools`), so a stray
-/// `tmux-tools-*` session can never be mistaken for it. A created session is built under
-/// a private, collision-proof name that does not begin with the managed name, and its
-/// stable id is used to raise `history-limit` and then to rename it to `tmux-tools`. Two
-/// things follow. The option is targeted by id, so it can never land on a same-named
-/// session another client created, and never on the caller's session (an untargeted
-/// `set-option` resolves against the caller's `TMUX` context). And the session is
-/// unreachable by its managed name until the limit is set, so no concurrent client can
-/// open a pane in it under the old limit. If another caller publishes first, this private
-/// session is a redundant orphan: it is killed and the present session is adopted.
-fn ensure_managed_session_atomic() -> Result<String> {
-    if let Some(id) = managed_session_id()? {
-        return Ok(id);
-    }
-
-    let private = private_session_name();
-    let created = tmux::run(&[
-        "new-session",
-        "-d",
-        "-s",
-        &private,
-        "-P",
-        "-F",
-        "#{session_id}",
-    ])?;
-    if created.exit_code != 0 {
-        // Another caller may have created and published the managed session first.
-        if let Some(id) = managed_session_id()? {
-            return Ok(id);
-        }
-        return Err(anyhow!(
-            "tmux new-session -d -s {private} failed (exit {}): {}",
-            created.exit_code,
-            created.stderr.trim()
-        ));
-    }
-
-    let session_id = created.stdout.trim().to_owned();
-    if session_id.is_empty() {
-        let _ = tmux::run(&["kill-session", "-t", &private]);
-        return Err(anyhow!(
-            "tmux new-session -d -s {private} returned no session id"
-        ));
-    }
-
-    // From here on, any exit that does not publish the session must remove it: this guard
-    // kills the private session on `?` (spawn failure or timeout) as well as on the
-    // explicit error paths below.
-    let pending = PendingSession::new(session_id);
-
-    // `history-limit` is a session option (it cannot be set per pane) and new windows
-    // inherit it, so it must be set before the command's window exists.
-    let limit = DEFAULT_HISTORY_LIMIT.to_string();
-    let set = tmux::run(&["set-option", "-t", pending.id(), "history-limit", &limit])?;
-    if set.exit_code != 0 {
-        return Err(anyhow!(
-            "tmux set-option -t {} history-limit failed (exit {}): {}",
-            pending.id(),
-            set.exit_code,
-            set.stderr.trim()
-        ));
-    }
-
-    let renamed = tmux::run(&[
-        "rename-session",
-        "-t",
-        pending.id(),
-        target::MANAGED_SESSION,
-    ])?;
-    if renamed.exit_code == 0 {
-        // Publish: the id now names the managed session, so the guard must not kill it.
-        let id = pending.id().to_owned();
-        pending.disarm();
-        return Ok(id);
-    }
-
-    // The rename lost a race with another publisher, or the managed name is otherwise
-    // unavailable: remove the private session and adopt the session now present.
-    let private_id = pending.id().to_owned();
-    let _ = tmux::run(&["kill-session", "-t", &private_id]);
-    pending.disarm();
-    if let Some(id) = managed_session_id()? {
-        return Ok(id);
-    }
-    Err(anyhow!(
-        "tmux rename-session -t {private_id} {} failed (exit {}): {}",
-        target::MANAGED_SESSION,
-        renamed.exit_code,
-        renamed.stderr.trim()
-    ))
-}
-
-/// The managed session's stable `#{session_id}`, resolved by exact name, or `None` when no
-/// session carries that exact name. A bare name would prefix-match a `tmux-tools-*`
-/// session, so every lookup uses `=tmux-tools` (pane-targeting commands need the `:`).
-fn managed_session_id() -> Result<Option<String>> {
-    let session_target = target::managed_session_target();
-    if tmux::run(&["has-session", "-t", &session_target])?.exit_code != 0 {
-        return Ok(None);
-    }
-    let pane_target = target::managed_session_pane_target();
-    let id = tmux::run_checked(&["display-message", "-p", "-t", &pane_target, "#{session_id}"])?;
-    let id = id.trim().to_owned();
-    if id.is_empty() {
-        return Err(anyhow!(
-            "tmux returned an empty session id for the managed session"
-        ));
-    }
-    Ok(Some(id))
-}
-
-/// A created-but-unpublished managed session that removes itself on drop. It is disarmed
-/// only once the session has been published under the managed name or already removed.
-struct PendingSession {
-    id: Option<String>,
-}
-
-impl PendingSession {
-    fn new(id: String) -> Self {
-        Self { id: Some(id) }
-    }
-
-    fn id(&self) -> &str {
-        self.id.as_deref().unwrap_or_default()
-    }
-
-    fn disarm(mut self) {
-        self.id = None;
-    }
-}
-
-impl Drop for PendingSession {
-    fn drop(&mut self) {
-        if let Some(id) = self.id.take() {
-            let _ = tmux::run(&["kill-session", "-t", &id]);
-        }
-    }
-}
-
-/// A private session name no other client is expected to use. It deliberately does not
-/// begin with the managed name, so no prefix lookup can resolve it as the managed session.
-fn private_session_name() -> String {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .unwrap_or(0);
-    format!("tt-pending-{}-{nanos}", std::process::id())
 }
 
 #[cfg(test)]
@@ -1399,7 +987,7 @@ mod tests {
     #[test]
     fn size_alone_is_the_horizontal_split_at_that_percentage() {
         let h40 = Layout::Split {
-            direction: "-h",
+            direction: SplitDirection::Horizontal,
             size: Some(40),
         };
         assert_eq!(resolve(None, Some(40), false, false, false, true), h40);
@@ -1430,14 +1018,14 @@ mod tests {
             assert_eq!(
                 resolve(Some(Split::H), None, false, true, false, in_tmux),
                 Layout::Split {
-                    direction: "-h",
+                    direction: SplitDirection::Horizontal,
                     size: None
                 }
             );
             assert_eq!(
                 resolve(Some(Split::V), Some(30), false, false, false, in_tmux),
                 Layout::Split {
-                    direction: "-v",
+                    direction: SplitDirection::Vertical,
                     size: Some(30)
                 }
             );
@@ -1471,39 +1059,6 @@ mod tests {
                 "the diagnostic must name both flags: {error}"
             );
         }
-    }
-
-    /// One ownership snapshot line: `@tt-name`, `@tt-agent`, `@tt-cwd`.
-    fn snapshot_line(name: &str, agent: &str, cwd: &str) -> String {
-        [name, agent, cwd].join(&FIELD_SEP.to_string()) + "\n"
-    }
-
-    #[test]
-    fn ownership_snapshot_reads_name_agent_and_cwd_per_pane() {
-        let output = [
-            snapshot_line("", "", ""),
-            snapshot_line("npm-a3f2", "", "/work"),
-            snapshot_line("", "codex", ""),
-        ]
-        .concat();
-        let panes = parse_ownership_snapshot(&output).unwrap();
-        assert_eq!(panes.len(), 3);
-        assert_eq!(
-            (panes[0].name.as_deref(), panes[0].agent.as_deref()),
-            (None, None)
-        );
-        assert_eq!(panes[1].name.as_deref(), Some("npm-a3f2"));
-        assert_eq!(panes[1].cwd.as_deref(), Some("/work"));
-        assert_eq!(panes[2].agent.as_deref(), Some("codex"));
-        assert_eq!(panes[2].cwd, None);
-    }
-
-    #[test]
-    fn ownership_snapshot_rejects_malformed_lines() {
-        let sep = FIELD_SEP.to_string();
-        assert!(parse_ownership_snapshot(&["a", "b"].join(&sep)).is_err());
-        assert!(parse_ownership_snapshot(&["a", "b", "c", "d"].join(&sep)).is_err());
-        assert!(parse_ownership_snapshot("").unwrap().is_empty());
     }
 
     // -- Window guard and kill-time removal (ISSUE-260801-1310-06) ---------------------
@@ -1628,115 +1183,6 @@ mod tests {
         // An unreadable current cwd passes every registered pane.
         assert_eq!(overflow_candidates(&windows, "@0", None), ["@1", "@2"]);
         assert!(overflow_candidates(&[], "@0", Some("/work")).is_empty());
-    }
-
-    #[test]
-    fn window_identity_parses_id_and_index() {
-        let sep = FIELD_SEP.to_string();
-        assert_eq!(
-            parse_window_identity(&format!("@4{sep}12\n")).unwrap(),
-            ("@4".to_owned(), 12)
-        );
-        assert!(parse_window_identity("@4\n").is_err());
-        assert!(parse_window_identity(&format!("{sep}1\n")).is_err());
-        assert!(parse_window_identity(&format!("@4{sep}x\n")).is_err());
-    }
-
-    #[test]
-    fn removal_with_a_retile_is_one_command_sequence() {
-        assert_eq!(
-            removal_args("%5", "@2", true),
-            [
-                "kill-pane",
-                "-t",
-                "%5",
-                ";",
-                "select-layout",
-                "-t",
-                "@2",
-                "tiled"
-            ]
-        );
-    }
-
-    #[test]
-    fn removal_without_a_retile_is_the_bare_kill() {
-        assert_eq!(removal_args("%5", "@2", false), ["kill-pane", "-t", "%5"]);
-    }
-
-    /// One `list-panes` geometry line in the measurement format.
-    fn line(window: &str, pane: &str, cols: u32, rows: u32, agent: &str, surface: &str) -> String {
-        [
-            window.to_owned(),
-            pane.to_owned(),
-            cols.to_string(),
-            rows.to_string(),
-            agent.to_owned(),
-            surface.to_owned(),
-        ]
-        .join(&FIELD_SEP.to_string())
-            + "\n"
-    }
-
-    #[test]
-    fn window_geometry_is_the_componentwise_minimum() {
-        let output = [
-            line("@3", "%1", 83, 71, "", ""),
-            line("@3", "%2", 196, 71, "codex", "default"),
-            line("@3", "%3", 280, 10, "", ""),
-        ]
-        .concat();
-        let geometry = parse_window_geometry(&output).unwrap();
-        assert_eq!(geometry.window_id, "@3");
-        assert_eq!(
-            (geometry.min_pane_cols(), geometry.min_pane_rows()),
-            (83, 10)
-        );
-        assert_eq!(geometry.panes.len(), 3);
-        assert_eq!(geometry.panes[1].agent.as_deref(), Some("codex"));
-        assert_eq!(geometry.panes[1].surface.as_deref(), Some("default"));
-        // An unset user option reads back empty and is no registration.
-        assert_eq!(geometry.panes[0].agent, None);
-        assert_eq!(geometry.panes[0].surface, None);
-    }
-
-    #[test]
-    fn window_geometry_of_a_single_pane_is_that_pane() {
-        let geometry = parse_window_geometry(&line("@0", "%0", 280, 82, "", "")).unwrap();
-        assert_eq!(geometry.window_id, "@0");
-        assert_eq!(
-            (geometry.min_pane_cols(), geometry.min_pane_rows()),
-            (280, 82)
-        );
-    }
-
-    #[test]
-    fn window_geometry_keeps_tabs_inside_registration_values() {
-        let geometry = parse_window_geometry(&line("@0", "%0", 280, 82, "odd\tagent", "")).unwrap();
-        assert_eq!(geometry.panes[0].agent.as_deref(), Some("odd\tagent"));
-    }
-
-    #[test]
-    fn window_geometry_rejects_empty_and_malformed_output() {
-        let sep = FIELD_SEP.to_string();
-        let join = |fields: &[&str]| fields.join(&sep) + "\n";
-        assert!(parse_window_geometry("").is_err());
-        assert!(parse_window_geometry("\n").is_err());
-        assert!(parse_window_geometry(&join(&["@0", "%0", "280", "82", ""])).is_err());
-        assert!(parse_window_geometry(&join(&["@0", "%0", "wide", "82", "", ""])).is_err());
-        assert!(parse_window_geometry(&join(&["", "%0", "280", "82", "", ""])).is_err());
-        assert!(parse_window_geometry(&join(&["@0", "", "280", "82", "", ""])).is_err());
-        assert!(parse_window_geometry(&join(&["@0", "%0", "280", "82", "", "", "extra"])).is_err());
-    }
-
-    #[test]
-    fn window_geometry_rejects_panes_of_two_windows() {
-        let output = [
-            line("@0", "%0", 280, 82, "", ""),
-            line("@1", "%1", 100, 20, "", ""),
-        ]
-        .concat();
-        assert!(parse_window_geometry(&output).is_err());
     }
 
     // -- Floors (ISSUE-260801-1310-05) -------------------------------------------------

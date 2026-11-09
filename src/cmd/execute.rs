@@ -7,8 +7,9 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tmux_tools_core::{
     format::{strip_ansi, Format},
+    host,
     idle::resolve_timeout,
-    names, target, tmux,
+    names, target,
 };
 
 use crate::{cmd::spawn_agent::shell_quote, CommonArgs};
@@ -105,8 +106,7 @@ fn wrap_command(cmd: &str, start_marker: &str, end_marker: &str) -> String {
 }
 
 fn send_wrapped_command(pane: &str, wrapped: &str) -> Result<()> {
-    tmux::run_checked(&["send-keys", "-t", pane, wrapped, "Enter"])?;
-    Ok(())
+    host::current().send_keys(pane, &[wrapped, "Enter"])
 }
 
 fn wait_for_completion(
@@ -201,12 +201,10 @@ fn expansion_fraction(index: usize) -> f64 {
 }
 
 fn capture_pane(pane: &str, lookback: Option<u32>) -> Result<String> {
-    let mut args = vec!["capture-pane".to_owned(), "-t".to_owned(), pane.to_owned()];
-    args.extend(crate::cmd::capture::build_capture_args(
-        lookback,
-        lookback.is_none(),
-    ));
-    tmux::run_checked_owned(&args)
+    host::current().capture(
+        pane,
+        crate::cmd::capture::capture_range(lookback, lookback.is_none()),
+    )
 }
 
 fn extract_completed_at(

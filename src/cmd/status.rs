@@ -1,36 +1,20 @@
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result};
 use clap::Args;
 use serde::Serialize;
 use std::env;
 use tmux_tools_core::{
-    format::{non_empty, Format},
+    format::Format,
+    host::{self, PaneSummary as StatusRow},
     layout::{self, WindowReport},
-    names, target, tmux,
+    target,
 };
 
 use crate::{util::load_registry_for_floors, CommonArgs};
-
-const FIELD_SEP: char = '\x1f';
-const STATUS_FIELD_COUNT: usize = 8;
 
 #[derive(Args, Debug)]
 pub struct StatusArgs {
     #[command(flatten)]
     pub(crate) common: CommonArgs,
-}
-
-#[derive(Debug)]
-struct StatusRow {
-    session: String,
-    window_index: String,
-    window_name: String,
-    pane_index: String,
-    pane_id: String,
-    name: Option<String>,
-    agent: Option<String>,
-    access: Option<String>,
-    launched_at: Option<String>,
-    cwd: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -67,16 +51,16 @@ pub fn run(args: &StatusArgs) -> Result<()> {
         Some(_) => Some(target::resolve_from_common(&args.common)?),
         None => None,
     };
-    let raw = display_status(pane_id.as_deref())?;
+    let description = host::current().describe_pane(pane_id.as_deref())?;
 
     match args.common.format {
-        Format::Raw => print!("{raw}"),
+        Format::Raw => print!("{}", description.raw),
         Format::Concise => {
-            let row = parse_status(raw.trim_end_matches('\n'))?;
+            let row = description.summary?;
             render_concise(&row, &window_report(&row)?);
         }
         Format::Json => {
-            let row = parse_status(raw.trim_end_matches('\n'))?;
+            let row = description.summary?;
             render_json(&row, &window_report(&row)?)?;
         }
     }
@@ -96,54 +80,6 @@ fn render_not_in_tmux(format: Format) -> Result<()> {
     }
 
     Ok(())
-}
-
-fn display_status(pane_id: Option<&str>) -> Result<String> {
-    let status_format = status_format();
-    let args = match pane_id {
-        Some(pane_id) => vec!["display-message", "-p", "-t", pane_id, &status_format],
-        None => vec!["display-message", "-p", &status_format],
-    };
-
-    tmux::run_checked(&args)
-}
-
-fn status_format() -> String {
-    format!(
-        "#{{session_name}}\x1f#{{window_index}}.#{{window_name}}\x1f#{{pane_index}}.#{{pane_id}}\x1f#{{{}}}\x1f#{{{}}}\x1f#{{{}}}\x1f#{{{}}}\x1f#{{{}}}",
-        names::KEY_NAME,
-        names::KEY_AGENT,
-        names::KEY_ACCESS,
-        names::KEY_LAUNCHED_AT,
-        names::KEY_CWD,
-    )
-}
-
-fn parse_status(line: &str) -> Result<StatusRow> {
-    let fields: Vec<&str> = line.split(FIELD_SEP).collect();
-    if fields.len() != STATUS_FIELD_COUNT {
-        return Err(anyhow!("unexpected tmux status output: {line:?}"));
-    }
-
-    let (window_index, window_name) = fields[1]
-        .split_once('.')
-        .ok_or_else(|| anyhow!("unexpected tmux window status output: {:?}", fields[1]))?;
-    let (pane_index, pane_id) = fields[2]
-        .split_once('.')
-        .ok_or_else(|| anyhow!("unexpected tmux pane status output: {:?}", fields[2]))?;
-
-    Ok(StatusRow {
-        session: fields[0].to_owned(),
-        window_index: window_index.to_owned(),
-        window_name: window_name.to_owned(),
-        pane_index: pane_index.to_owned(),
-        pane_id: pane_id.to_owned(),
-        name: non_empty(fields[3]),
-        agent: non_empty(fields[4]),
-        access: non_empty(fields[5]),
-        launched_at: non_empty(fields[6]),
-        cwd: non_empty(fields[7]),
-    })
 }
 
 /// The measured geometry and floor verdict of the window holding the status pane.
@@ -197,67 +133,4 @@ fn render_json(row: &StatusRow, window: &WindowReport) -> Result<()> {
 
     println!("{}", serde_json::to_string_pretty(&json)?);
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn build_line(fields: &[&str]) -> String {
-        fields.join(&FIELD_SEP.to_string())
-    }
-
-    #[test]
-    fn parses_status_with_unit_separator() {
-        let line = build_line(&[
-            "managed",
-            "0.main",
-            "1.%42",
-            "my-pane",
-            "claude",
-            "workspace-write",
-            "1700000000",
-            "/work",
-        ]);
-
-        let row = parse_status(&line).expect("status parses");
-        assert_eq!(row.session, "managed");
-        assert_eq!(row.window_index, "0");
-        assert_eq!(row.window_name, "main");
-        assert_eq!(row.pane_index, "1");
-        assert_eq!(row.pane_id, "%42");
-        assert_eq!(row.name.as_deref(), Some("my-pane"));
-        assert_eq!(row.agent.as_deref(), Some("claude"));
-        assert_eq!(row.access.as_deref(), Some("workspace-write"));
-        assert_eq!(row.launched_at.as_deref(), Some("1700000000"));
-        assert_eq!(row.cwd.as_deref(), Some("/work"));
-    }
-
-    #[test]
-    fn parses_status_with_tab_in_name() {
-        // Tab inside the user-supplied name must not break parsing.
-        let line = build_line(&[
-            "managed",
-            "0.main",
-            "1.%42",
-            "name\twith\ttab",
-            "",
-            "",
-            "",
-            "",
-        ]);
-
-        let row = parse_status(&line).expect("status parses with tab");
-        assert_eq!(row.name.as_deref(), Some("name\twith\ttab"));
-        assert_eq!(row.agent, None);
-        assert_eq!(row.access, None);
-        assert_eq!(row.launched_at, None);
-        assert_eq!(row.cwd, None);
-    }
-
-    #[test]
-    fn parses_status_rejects_wrong_field_count() {
-        let line = build_line(&["only", "three", "fields"]);
-        assert!(parse_status(&line).is_err());
-    }
 }

@@ -3,7 +3,11 @@ use clap::{ArgAction, Args};
 use serde::Serialize;
 use std::thread;
 use std::time::Duration;
-use tmux_tools_core::{format::Format, target, tmux};
+use tmux_tools_core::{
+    format::Format,
+    host::{self, CaptureRange},
+    target,
+};
 
 use crate::CommonArgs;
 
@@ -120,23 +124,19 @@ where
 }
 
 fn send_text(args: &SendArgs, pane: &str) -> Result<()> {
-    let mut tmux_args = vec!["send-keys", "-t", pane];
     if args.literal {
-        tmux_args.push("-l");
+        host::current().send_text(pane, &args.text)
+    } else {
+        host::current().send_keys(pane, &[args.text.as_str()])
     }
-    tmux_args.push(args.text.as_str());
-
-    tmux::run_checked(&tmux_args)?;
-    Ok(())
 }
 
 pub(crate) fn send_enter(pane: &str) -> Result<()> {
-    tmux::run_checked(&["send-keys", "-t", pane, "Enter"])?;
-    Ok(())
+    host::current().send_keys(pane, &["Enter"])
 }
 
 pub(crate) fn capture_last_line(pane: &str) -> Result<String> {
-    tmux::run_checked(&["capture-pane", "-t", pane, "-p", "-S", "-1", "-E", "-1"])
+    host::current().capture(pane, CaptureRange::Rows { start: -1, end: -1 })
 }
 
 fn render_output(args: &SendArgs, pane: &str, attempts: usize, verified: bool) -> Result<()> {

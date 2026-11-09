@@ -6,7 +6,7 @@ use regex::Regex;
 use xxhash_rust::xxh3::xxh3_64;
 
 use crate::format::strip_ansi;
-use crate::tmux;
+use crate::host;
 
 #[derive(Clone, Debug)]
 pub struct IdleConfig {
@@ -189,37 +189,15 @@ pub fn wait_for_idle(pane_id: &str, cfg: &IdleConfig) -> Result<IdleOutcome> {
     let mut until_debounce = MatchDebounce::default();
 
     loop {
-        // Sample the live `alternate_on` flag in the same tmux invocation as the capture,
-        // so the flag and the bytes describe one instant. A pane on the alternate screen
+        // Sample the live alternate-screen flag at the same instant as the capture, so
+        // the flag and the bytes describe one instant. A pane on the alternate screen
         // has no scrollback, and it can leave the screen before settle; P7 completeness
         // must still know it was there, so the flag is tracked on every poll.
-        let output = tmux::run(&[
-            "display-message",
-            "-p",
-            "-t",
-            pane_id,
-            "#{alternate_on}",
-            ";",
-            "capture-pane",
-            "-t",
-            pane_id,
-            "-p",
-        ])?;
-        if output.exit_code != 0 {
-            bail!(
-                "tmux capture-pane failed with exit code {}: {}",
-                output.exit_code,
-                output.stderr.trim_end()
-            );
-        }
-
-        let (alternate_flag, capture) = output
-            .stdout
-            .split_once('\n')
-            .unwrap_or((output.stdout.as_str(), ""));
-        if alternate_flag.trim() == "1" {
+        let screen = host::current().poll_screen(pane_id)?;
+        if screen.alternate_on {
             alternate_seen = true;
         }
+        let capture = screen.text.as_str();
         let stripped = strip_ansi(capture);
         // P7 turn observation: whether `busy_regex` was seen at any poll between
         // submission and settle. It is read from the pattern directly, not from the

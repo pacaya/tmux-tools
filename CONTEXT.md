@@ -3,13 +3,21 @@
 The ubiquitous language for driving tmux panes from LLM agents. Single context; this file is
 the whole glossary.
 
+## Hosts
+
+**Host** [VO] — the terminal program whose panes the tool drives: `tmux` or `orca`. Every verb reaches its host only through the Host port, a pane-level interface; no module outside a [[Host backend]] builds host commands. _Avoid_: terminal, multiplexer. ↔ core/src/host/mod.rs (`Host`, the `HostPort` trait)
+
+**Host backend** [adapter] — the implementation of the Host port for one [[Host]]. The tmux backend is the only one; tmux facts ([[Managed session]], [[Bracketed paste transport]], the `@tt-*` storage of [[Pane registration]], and [[Layout intent]] as `@tt-tiled`) live in it. _Avoid_: driver, plugin. ↔ core/src/host/tmux/ (`TmuxHost`)
+
+**Host capabilities** [VO] — the optional features a [[Host backend]] supports: `native_state`, `submit_confirmation`, `notify`, `tile`, `rebalance`, `size`. The tmux backend supports `tile`, `rebalance` and `size`. _Avoid_: features, flags. ↔ core/src/host/mod.rs (`HostCapabilities`)
+
 ## Panes and sessions
 
-**Managed session** [entity] — the `tmux-tools` tmux session this tool creates and reuses when invoked from outside tmux. _Avoid_: default session, our session. ↔ core/src/target.rs
+**Managed session** [entity] — the `tmux-tools` tmux session this tool creates and reuses when invoked from outside tmux. _Avoid_: default session, our session. ↔ core/src/host/tmux/session.rs
 
 **Target** [VO] — a resolved reference to one pane, parsed from a registered name, a pane id (`%3`), or a window id (`@7`). _Avoid_: selector, handle. ↔ core/src/target.rs
 
-**Pane registration** [VO] — the `@tt-*` tmux pane user-options recording what this tool knows about a pane: `@tt-name`, `@tt-agent`, `@tt-access`, `@tt-launched-at`, `@tt-cwd`, `@tt-surface`, `@tt-surface-unvalidated`. `@tt-surface` records the surface `spawn-agent` resolved and is written unconditionally; `@tt-surface-unvalidated` is present when caller-supplied trailing arguments could have changed the rendering out from under that record. `@tt-name` is set on every pane either spawning verb creates: `--name` when given, otherwise auto-derived from the command. _Avoid_: metadata, tags. ↔ core/src/names.rs
+**Pane registration** [VO] — the `@tt-*` tmux pane user-options recording what this tool knows about a pane: `@tt-name`, `@tt-agent`, `@tt-access`, `@tt-launched-at`, `@tt-cwd`, `@tt-surface`, `@tt-surface-unvalidated`. `@tt-surface` records the surface `spawn-agent` resolved and is written unconditionally; `@tt-surface-unvalidated` is present when caller-supplied trailing arguments could have changed the rendering out from under that record. `@tt-name` is set on every pane either spawning verb creates: `--name` when given, otherwise auto-derived from the command. _Avoid_: metadata, tags. ↔ core/src/names.rs (fields), core/src/host/tmux/registration.rs (`@tt-*` storage)
 
 **Keep-alive wrap** [service] — wrapping a launched command as `(cmd); exec $SHELL` so the pane outlives the command and its output stays readable. _Avoid_: shell wrapper, persistence. ↔ src/cmd/launch.rs
 
@@ -51,7 +59,7 @@ the whole glossary.
 
 ## Pane I/O
 
-**Bracketed paste transport** [service] — delivering one prompt as one submission through `tmux load-buffer` from stdin followed by `paste-buffer -p -d`, keyed to the pane's live `bracket_paste_flag` rather than a [[Surface]]'s declared capability. _Avoid_: paste mode, chunked send. ↔ src/cmd/prompt.rs *(planned — PRD-260918-0323-01 · ISSUE-260918-0525-03)*
+**Bracketed paste transport** [service] — delivering one prompt as one submission through `tmux load-buffer` from stdin followed by `paste-buffer -p -d`, keyed to the pane's live `bracket_paste_flag` rather than a [[Surface]]'s declared capability. _Avoid_: paste mode, chunked send. ↔ core/src/host/tmux/pane_io.rs (transport), src/cmd/prompt.rs (delivery decision)
 
 **History mark** [VO] — the pane-history offset taken before a prompt is submitted, from which `prompt`'s result begins. Never advanced: the result always includes the agent's echo of the prompt. _Avoid_: anchor, watermark. ↔ src/cmd/prompt.rs *(planned — PRD-260918-0323-01 · ISSUE-260918-0525-06)*
 
@@ -73,7 +81,7 @@ the whole glossary.
 
 **Overflow window** [entity] — the window a pane is moved to when placing it would push its origin below the effective floor. _Avoid_: spillover window, secondary window. ↔ core/src/layout.rs
 
-**Layout intent** [VO] — whether a window is tool-tiled or human-arranged, recorded as the `@tt-tiled` window option (unset when cleared, so "cleared" and "never set" are one state). A record of what the tool did, not a permission to act: it gates teardown (`kill` retiling), the `rebalance` verb, and overflow-destination eligibility, never placement — which is gated by [[Ownership]] alone, since the first tiling placement into any window necessarily finds no marker and is what sets one. _Avoid_: tiled flag, managed layout. ↔ core/src/layout.rs
+**Layout intent** [VO] — whether a window is tool-tiled or human-arranged, recorded as the `@tt-tiled` window option (unset when cleared, so "cleared" and "never set" are one state). A record of what the tool did, not a permission to act: it gates teardown (`kill` retiling), the `rebalance` verb, and overflow-destination eligibility, never placement — which is gated by [[Ownership]] alone, since the first tiling placement into any window necessarily finds no marker and is what sets one. _Avoid_: tiled flag, managed layout. ↔ core/src/layout.rs, core/src/host/tmux/window.rs (`@tt-tiled` storage)
 
 ## Ownership
 

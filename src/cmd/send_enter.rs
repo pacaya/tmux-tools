@@ -1,7 +1,7 @@
 use anyhow::Result;
 use clap::Args;
 use serde::Serialize;
-use tmux_tools_core::{format::Format, target, tmux};
+use tmux_tools_core::{format::Format, host, target};
 
 use crate::{cmd::safety, CommonArgs};
 
@@ -30,7 +30,7 @@ pub fn run(args: &SendEnterArgs) -> Result<()> {
     let pane = target::resolve_from_common(&args.common)?;
     safety::enforce_for_pane(VERB, &pane, args.force, args.any)?;
 
-    tmux::run_checked(&["send-keys", "-t", &pane, "Enter"])?;
+    host::current().send_keys(&pane, &["Enter"])?;
 
     match args.common.format {
         Format::Concise => println!("sent Enter to {pane}"),

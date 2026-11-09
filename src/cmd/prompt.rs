@@ -3,13 +3,14 @@ use clap::Args;
 use regex::Regex;
 use serde::Serialize;
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 use tmux_tools_core::{
     format::{render_capture, strip_ansi, Format},
+    host::{self, CaptureRange, HistoryProbe as PaneProbe},
     idle::{
         resolve_timeout, validate_seconds, wait_for_idle, IdleConfig, DEFAULT_READY_STABLE_SECONDS,
     },
-    names, target, tmux,
+    names, target,
 };
 
 use crate::{cmd::send::dispatch_enter, cmd::wait_idle::surface_info_for, CommonArgs};
@@ -47,31 +48,6 @@ struct PromptJson<'a> {
     turn_observed: bool,
     /// P7 completeness: whether everything after the history mark could be supplied.
     complete: bool,
-}
-
-/// P7's live pane state, sampled in the same tmux invocation as the history capture so
-/// the numbers and the captured bytes describe one instant.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct PaneProbe {
-    history_size: u64,
-    history_limit: u64,
-    cursor_y: u64,
-    alternate_on: bool,
-    /// The pane's width in columns. A change between the mark and settle rewraps
-    /// history, so the row-counted mark no longer locates the submission point.
-    pane_width: u64,
-    /// The pane's `history_collected` counter, when the running tmux provides it.
-    /// Support is detected at runtime from the probe's field count, never a version.
-    history_collected: Option<u64>,
-}
-
-impl PaneProbe {
-    /// P7's history mark: the absolute line of the cursor — the submission point —
-    /// in a `capture-pane -S -` of the same instant. History lines precede the visible
-    /// pane, so the cursor's absolute index is `history_size + cursor_y`.
-    fn mark(&self) -> usize {
-        (self.history_size + self.cursor_y) as usize
-    }
 }
 
 /// The structured refusal reported for JSON output. The command still exits
@@ -259,8 +235,7 @@ fn determine_delivery(
 }
 
 fn read_bracket_paste_flag(pane: &str) -> Result<bool> {
-    let value = tmux::run_checked(&["display-message", "-p", "-t", pane, "#{bracket_paste_flag}"])?;
-    Ok(value.trim() == "1")
+    host::current().bracketed_paste_enabled(pane)
 }
 
 fn refusal_message(pane: &str) -> String {
@@ -342,57 +317,12 @@ fn emit_completeness(complete: bool, alternate_seen: bool, evicted: bool, width_
     );
 }
 
-/// The format string that samples P7's pane state. `#{history_collected}` expands to an
-/// empty string on a tmux that does not provide the counter, which is how its support is
-/// detected at runtime (a numeric sixth field means supported), never from a version.
-/// It stays last so its absence cannot shift the fields before it.
-const PROBE_FORMAT: &str = "#{history_size} #{history_limit} #{cursor_y} #{alternate_on} \
-                            #{pane_width} #{history_collected}";
-
-/// Sample the live pane state and the full `capture-pane -S -` history in one tmux
-/// invocation, so the probe's numbers and the captured bytes describe the same instant.
-/// The first line is the probe; the rest is the stripped capture.
+/// Sample the live pane state and the full history at one instant, so the probe's
+/// numbers and the captured bytes describe the same instant. Returns the probe and the
+/// stripped capture.
 fn read_probe_and_capture(pane: &str) -> Result<(PaneProbe, String)> {
-    let combined = tmux::run_checked(&[
-        "display-message",
-        "-p",
-        "-t",
-        pane,
-        PROBE_FORMAT,
-        ";",
-        "capture-pane",
-        "-t",
-        pane,
-        "-p",
-        "-S",
-        "-",
-    ])?;
-    let (summary, capture) = combined.split_once('\n').unwrap_or((combined.as_str(), ""));
-    let probe = parse_probe(summary).ok_or_else(|| {
-        anyhow!("tmux returned an unparseable pane probe for pane {pane}: {summary:?}")
-    })?;
-    Ok((probe, strip_ansi(capture)))
-}
-
-/// Parse the `history_size history_limit cursor_y alternate_on pane_width
-/// [history_collected]` summary line. The trailing counter is absent on a tmux that does
-/// not provide it.
-fn parse_probe(summary: &str) -> Option<PaneProbe> {
-    let mut fields = summary.split_whitespace();
-    let history_size = fields.next()?.parse().ok()?;
-    let history_limit = fields.next()?.parse().ok()?;
-    let cursor_y = fields.next()?.parse().ok()?;
-    let alternate_on = crate::cmd::capture::parse_alternate_on(fields.next()?);
-    let pane_width = fields.next()?.parse().ok()?;
-    let history_collected = fields.next().and_then(|value| value.parse().ok());
-    Some(PaneProbe {
-        history_size,
-        history_limit,
-        cursor_y,
-        alternate_on,
-        pane_width,
-        history_collected,
-    })
+    let (probe, capture) = host::current().probe_history(pane)?;
+    Ok((probe, strip_ansi(&capture)))
 }
 
 /// P7 eviction. When the running tmux provides `history_collected`, any increase between
@@ -541,60 +471,26 @@ fn send_prompt(
 /// The ANSI-stripped visible pane, used as an Enter-verification frame. `busy_regex` is
 /// matched against the same stripped form the idle loop uses.
 fn capture_delivery_frame(pane: &str) -> Result<String> {
-    let output = tmux::run_checked(&["capture-pane", "-t", pane, "-p"])?;
+    let output = host::current().capture(pane, CaptureRange::Visible)?;
     Ok(strip_ansi(&output))
 }
 
-/// Load `text` into a uniquely-named buffer, read the live `bracket_paste_flag`
-/// again immediately before pasting, and paste only when that final read allows
-/// it. A refusal from the second read deletes the loaded buffer and returns
-/// without pasting.
+/// Stage `text` for one bracketed paste, read the live bracketed-paste state again
+/// immediately before pasting, and paste only when that final read allows it. A
+/// refusal from the second read discards the staged text and returns without pasting.
 fn deliver_prompt(
     pane: &str,
     text: &str,
     declared_bracketed_paste: bool,
 ) -> Result<DeliveryOutcome> {
-    let buffer = unique_prompt_buffer_name();
-    tmux::run_checked_with_stdin(&["load-buffer", "-b", &buffer, "-"], text.as_bytes())?;
-
-    let outcome = match determine_delivery(pane, declared_bracketed_paste, text) {
-        Ok(outcome) => outcome,
-        // The buffer is already loaded, so cleanup must run even when the
-        // post-load flag read fails. The read error is returned unchanged.
-        Err(error) => {
-            let _ = tmux::run_checked(&["delete-buffer", "-b", &buffer]);
-            return Err(error);
-        }
-    };
-
-    match outcome {
-        DeliveryOutcome::Refused(message) => {
-            let _ = tmux::run_checked(&["delete-buffer", "-b", &buffer]);
-            Ok(DeliveryOutcome::Refused(message))
-        }
-        outcome => {
-            let pasted =
-                tmux::run_checked(&["paste-buffer", "-p", "-d", "-b", &buffer, "-t", pane]);
-
-            // Deletion on every path after a successful load: `-d` removed the buffer
-            // on a successful paste, and this removes it when the paste failed.
-            // Cleanup never replaces the transport error.
-            let _ = tmux::run_checked(&["delete-buffer", "-b", &buffer]);
-
-            pasted?;
-            Ok(outcome)
-        }
-    }
-}
-
-/// A buffer name that cannot collide with another prompt's, or with a user's own
-/// buffers, while naming the transport so a leaked buffer is recognizable.
-fn unique_prompt_buffer_name() -> String {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .unwrap_or(0);
-    format!("tmux-tools-prompt-{}-{nanos}", std::process::id())
+    let mut decided = None;
+    host::current().paste_text(pane, text, &mut || {
+        let outcome = determine_delivery(pane, declared_bracketed_paste, text)?;
+        let paste = !matches!(outcome, DeliveryOutcome::Refused(_));
+        decided = Some(outcome);
+        Ok(paste)
+    })?;
+    decided.ok_or_else(|| anyhow!("internal: the paste ran without a delivery decision"))
 }
 
 #[cfg(test)]
@@ -617,42 +513,6 @@ mod tests {
             pane_width: 80,
             history_collected,
         }
-    }
-
-    #[test]
-    fn parse_probe_reads_the_five_fields_when_the_counter_is_absent() {
-        let parsed = parse_probe("12 50000 8 1 80").expect("probe parses");
-
-        assert_eq!(parsed.history_size, 12);
-        assert_eq!(parsed.history_limit, 50000);
-        assert_eq!(parsed.cursor_y, 8);
-        assert!(parsed.alternate_on);
-        assert_eq!(parsed.history_collected, None);
-    }
-
-    #[test]
-    fn parse_probe_reads_the_counter_when_the_tmux_provides_it() {
-        let parsed = parse_probe("12 50000 8 0 80 34").expect("probe parses");
-
-        assert!(!parsed.alternate_on);
-        assert_eq!(parsed.history_collected, Some(34));
-    }
-
-    #[test]
-    fn parse_probe_rejects_a_malformed_summary() {
-        assert!(parse_probe("").is_none());
-        assert!(parse_probe("12 50000 8").is_none());
-        assert!(parse_probe("x 50000 8 0").is_none());
-    }
-
-    #[test]
-    fn parse_probe_reads_the_pane_width_and_requires_it() {
-        let parsed = parse_probe("12 50000 8 0 137 34").expect("probe parses");
-
-        assert_eq!(parsed.pane_width, 137);
-        assert_eq!(parsed.history_collected, Some(34));
-        assert!(parse_probe("12 50000 8 0").is_none());
-        assert!(parse_probe("12 50000 8 0 wide").is_none());
     }
 
     #[test]

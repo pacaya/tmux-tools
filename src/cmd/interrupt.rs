@@ -3,8 +3,9 @@ use clap::Args;
 use serde::Serialize;
 use tmux_tools_core::{
     format::{strip_ansi, Format},
+    host::{self, CaptureRange},
     idle::{classify, PaneState, SurfacePatterns},
-    target, tmux,
+    target,
 };
 
 use crate::{
@@ -115,7 +116,7 @@ pub fn run(args: &InterruptArgs) -> Result<()> {
         }
     }
 
-    tmux::run_checked(&["send-keys", "-t", &pane, key])?;
+    host::current().send_keys(&pane, &[key])?;
 
     match args.common.format {
         Format::Concise => println!("sent {key} to {pane}"),
@@ -131,7 +132,7 @@ pub fn run(args: &InterruptArgs) -> Result<()> {
 
 /// P3's classifier applied once to the pane's live visible capture.
 fn classify_live(pane: &str, patterns: &SurfacePatterns) -> Result<PaneState> {
-    let output = tmux::run_checked(&["capture-pane", "-t", pane, "-p"])?;
+    let output = host::current().capture(pane, CaptureRange::Visible)?;
     Ok(classify(&strip_ansi(&output), patterns))
 }
 

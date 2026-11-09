@@ -1,7 +1,12 @@
 use anyhow::Result;
 use clap::Args;
 use serde_json::json;
-use tmux_tools_core::{format, format::Format, names, target, tmux};
+use tmux_tools_core::{
+    format,
+    format::Format,
+    host::{self, CaptureRange},
+    names, target,
+};
 
 use crate::CommonArgs;
 
@@ -18,28 +23,26 @@ pub struct CaptureArgs {
 pub fn run(args: &CaptureArgs) -> Result<()> {
     let pane = target::resolve_from_common(&args.common)?;
 
-    // tmux interprets `-S -0 -E -` as the visible-pane shorthand rather than a
-    // zero-length range, so honour the explicit zero intent here.
+    // A zero-line tail reads as the visible pane on tmux rather than a zero-length
+    // range, so honour the explicit zero intent here.
     if args.lines == Some(0) && !args.all {
         let rendered = format::render_capture("", args.common.format);
         return render_output(args.common.format, &pane, &rendered, None);
     }
 
     // `--all` claims full history, but a pane on the alternate screen has no
-    // tmux scrollback. The determination reads live pane state (`alternate_on`)
-    // rather than any recorded surface, so a pane that entered or left the
-    // alternate screen after launch is reported as it currently is. The flag
-    // and the capture come from one tmux invocation, so a pane that switches
-    // screens mid-request cannot report one state's stdout beside the other
-    // state's ceiling.
+    // scrollback. The determination reads live pane state rather than any
+    // recorded surface, so a pane that entered or left the alternate screen
+    // after launch is reported as it currently is. The flag and the capture
+    // are read at one instant, so a pane that switches screens mid-request
+    // cannot report one state's stdout beside the other state's ceiling.
+    let host = host::current();
+    let range = capture_range(args.lines, args.all);
     let (raw, scrollback_available) = if args.all {
-        let combined = build_tmux_alternate_capture_args(&pane);
-        let combined_out = tmux::run_checked_owned(&combined)?;
-        let (flag, body) = split_alternate_and_capture(&combined_out);
-        (body.to_owned(), Some(!parse_alternate_on(flag)))
+        let screen = host.capture_with_screen(&pane, range)?;
+        (screen.text, Some(!screen.alternate_on))
     } else {
-        let tmux_args = build_tmux_capture_args(&pane, args.lines, args.all);
-        (tmux::run_checked_owned(&tmux_args)?, None)
+        (host.capture(&pane, range)?, None)
     };
     let to_render = match (args.lines, args.all) {
         (Some(n), false) if n > 0 => tail_lines(&raw, n),
@@ -56,20 +59,6 @@ pub fn run(args: &CaptureArgs) -> Result<()> {
     }
 
     render_output(args.common.format, &pane, &rendered, scrollback_available)
-}
-
-/// True when the pane is currently on the alternate screen, where tmux keeps
-/// no scrollback. Parses the live `alternate_on` pane variable. Shared with
-/// `prompt`, whose completeness check reuses this live no-scrollback test.
-pub(crate) fn parse_alternate_on(raw: &str) -> bool {
-    raw.trim() == "1"
-}
-
-/// Split one combined `display-message`/`capture-pane` invocation's stdout into
-/// the leading `alternate_on` flag and the capture body. The flag is the text
-/// before the first newline, the body is everything after it.
-fn split_alternate_and_capture(raw: &str) -> (&str, &str) {
-    raw.split_once('\n').unwrap_or((raw, ""))
 }
 
 /// The structural ceiling notice for raw and concise output, where there is no
@@ -102,42 +91,16 @@ fn tail_lines(raw: &str, n: u32) -> String {
     out
 }
 
-fn build_tmux_capture_args(pane: &str, lines: Option<u32>, all: bool) -> Vec<String> {
-    let mut args = vec!["capture-pane".to_owned(), "-t".to_owned(), pane.to_owned()];
-    args.extend(build_capture_args(lines, all));
-    args
-}
-
-/// Build one tmux invocation that reads the live `alternate_on` flag and runs
-/// the full-history capture, so both describe the same instant. tmux treats the
-/// standalone `;` argument as its command separator.
-fn build_tmux_alternate_capture_args(pane: &str) -> Vec<String> {
-    let mut args = vec![
-        "display-message".to_owned(),
-        "-p".to_owned(),
-        "-t".to_owned(),
-        pane.to_owned(),
-        "#{alternate_on}".to_owned(),
-        ";".to_owned(),
-    ];
-    args.extend(build_tmux_capture_args(pane, None, true));
-    args
-}
-
-pub(crate) fn build_capture_args(lines: Option<u32>, all: bool) -> Vec<String> {
-    let mut args = vec!["-p".to_owned()];
-
+/// The lines a capture reads: the whole history with `--all`, the last `--lines N`,
+/// else the visible pane.
+pub(crate) fn capture_range(lines: Option<u32>, all: bool) -> CaptureRange {
     if all {
-        args.push("-S".to_owned());
-        args.push("-".to_owned());
+        CaptureRange::All
     } else if let Some(lines) = lines {
-        args.push("-S".to_owned());
-        args.push(format!("-{lines}"));
-        args.push("-E".to_owned());
-        args.push("-".to_owned());
+        CaptureRange::Tail(lines)
+    } else {
+        CaptureRange::Visible
     }
-
-    args
 }
 
 fn render_output(
@@ -174,77 +137,22 @@ mod tests {
 
     #[test]
     fn no_lines_captures_visible_pane_only() {
-        assert_eq!(build_capture_args(None, false), vec!["-p"]);
+        assert_eq!(capture_range(None, false), CaptureRange::Visible);
     }
 
     #[test]
     fn zero_lines_is_not_treated_as_unset() {
-        assert_eq!(
-            build_capture_args(Some(0), false),
-            vec!["-p", "-S", "-0", "-E", "-"]
-        );
+        assert_eq!(capture_range(Some(0), false), CaptureRange::Tail(0));
     }
 
     #[test]
     fn lines_captures_tail_range() {
-        assert_eq!(
-            build_capture_args(Some(5), false),
-            vec!["-p", "-S", "-5", "-E", "-"]
-        );
+        assert_eq!(capture_range(Some(5), false), CaptureRange::Tail(5));
     }
 
     #[test]
     fn all_captures_from_start_of_history() {
-        assert_eq!(build_capture_args(None, true), vec!["-p", "-S", "-"]);
-    }
-
-    #[test]
-    fn parse_alternate_on_recognizes_the_live_flag() {
-        assert!(parse_alternate_on("1\n"));
-        assert!(!parse_alternate_on("0\n"));
-        assert!(!parse_alternate_on(""));
-    }
-
-    #[test]
-    fn all_reads_flag_and_capture_in_one_invocation() {
-        assert_eq!(
-            build_tmux_alternate_capture_args("%1"),
-            vec![
-                "display-message",
-                "-p",
-                "-t",
-                "%1",
-                "#{alternate_on}",
-                ";",
-                "capture-pane",
-                "-t",
-                "%1",
-                "-p",
-                "-S",
-                "-",
-            ]
-        );
-    }
-
-    #[test]
-    fn split_alternate_and_capture_splits_at_first_newline() {
-        let (flag, body) = split_alternate_and_capture("1\nalpha\nbeta\n");
-        assert_eq!(flag, "1");
-        assert_eq!(body, "alpha\nbeta\n");
-    }
-
-    #[test]
-    fn split_alternate_and_capture_keeps_flag_like_body_lines() {
-        let (flag, body) = split_alternate_and_capture("0\n1\n2\n");
-        assert_eq!(flag, "0");
-        assert_eq!(body, "1\n2\n");
-    }
-
-    #[test]
-    fn split_alternate_and_capture_handles_a_missing_body() {
-        let (flag, body) = split_alternate_and_capture("0\n");
-        assert_eq!(flag, "0");
-        assert_eq!(body, "");
+        assert_eq!(capture_range(None, true), CaptureRange::All);
     }
 
     #[test]

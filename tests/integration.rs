@@ -511,24 +511,6 @@ impl IsolatedTmuxServer {
         )
     }
 
-    /// A core-library `TmuxInvocation` addressed to this server: `-L <label>`, with
-    /// this server's `TMUX_TMPDIR` and the ambient `TMUX`/`TMUX_PANE` removed, as
-    /// [`Self::tmux_command`] runs tmux.
-    fn core_invocation(&self) -> tmux_tools_core::TmuxInvocation {
-        tmux_tools_core::TmuxInvocation {
-            prefix: vec![
-                "env".to_owned(),
-                "-u".to_owned(),
-                "TMUX".to_owned(),
-                "-u".to_owned(),
-                "TMUX_PANE".to_owned(),
-                format!("TMUX_TMPDIR={}", self.tmpdir.display()),
-            ],
-            socket: Some(self.label.clone()),
-            tmux_bin: "tmux".to_owned(),
-        }
-    }
-
     /// Whether the server still answers `has-session`.
     fn answers(&self) -> bool {
         self.tmux_command(&["has-session"])
@@ -10044,13 +10026,18 @@ fn tiled_launch_raw_output_is_exactly_the_pane_id() {
     );
 }
 
-/// Acceptance: the core `rebalance` operation retiles a ragged window and returns the
-/// geometry tmux reports for it.
+/// Acceptance: the `rebalance` operation retiles a ragged window and returns the
+/// geometry tmux reports for it. The Host port is tested only through the CLI binary,
+/// so the window is marked and owned for the verb's window guard.
 #[test]
 fn core_rebalance_retiles_a_ragged_window_and_returns_its_measured_geometry() {
     let _serial = serial_guard();
     let server = IsolatedTmuxServer::start_inside();
     let window = window_of(&server, server.pane());
+    register_name_and_cwd(&server, server.pane(), "core-rebalance", &harness_cwd());
+    server
+        .tmux(&["set-option", "-w", "-t", &window, TILED_MARKER, "1"])
+        .assert_success("mark the window tiled");
     for split in [["-h", "70"], ["-h", "70"], ["-v", "20"]] {
         server
             .tmux(&[
@@ -10068,10 +10055,8 @@ fn core_rebalance_retiles_a_ragged_window_and_returns_its_measured_geometry() {
     }
     let ragged = window_rects(&server, &window);
 
-    let geometry = tmux_tools_core::with_invocation(server.core_invocation(), || {
-        tmux_tools_core::layout::rebalance(&window)
-    })
-    .expect("rebalance must succeed");
+    let out = rebalance_cli(&server, &window, "json");
+    let geometry = json_payload(&out, "rebalance must succeed");
 
     assert_ne!(
         window_rects(&server, &window),
@@ -10082,14 +10067,17 @@ fn core_rebalance_retiles_a_ragged_window_and_returns_its_measured_geometry() {
     let (measured_window, cols, rows) = tmux_landing(&server, server.pane());
     assert_eq!(
         (
-            geometry.window_id.clone(),
-            u64::from(geometry.min_pane_cols()),
-            u64::from(geometry.min_pane_rows())
+            geometry["window_id"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned(),
+            geometry["min_pane_cols"].as_u64().unwrap_or_default(),
+            geometry["min_pane_rows"].as_u64().unwrap_or_default()
         ),
         (measured_window, cols, rows),
         "rebalance must return the window id and minima tmux reports"
     );
-    assert_eq!(geometry.panes.len(), 4);
+    assert_eq!(window_rects(&server, &window).len(), 4);
 }
 
 /// Acceptance: `launch --help` and `spawn-agent --help` list `tile` and no longer
@@ -10934,14 +10922,15 @@ fn kill_denials_in_a_marked_owned_window_are_unchanged_and_touch_nothing() {
     );
 }
 
-/// The core window guard names which guard failed: the marker, or ownership.
+/// The core window guard names which guard failed: the marker, or ownership. The Host
+/// port is tested only through the CLI binary, so the guard is read through
+/// `rebalance`: it succeeds when the guard holds and its refusal names the failed guard.
 #[test]
 fn core_window_guard_reports_which_guard_failed() {
-    use tmux_tools_core::layout::{window_guard, WindowGuard};
+    use tmux_tools_core::layout::WindowGuard;
 
     let _serial = serial_guard();
     let server = IsolatedTmuxServer::start_inside();
-    let cwd = harness_cwd();
     let mut one_owned = vec![FixturePane::Unregistered; 3];
     one_owned[2] = FixturePane::Owned;
     let cases = [
@@ -10965,10 +10954,16 @@ fn core_window_guard_reports_which_guard_failed() {
     ];
     for (fixture, expected) in cases {
         for target in [&fixture.window, &fixture.panes[0]] {
-            let guard = tmux_tools_core::with_invocation(server.core_invocation(), || {
-                window_guard(target, Some(&cwd))
-            })
-            .expect("the window guard must read the window");
+            let out = rebalance_cli(&server, target, "concise");
+            let guard = if out.status == 0 {
+                WindowGuard::Holds
+            } else if out.stderr.contains(": layout intent: ") {
+                WindowGuard::MarkerAbsent
+            } else if out.stderr.contains(": ownership: ") {
+                WindowGuard::NoOwnedPane
+            } else {
+                panic!("the window guard must read the window: {out:?}")
+            };
             assert_eq!(guard, expected, "window guard for {target}");
         }
     }
