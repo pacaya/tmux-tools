@@ -566,6 +566,26 @@ impl Drop for IsolatedTmuxServer {
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status();
+        // `kill-server` needs the socket. A server whose socket is gone, or whose pid
+        // was never read (a failed startup), still runs `-L <label>`: end it by its
+        // pid and by its label so no test server outlives the suite.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while (self.answers() || process_exists(&self.server_pid)) && Instant::now() < deadline
+        {
+            thread::sleep(Duration::from_millis(20));
+        }
+        if process_exists(&self.server_pid) {
+            let _ = Command::new("kill")
+                .args(["-KILL", &self.server_pid])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        }
+        let _ = Command::new("pkill")
+            .args(["-KILL", "-f", &format!("tmux -L {} ", self.label)])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
         // Remove the directory only once the server is gone, so a server that
         // survives teardown keeps its `<tmp>/tt-tests-*` directory as a leak marker.
         let deadline = Instant::now() + Duration::from_secs(10);

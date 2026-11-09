@@ -343,9 +343,41 @@ fn fixture(version_key: &str) -> PathBuf {
     Path::new(FIXTURE_DIR).join(format!("{version_key}.jsonl"))
 }
 
+/// The version key of every trace fixture in `FIXTURE_DIR`, read at test time and
+/// sorted, so a new fixture file is replayed with no test change (P10.2).
+fn fixture_keys() -> Vec<String> {
+    let mut keys: Vec<String> = std::fs::read_dir(FIXTURE_DIR)
+        .expect("read the fixture directory")
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name().into_string().ok()?;
+            name.strip_suffix(".jsonl").map(str::to_owned)
+        })
+        .collect();
+    keys.sort();
+    assert!(!keys.is_empty(), "no trace fixture in {FIXTURE_DIR}");
+    keys
+}
+
+/// Run `replay` once per trace fixture; a failure names the fixture.
+fn for_every_fixture(replay: fn(&str)) {
+    for key in fixture_keys() {
+        eprintln!("P10.2 replay of fixture {key}");
+        if let Err(panic) = std::panic::catch_unwind(|| replay(&key)) {
+            eprintln!("P10.2 replay of fixture {key} failed");
+            std::panic::resume_unwind(panic);
+        }
+    }
+}
+
+/// The fake `claude --version` output for a fixture's version key.
+fn fake_version(key: &str) -> String {
+    format!("{key} (Claude Code)")
+}
+
 // --- P10.2: replay of the trace fixture ---------------------------------------------
 
-/// Acceptance: replaying the 2.1.319 fixture through the Shim inside a Team from pane
+/// Acceptance: replaying each trace fixture through the Shim inside a Team from pane
 /// `lead`, every call's stdout and exit equal the filled fixture line, and `list`
 /// shows `lead.tm1` with the team id, `parent: "lead"`, `shim_id: "%2"`,
 /// `orphan: false` before the fixture's final `kill-pane`. Every fixture line, that
@@ -353,11 +385,15 @@ fn fixture(version_key: &str) -> PathBuf {
 /// pane is left and the team directory is gone (P2.5).
 #[test]
 fn the_fixture_replays_and_a_clean_exit_closes_the_team() {
+    for_every_fixture(the_fixture_replays_and_a_clean_exit_closes_the_team_with);
+}
+
+fn the_fixture_replays_and_a_clean_exit_closes_the_team_with(key: &str) {
     let _serial = serial_guard();
     let server = IsolatedTmuxServer::start_inside();
     let scene = Scene::new("replay");
     let lead = launch_pane(&server, "lead");
-    let fixture = fixture("2.1.319");
+    let fixture = fixture(key);
     let fixture_path = fixture.display().to_string();
 
     let mut child = start_launcher(
@@ -366,6 +402,7 @@ fn the_fixture_replays_and_a_clean_exit_closes_the_team() {
         &lead,
         &[
             ("FAKE_CLAUDE_FIXTURE", &fixture_path),
+            ("FAKE_CLAUDE_VERSION", &fake_version(key)),
             ("FAKE_CLAUDE_PAUSE_BEFORE_KILL", "1"),
             ("FAKE_CLAUDE_SELF", "1"),
         ],
@@ -447,17 +484,22 @@ fn the_fixture_replays_and_a_clean_exit_closes_the_team() {
 /// directory.
 #[test]
 fn a_clean_exit_closes_teammates_that_claude_left_open() {
+    for_every_fixture(a_clean_exit_closes_teammates_that_claude_left_open_with);
+}
+
+fn a_clean_exit_closes_teammates_that_claude_left_open_with(key: &str) {
     let _serial = serial_guard();
     let server = IsolatedTmuxServer::start_inside();
     let scene = Scene::new("leftopen");
     let lead = launch_pane(&server, "lead");
-    let fixture_path = fixture("2.1.319").display().to_string();
+    let fixture_path = fixture(key).display().to_string();
     let child = start_launcher(
         &server,
         &scene,
         &lead,
         &[
             ("FAKE_CLAUDE_FIXTURE", &fixture_path),
+            ("FAKE_CLAUDE_VERSION", &fake_version(key)),
             ("FAKE_CLAUDE_SKIP_KILL", "1"),
         ],
         &[],
@@ -477,11 +519,15 @@ fn a_clean_exit_closes_teammates_that_claude_left_open() {
 /// closes the pane.
 #[test]
 fn a_failed_exit_keeps_teammates_as_orphans_that_kill_closes() {
+    for_every_fixture(a_failed_exit_keeps_teammates_as_orphans_that_kill_closes_with);
+}
+
+fn a_failed_exit_keeps_teammates_as_orphans_that_kill_closes_with(key: &str) {
     let _serial = serial_guard();
     let server = IsolatedTmuxServer::start_inside();
     let scene = Scene::new("crash");
     let lead = launch_pane(&server, "lead");
-    let fixture_path = fixture("2.1.319").display().to_string();
+    let fixture_path = fixture(key).display().to_string();
 
     let child = start_launcher(
         &server,
@@ -489,6 +535,7 @@ fn a_failed_exit_keeps_teammates_as_orphans_that_kill_closes() {
         &lead,
         &[
             ("FAKE_CLAUDE_FIXTURE", &fixture_path),
+            ("FAKE_CLAUDE_VERSION", &fake_version(key)),
             ("FAKE_CLAUDE_SKIP_KILL", "1"),
             ("FAKE_CLAUDE_EXIT", "1"),
         ],
@@ -1595,6 +1642,10 @@ fn pane_independent_result(out: &CmdOutput, keys: &[&str]) -> (i32, Vec<Value>) 
 /// Launcher; `kill --target lead` closes the Leader, and no pane is left.
 #[test]
 fn spawn_agent_claude_on_tmux_starts_claude_through_the_launcher() {
+    for_every_fixture(spawn_agent_claude_on_tmux_starts_claude_through_the_launcher_with);
+}
+
+fn spawn_agent_claude_on_tmux_starts_claude_through_the_launcher_with(key: &str) {
     let _serial = serial_guard();
     let server = IsolatedTmuxServer::start_inside();
     let harness_pane = server.pane().to_owned();
@@ -1607,10 +1658,11 @@ fn spawn_agent_claude_on_tmux_starts_claude_through_the_launcher() {
     std::fs::create_dir_all(scene.dir.join("config/tmux-tools")).unwrap();
     let agents_toml = scene.dir.join("config/tmux-tools/agents.toml");
     let start = scene.dir.join("start");
-    let fixture_path = fixture("2.1.319").display().to_string();
+    let fixture_path = fixture(key).display().to_string();
     // A pane started by tmux gets the server's global environment.
     for (key, value) in scene.base_env().into_iter().chain([
         ("FAKE_CLAUDE_FIXTURE".to_owned(), fixture_path),
+        ("FAKE_CLAUDE_VERSION".to_owned(), fake_version(key)),
         ("FAKE_CLAUDE_PAUSE_BEFORE_KILL".to_owned(), "1".to_owned()),
         ("FAKE_CLAUDE_NO_TEAM_SLEEP".to_owned(), "1".to_owned()),
         (
