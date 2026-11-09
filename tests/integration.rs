@@ -13174,6 +13174,57 @@ args = ["--x"]
     );
 }
 
+/// Orca --cwd fix: an Orca pane's shell starts in the worktree root, not in the
+/// caller's cwd, so a relative `--cwd` is made absolute against the caller's cwd before
+/// the pane command `cd`s to it, as tmux resolves it. An absolute `--cwd` is kept, and
+/// no `--cwd` keeps the pane command without a `cd`.
+#[test]
+fn spawn_agent_on_orca_cds_to_a_relative_cwd_resolved_against_the_caller() {
+    let fake = FakeOrca::start("orca-spawn-cwd");
+    fake.write_agents_toml(
+        r#"
+[ttpwd]
+binary = "/opt/tools/pwd-agent"
+
+[ttpwd.access.default]
+args = []
+"#,
+    );
+    let work = std::fs::canonicalize(fake.dir.join("work")).unwrap();
+    std::fs::create_dir_all(work.join("sub dir")).unwrap();
+    fake.cli(&["spawn-agent", "ttpwd", "--name", "rel", "--cwd", "sub dir"], &[])
+        .assert_success("spawn-agent --cwd <relative>");
+    fake.cli(&["spawn-agent", "ttpwd", "--name", "abs", "--cwd", "/opt/elsewhere"], &[])
+        .assert_success("spawn-agent --cwd <absolute>");
+    fake.cli(&["spawn-agent", "ttpwd", "--name", "none"], &[])
+        .assert_success("spawn-agent without --cwd");
+    // A logical $PWD through a symlink that names the caller's directory is kept, so
+    // the pane's `cd` resolves `..` against it as a tmux pane would.
+    let link = fake.dir.join("link");
+    std::os::unix::fs::symlink(&work, &link).unwrap();
+    let link_str = link.display().to_string();
+    fake.cli(
+        &["spawn-agent", "ttpwd", "--name", "logical", "--cwd", "../x"],
+        &[("PWD", link_str.as_str())],
+    )
+    .assert_success("spawn-agent --cwd ../x with a symlinked PWD");
+
+    assert_eq!(
+        fake.pane_commands(),
+        vec![
+            format!(
+                "cd -- '{}' && '/opt/tools/pwd-agent'",
+                work.join("sub dir").display()
+            ),
+            "cd -- '/opt/elsewhere' && '/opt/tools/pwd-agent'".to_owned(),
+            "'/opt/tools/pwd-agent'".to_owned(),
+            format!("cd -- '{link_str}/../x' && '/opt/tools/pwd-agent'"),
+        ],
+        "{:?}",
+        fake.log()
+    );
+}
+
 /// Lead decision of ISSUE-261108-2323-02: an `orca` call that exits 0 without a JSON
 /// answer is retried, at most 3 attempts in total, before the existing error.
 #[test]

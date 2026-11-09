@@ -179,6 +179,15 @@ fn launch_command(argv: &[String], cwd: Option<&PathBuf>, bare: bool) -> Result<
     // with `-`, so a relative cwd like `-foo` is not parsed as a flag.
     let cwd_prefix = match cwd {
         Some(cwd) => {
+            // A relative --cwd is relative to the caller's cwd. tmux starts the pane's
+            // shell there, so on tmux the pane command keeps the path as given. Orca
+            // starts it in the worktree root, so on Orca the path is made absolute
+            // against the caller's directory, as tmux would see it.
+            let cwd = if cwd.is_relative() && host::current().uses_pane_records() {
+                caller_dir()?.join(cwd)
+            } else {
+                cwd.clone()
+            };
             let cwd = cwd
                 .to_str()
                 .ok_or_else(|| anyhow!("--cwd path is not valid UTF-8: {}", cwd.display()))?;
@@ -203,6 +212,23 @@ fn launch_command(argv: &[String], cwd: Option<&PathBuf>, bare: bool) -> Result<
         Some(prefix) => format!("{prefix} {wrapped}"),
         None => wrapped,
     })
+}
+
+/// The caller's directory as tmux starts a client's new pane in it: the logical `$PWD`
+/// when it is absolute and names the same directory as the physical cwd, else the
+/// physical cwd. A shell `cd` then resolves `..` against the logical path, as on tmux.
+fn caller_dir() -> Result<PathBuf> {
+    use std::os::unix::fs::MetadataExt;
+    let physical = std::env::current_dir()
+        .map_err(|error| anyhow!("--cwd: cannot read the current directory: {error}"))?;
+    let logical = std::env::var_os("PWD").map(PathBuf::from).filter(|pwd| {
+        pwd.is_absolute()
+            && match (std::fs::metadata(pwd), std::fs::metadata(&physical)) {
+                (Ok(a), Ok(b)) => a.dev() == b.dev() && a.ino() == b.ino(),
+                _ => false,
+            }
+    });
+    Ok(logical.unwrap_or(physical))
 }
 
 pub(crate) fn shell_quote(value: &str) -> String {
