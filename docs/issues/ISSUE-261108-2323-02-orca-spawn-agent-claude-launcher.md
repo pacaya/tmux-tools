@@ -2,7 +2,7 @@
 id: ISSUE-261108-2323-02
 kind: issue
 category: enhancement
-status: needs-triage
+status: ready-for-agent
 brief_contract: agent-brief.v3
 context: tmux-tools
 summary: on Orca, spawn-agent claude starts Claude through tmux-tools claude-teams, so a driven Leader's teammates are tmux-tools panes, proved by the live Orca contract run
@@ -95,4 +95,5 @@ contract:
 
 ## Triage Notes
 - Supersedes `ISSUE-261107-2103-01`.
-- Unresolved: `PRD-261108-0447-01` `orca-leader-agent-state` (P8.5) is resolved at this issue's dispatch triage.
+- 2026-11-09: `orca-leader-agent-state` resolved live into `PRD-261108-0447-01` P8.5 (Notes item 9); dispatch readiness passed; `needs-triage` → `ready-for-agent`.
+- Release waits on harness `claude:ISSUE-261109-0201-04` (text and scripts) release; implementation does not wait.

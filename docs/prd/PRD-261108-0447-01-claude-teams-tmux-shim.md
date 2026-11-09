@@ -205,13 +205,13 @@ This clause adds a first rule to PRD-261107-0825-01 P3 and owns that rule.
    - it has a `team` and that Team's `leader.lock` is not held or its team directory does not exist.
    `orphan` is reported only; no verb closes a pane because it is an Orphan.
 4. `kill --target <name>` acts on a Teammate pane or an Orphan as on any pane. `kill` of a Leader closes no Teammate pane. `prompt` and `send` into a Teammate pane are allowed as on any pane.
-5. The Leader pane is an ordinary Pane registration when `spawn-agent` created it. `prompt`, `wait-idle`, `capture`, `send`, `interrupt`, and `kill` on the Leader keep their meaning. The Launcher passes the terminal through to Claude and adds no output of its own while Claude runs. Interrupt keys reach Claude, and the Launcher ignores them (P2.5). On Orca, Host state and the P9.6 delivery determination of PRD-261107-0825-01 for a Leader under the Launcher are verified live. `[OPEN: orca-leader-agent-state]`
+5. The Leader pane is an ordinary Pane registration when `spawn-agent` created it. `prompt`, `wait-idle`, `capture`, `send`, `interrupt`, and `kill` on the Leader keep their meaning. The Launcher passes the terminal through to Claude and adds no output of its own while Claude runs. Interrupt keys reach Claude, and the Launcher ignores them (P2.5). On Orca, Orca does not report a Leader under the Launcher reliably (Notes item 9): its `agentIdentity` can be `claude-agent-teams`, `null`, or `claude`, and its agent row in `orca worktree ps --json` can be absent. So the Leader's Host state can be `null`, and its multi-line prompt delivery is not guaranteed. tmux-tools applies PRD-261107-0825-01 P9.6 and P9.10 to the Leader with no Leader special case: Host state is the P9.10 mapping of the Leader's agent row at the time of the call (`null` when there is no row); a multi-line `prompt` follows P9.6: it is sent when delivery is guaranteed, and it is refused before any transmission when delivery is not guaranteed and the Surface declares bracketed paste. While a Teammate pane of the Leader lives, Orca can list the teammate as a `working` entry of the Leader row's `subagents[]` although the teammate is idle; P9.10 then gives the Leader Host state `working`, and `wait-idle` and the `prompt` settle on the Leader end only by `--until` or by timeout.
 
 ### P9 — spawn-agent claude through the launcher
 
 1. On Orca, `spawn-agent` for an Agent profile whose binary basename is `claude` runs the pane command `<tmux-tools path> claude-teams --claude <binary> -- <claude args>`, where `<tmux-tools path>` is the canonical path of the running binary, `<binary>` is the profile's resolved binary (the program that `spawn-agent` starts today), and `<claude args>` are the arguments that `spawn-agent` builds today. The Pane registration, `agent`, Surface, and Keep-alive behavior stay as today.
 2. Step 3 of P11 extends item 1 to tmux.
-3. `orca claude-teams` is never used. Orca managed-account login is not replicated. Orca shows a plain `claude` leader, not "claude agent teams".
+3. `orca claude-teams` is never used. Orca managed-account login is not replicated. Orca can report the Leader's `agentIdentity` as `claude-agent-teams` (Notes item 9); tmux-tools does not depend on that value except through P8.5.
 
 ### P10 — Contract tests per Claude version
 
@@ -294,11 +294,7 @@ Rollback is reverting the release. A previous version ignores the new Pane recor
 
 ## Open Questions
 
-### orca-leader-agent-state
-- question: With `claude` running as a child of `tmux-tools claude-teams` in an Orca pane, does `terminal show` report `agentIdentity` `claude` and does `orca worktree ps --json` report the agent row with `hasLivePty: true`? Acceptance: a live Orca run records both; else P8.5 states the Leader's Host state is `null` and its multi-line prompt delivery is not guaranteed. Evidence so far (Notes, item 2): Orca reports `agentIdentity` `claude` for the versioned binary started directly in a pane, also with Orca hooks off; a `claude` under a parent process is not checked yet. Notes item 7: the agent row, its state, and `hasLivePty` do not depend on Orca's Claude hook.
-- dimension: contracts/integrations
-- resolve-by: during-triage
-- owner: this PRD
+None.
 
 ## Notes
 
@@ -319,6 +315,10 @@ Live Orca check, 2026-11-09 (Orca 1.4.253, tmux-tools 0.4.0, `orca-close-on-clea
 
 8. Two Orca panes created by `tmux-tools launch --split window --bare` with the command `sh -c '(…; exit <n>) || exec "${SHELL:-/bin/sh}" -l'` (so the pane runs `exec sh -c …`). The exit-0 pane closed by itself: its handle left `orca terminal list` and its Pane record left `tmux-tools list`. The exit-1 pane kept its output and a login shell prompt, stayed in `orca terminal list`, and closed with `tmux-tools kill`. The P9.9 login shell does not keep an `exec` pane open.
 
+Live Orca check, 2026-11-09 (Orca 1.4.253, tmux-tools 0.5.0, Claude 2.1.319, `orca-leader-agent-state`):
+
+9. A Leader started by `tmux-tools claude-teams --claude <versioned binary> -- --settings '{"disableAllHooks":true}'` in an Orca pane of worktree `tools/tmux-tools`, with Claude as the Launcher's child (`--teammate-mode tmux`, fake `TMUX`, `TT_TEAM`). Right after start, `terminal show` reported `agentIdentity` `claude-agent-teams`, and `orca worktree ps --json` had no row for the pane (`host_state` `null`). After one turn, `agentIdentity` was `null` and there was still no row; a multi-line `prompt` gave `one_submission_delivery: "unavailable"`, `submit: "assumed"`, and arrived as one prompt (the pane came from `launch`, `agent` `null`, so delivery was not guaranteed). After the Leader started one teammate, both panes had `agentIdentity` `claude` and an agent row with `hasLivePty: true`; the teammate pane `<leader>.tm1` had `team`, `parent`, and `shim_id` `%2`. The Leader row listed the idle teammate as a `working` entry of `subagents[]`, so the Leader Host state stayed `working`: `prompt` and `wait-idle` on the Leader timed out with `host_state` `working`, while `wait-idle` on the teammate ended `ready_matched` with `done`. After the Leader stopped the teammate, the teammate pane closed, and the Leader row was `done` with `hasLivePty: true`. A clean `/exit` ended the Launcher and deleted the team directory. The first start in the new pane failed open (P2.7) with `claude-teams: no team: orca terminal list exited 0 without a JSON answer`; for some seconds after the pane was created, `tmux-tools list` on Orca also failed with that error, and later 20 calls of each passed. A `spawn-agent` start runs the Launcher at the same moment, so the P10.6 run can meet this fail-open. A fail-open run is not a Team run: in it Claude had `--teammate-mode in-process`, `agentIdentity` `claude`, and a `done` row from the start.
+
 herdmates (github.com/caioniehues/herdmates, a Herdr plugin of the same launcher + `tmux` symlink shape) found these failure classes: host size semantics differ (#135, #139: inverted `-l`, `resize-pane -x` drift, thin rows without layout), which P6.1 avoids by choosing target and direction and setting no size; a versioned binary basename made the host show teammates as unknown (#134), which Notes item 2 shows does not happen on Orca; launch by typing into a pane hit shell autocorrect (#117), which P6.2 avoids by create-then-close; hook signals routed to the wrong pane (#133), the class of P6.5.
 
 Herdr surface for its later backend: `herdr pane split|run|read|rename|close|resize|get|list|layout|report-metadata`, `herdr agent wait|list`, `herdr notification show`, `herdr api schema --json`; opaque ids (`w1A:p9`, `w1A:t3`); environment `HERDR_ENV=1`, `HERDR_SOCKET_PATH` (NDJSON), `HERDR_PANE_ID`, `HERDR_TAB_ID`, `HERDR_WORKSPACE_ID`, `HERDR_BIN_PATH`, `HERDR_AGENT`; events `pane.exited`, `pane.closed`.
@@ -333,6 +333,6 @@ Herdr surface for its later backend: `herdr pane split|run|read|rename|close|res
 | architecture shape | decided | P3; P5.1; P5.2 |
 | stack | n/a | brownfield Rust workspace — existing conventions ratified |
 | data/schema | decided | P4; P6.4; P7.3; ## Contracts |
-| contracts/integrations | deferred | orca-leader-agent-state; orca-close-on-clean-exit decided in P6.3 (Notes item 8) |
+| contracts/integrations | decided | P6.3 (Notes item 8); P8.5 (Notes item 9) |
 | UX (if UI) | n/a | CLI only; output per P8 |
 | testing/seams | decided | P10 |
