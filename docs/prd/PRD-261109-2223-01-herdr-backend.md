@@ -7,7 +7,7 @@ stakes: internal
 gate: pending
 contracts: approved 2026-11-09
 contexts: [tmux-tools]
-terms: [Host, Host backend, Host selection, Host capabilities, Host state, Pane registration, Pane state, Target, Ownership, Parent, History mark, Completeness, Keep-alive wrap, Surface, Readiness, Idle detection, Turn observation]
+terms: [Host, Host backend, Host selection, Host capabilities, Host state, Pane registration, Pane state, Target, Ownership, Parent, hc terminal, hc name, History mark, Completeness, Keep-alive wrap, Surface, Readiness, Idle detection, Turn observation]
 contract:
   schema: planning-contracts.record.v1
   clauses:
@@ -72,6 +72,14 @@ contract:
       clause: p10-tests
     - relation: requires
       repository: tmux-tools
+      record: PRD-261107-0825-01
+      clause: p9-orca
+    - relation: requires
+      repository: tmux-tools
+      record: PRD-261108-0447-01
+      clause: p2-launcher
+    - relation: requires
+      repository: tmux-tools
       record: PRD-261108-0447-01
       clause: p7-parent
     - relation: requires
@@ -82,6 +90,10 @@ contract:
       repository: tmux-tools
       record: PRD-260918-0323-01
       clause: p3-state
+    - relation: requires
+      repository: tmux-tools
+      record: PRD-260918-0323-01
+      clause: p4-capture
     - relation: requires
       repository: tmux-tools
       record: PRD-260918-0323-01
@@ -105,9 +117,9 @@ Under Herdr, panes that `tmux-tools` creates are invisible in the Herdr window a
 - **Host** gains the value `herdr`: herdr-core terminals driven through the `hc` CLI.
 - **hc terminal:** one herdr-core terminal, addressed by `t<n>`. On Herdr, a pane is an hc terminal.
 - **hc name:** the `--name` of an hc terminal that this tool creates: `tt-` followed by the first 16 lowercase hex characters of SHA-256 of the UTF-8 tmux-tools pane name.
-- **Calling terminal:** the hc terminal named by `HC_TERMINAL_ID`.
+- On Herdr, the calling pane is the hc terminal named by `HC_TERMINAL_ID`.
 
-`CONTEXT.md` is updated: Host, Host backend, Host capabilities, and Host state name the Herdr backend and its values; Pane registration names the `tt.*` labels (P4.1); Target names the hc address form (P7.6).
+`CONTEXT.md` is updated: Host, Host backend, Host selection, Host capabilities, and Host state name the Herdr backend, its detection rule, and its values; Pane registration names the `tt.*` labels (P4.1); Ownership names its Herdr evidence (P4.5); Keep-alive wrap names its Herdr rule (P7.5); Target names the hc address form (P7.6); `hc terminal` and `hc name` are minted.
 
 ### P2 — Host selection
 
@@ -116,26 +128,27 @@ Under Herdr, panes that `tmux-tools` creates are invisible in the Herdr window a
 3. When Herdr is selected and `hc` is not on `PATH` or `hc server status --json` fails, the invocation fails with exit 1 and names `herdr` and the selection source (PRD-261107-0825-01 P3.4).
 4. The backend calls only `hc <command> … --json` CLI commands and reads their JSON. It never calls `herdr-app` and never uses `hc connect`.
 5. `server_identity` is `core.id` from `hc server status --json`.
+6. Every lookup of the calling pane goes through the Host port: `self`, `status` without `--target`, the self-pane refusal, and `tt.parent` recording use `HC_TERMINAL_ID` on Herdr and never read `$TMUX` or `TMUX_PANE` there, also when a stale `TMUX_PANE` is set.
 
 ### P3 — Placement and visibility
 
 1. A new terminal shows in the Herdr window only through the labels `herdr.space` and `herdr.tab`. Their source, first match: with `--target`, the target terminal's labels; with `HC_TERMINAL_ID` set, the calling terminal's labels; otherwise `TMUX_TOOLS_HERDR_SPACE` and `TMUX_TOOLS_HERDR_TAB`. When no source gives a space, the terminal gets neither label and stays hidden.
 2. `--split h` and `--split v` set both `herdr.space` and `herdr.tab`, so the terminal joins that tab; Herdr chooses its position and the split direction has no effect. No `--split`, and `--split window`, set only `herdr.space`, so Herdr opens a new tab.
 3. `--split tile`, `--size`, `--session`, `--window`, and `rebalance` exit 3 with the PRD-261107-0825-01 P5.3 messages and no side effect. The automatic tile after a spawn is skipped (P5.4).
-4. The terminal starts with `hc run --bg --outlive-parent --no-notify --name <hc name> --cwd <cwd>` plus its labels (P3.1, P4.1). `--rm` is never used.
+4. The terminal starts with `hc run --bg --outlive-parent --no-notify --name <hc name> --cwd <cwd>` plus its labels (P3.1, P4.1), so its name and registration exist when it is created. Herdr creates through the port's `create_registered` path, not the create-then-name path of `layout::place`, and measures no geometry. `--rm` is never used.
 
 ### P4 — Pane registration, names, and lifetime
 
 1. The Pane registration is stored as hc labels on the terminal: each `RegistrationKey` is the label `tt.<key in snake_case>` with a string value (`tt.surface_unvalidated` is `"true"` or `"false"`); an absent label is `None`. The label `where` is set to the tmux-tools pane name. Herdr uses no Pane record (`uses_pane_records()` is false).
-2. Name validation stays PRD-261107-0825-01 P4.1. Uniqueness among live terminals comes from the hc name: when `hc run` reports that the name is taken, the spawn fails with exit 1 and no terminal is created. A name is free again when its terminal is removed.
+2. Name validation stays PRD-261107-0825-01 P4.1. Uniqueness among live terminals comes from the hc name: when `hc run` reports that the name is taken, the spawn fails with exit 1 and no terminal is created. A name is free again when its terminal is removed (P4.4).
 3. The `tt.parent` label follows PRD-261108-0447-01 P7.
-4. A terminal in state `finished` is dead: `list` shows its name once with `status: dead`, then the backend runs `hc rm` on it. A dead name never resolves to another terminal.
+4. A terminal in state `finished` that carries `tt.name` is dead. Every invocation that resolves, lists, or spawns a name first removes, by hc address, each dead terminal that carries that name (`hc rm`); `list` shows each removed name once with `status: dead`. A verb that resolves only a dead name fails with exit 1 as for an unknown name. A spawn of that name then proceeds. Terminals are always resolved and removed by hc address, never by hc name.
 5. Ownership reads the `tt.*` labels: `tt.name` is present, and `tt.cwd` matches the current working directory where both are known.
 
 ### P5 — Capture, send, and keys
 
-1. `capture` uses `hc read --lines <n>`; `--lines 0` gives the visible screen. A read with `complete: false` is never reported as complete. The History mark and the Completeness conditions follow `[OPEN: herdr-history-mark]`.
-2. `send` keeps its PRD-261107-0825-01 P9.4 meaning. Each argument that tmux's key grammar parses as a key is sent as the matching `hc keys` key name. Literal text without Enter is sent through `hc keys`, one key per character. A character that `hc keys` cannot type ends the verb with exit 1 and stderr `cannot type on herdr: U+<XXXX>` (uppercase hex, at least four digits), after the keys sent before it. `--enter` adds the key `enter`.
+1. `capture` uses `hc read --lines <n>`; `--lines 0` gives the visible screen. A read with `complete: false` is never reported as complete. The History mark, the Completeness conditions, the `hc read` call that serves `capture --all`, and whether the PRD-260918-0323-01 P4 no-scrollback notice fires on Herdr follow `[OPEN: herdr-history-mark]`.
+2. `send` keeps its PRD-261107-0825-01 P9.4 meaning. Each argument that tmux's key grammar parses as a key is sent as the matching `hc keys` key name. Literal text without Enter is sent through `hc keys`, one key per character. Every argument is checked before anything is sent: a key name with no `hc keys` name ends the verb with exit 1 and stderr `cannot type on herdr: <argument as written>`; a character that `hc keys` rejects ends it with exit 1 and stderr `cannot type on herdr: U+<XXXX>` (uppercase hex, at least four digits). The `hc` error result decides that a character cannot be typed. Nothing is sent when either check fails. `--enter` adds the key `enter`.
 3. `send-enter` sends the key `enter`; `escape` sends the key `esc`.
 4. `interrupt` sends the resolved Surface's `interrupt_key` through P5.2 and keeps every current refusal rule. It never uses `hc interrupt`.
 
@@ -145,22 +158,23 @@ Under Herdr, panes that `tmux-tools` creates are invisible in the Herdr window a
 2. Host state comes from `status` in `hc get --json`: `idle`, `working`, `blocked`, and `done` map to themselves; `error` maps to `blocked`; `null`, any other word, or a `finished` terminal map to `null`. Waits follow PRD-261107-0825-01 P6.2.
 3. `status --format json` reports `host_word`: the exact hc status word, or `null`. On tmux and Orca, `host_word` is always `null`.
 4. In the settle step of `prompt`, a Host state ends the settle only when `status_ms` is after the submission.
-5. `prompt` submits with `hc send <terminal> <text>` and never `--force`. When hc refuses because the program is blocked, `prompt` exits 1 with stderr `prompt target blocked: <reason>` and no retry. `submit` is `confirmed` when `turn` goes up, or Host state `working` is seen, after the send; it is `accepted` when `hc send` succeeds and neither is seen within the settle timeout.
-6. Delivery (PRD-260918-0323-01 P1): delivery is guaranteed only when the `[OPEN: herdr-bracketed-paste]` check passes. Until then, a multi-line prompt to a Surface that declares bracketed paste is refused before any transmission, and other prompts are sent as unavailable delivery.
+5. `prompt` submits with `hc send <terminal> <text>` and never `--force`. When hc refuses because the program is blocked, `prompt` exits 1 with stderr `prompt target blocked: <reason>` and no retry. `submit` is `confirmed` when, against a baseline read before the send, `turn` goes up or the status word changes to `working` with `status_ms` after the send; an unchanged pre-send `working` never confirms. It is `accepted` when `hc send` succeeds and neither is seen within the settle timeout.
+6. Delivery (PRD-260918-0323-01 P1): delivery is guaranteed only when the `[OPEN: herdr-bracketed-paste]` check passes. Until then, every multi-line prompt on Herdr is refused before any transmission, and single-line prompts are sent as unavailable delivery.
 
 ### P7 — notify, self, list, kill, launch
 
 1. `notify` exits 0 and prints `notify: not delivered on herdr` on stderr (PRD-261107-0825-01 P7.4).
 2. `self --format json` reports `host: "herdr"`. `driven` is true when the calling terminal has a `tt.name` label. Without `HC_TERMINAL_ID`, `self`, and every verb that acts on the calling pane without `--target`, exits 1 and names `HC_TERMINAL_ID`.
-3. `list` shows the terminals of `hc ls --all --json` that carry `tt.name`, after P4.4. In rows, `pane` is the hc address, `session` is the `herdr.space` label or `null`, `window` is the `herdr.tab` label or `null`, and a live terminal has `status: running`. Every `--format json` key that the result has on tmux and that has no Herdr source is `null` (the PRD-261107-0825-01 P9.13 rule).
+3. `list` shows the terminals of `hc ls --all --json` that carry `tt.name`, after P4.4. In rows, `pane` is the hc address, `session` is the `herdr.space` label or `null`, and a live terminal has `status: running`; rows gain no `window` key. In a result that already carries a `window` value (`status`, `spawn-agent`, `launch`), it is the `herdr.tab` label or `null`. Every `--format json` key that the result has on tmux and that has no Herdr source is `null` (the PRD-261107-0825-01 P9.13 rule).
 4. `kill` resolves the name, applies the self-pane refusal and the Ownership check, runs `hc kill`, then `hc rm`. A `not_found` result after the kill counts as success.
 5. `launch` keeps the shell after the command as tmux does (Keep-alive wrap); `--bare` runs the command so the terminal finishes with it.
-6. A Target on Herdr is a tmux-tools pane name or an hc address `t<n>`.
+6. A Target on Herdr is a tmux-tools pane name or an hc address `t<n>`. A registered name wins; a value is used as an hc address only when no registered name matches it.
+7. `claude-teams` cannot set up a Team on host `herdr`: it fails open per PRD-261108-0447-01 P2.7 with `<reason>` `no teammate shim on herdr`. So `spawn-agent claude` on Herdr starts Claude with in-process teammates, and the tmux and Orca Launcher paths do not change.
 
 ### P8 — Contract tests
 
 1. The seam is the CLI binary, driven by `tests/integration.rs` (PRD-261107-0825-01 P10.1). One in-crate unit test covers the hc name function.
-2. The default `cargo test --workspace --features test-fixtures` run tests the binary against a fake `hc` (`tests/contract/fake_hc.py`). It covers P2, P3, P4.1–P4.4, P5.2, P6.2, P6.3, P6.5, P7, and the exit-3 cases.
+2. The default `cargo test --workspace --features test-fixtures` run tests the binary against a fake `hc` (`tests/contract/fake_hc.py`). It covers P2 (including P2.6 with a stale `TMUX_PANE`), P3, P4.1–P4.4 (including a duplicate name, and a finished `--bare` terminal followed by a respawn of its name), P5.2, P6.2, P6.3, P6.5 (including a send while the previous turn stays `working`), P7 (including P7.7 with a binary named `claude`), and the exit-3 cases.
 3. `TT_TEST_HERDR=1` runs the full P10 contract suite against a private core (`HC_SESSION=tt-tests-<pid>`). At the end, also on failure, the run stops that core and deletes its state directory `~/.local/state/herdr-core/tt-tests-<pid>`. It never reaches the default core.
 4. `TMUX_TOOLS_LIVE_HERDR=1` runs the contract suite in the default core from a plain Herdr terminal (no `$TMUX`, `HC_TERMINAL_ID` set). It covers a Claude agent pane with Host state, a key-name and a literal send, a refused multi-line prompt while `[OPEN: herdr-bracketed-paste]` is open, and a `--split v` pane in the caller's tab.
 5. Every terminal a run creates is killed and removed by that run, also on failure. A run ends by asserting that neither `tmux-tools list` nor `hc ls --all --json` shows a terminal it created.
@@ -173,10 +187,11 @@ Under Herdr, panes that `tmux-tools` creates are invisible in the Herdr window a
 
 ## Codebase fit
 
-- Reuse: the `HostPort` trait and its native-registration path (`core/src/host/mod.rs`, the tmux `read_registration_value`/`write_registration_value` pattern); `core/src/host/orca/keys.rs` key-grammar parsing; `src/cmd/safety.rs` and `names::pane_is_owned`; `tests/contract/fake_orca.py` and `tests/contract/orca.rs` as patterns for the fake host and the opt-in live run.
+- Reuse: the `HostPort` trait, its `create_registered` creation path, and its native registration read and write (`core/src/host/mod.rs`); `core/src/host/orca/keys.rs` key-grammar parsing; `src/cmd/safety.rs` and `names::pane_is_owned`; `tests/contract/fake_orca.py` and `tests/contract/orca.rs` as patterns for the fake host and the opt-in live run.
 - Conventions: `CONTEXT.md`; ADR-260919-0146-01 (surfaces); PRD-261107-0825-01 (Host port); PRD-260918-0323-01 P1, P3, P7.
 - New homes: `core/src/host/herdr.rs` (and `core/src/host/herdr/keys.rs` if the key map needs its own file); `tests/contract/fake_hc.py`; `tests/contract/herdr.rs`.
 - Planned-record dependencies: the `requires` references in frontmatter; no `implementation_after`.
+- Shared code that changes: `src/cmd/self_.rs`, `src/cmd/status.rs`, `core/src/target.rs` (P2.6); the creation dispatch in `core/src/layout.rs` (P3.4); `src/cmd/claude_teams.rs` (P7.7); `src/cmd/list.rs` only for Herdr rows (P7.3).
 - Active-plan overlaps: none. PRD-261108-0447-01 (shim) is implemented; its Herdr shim is out of scope here.
 
 ## Contracts
@@ -194,11 +209,11 @@ Under Herdr, panes that `tmux-tools` creates are invisible in the Herdr window a
 - **Detection order** — P2.2.
 - **`TMUX_TOOLS_HERDR_SPACE`, `TMUX_TOOLS_HERDR_TAB`** — Herdr space id and tab id for new terminals when no `--target` and no `HC_TERMINAL_ID` (P3.1).
 - **hc terminal fields written by this tool** — `--name tt-<16 lowercase hex of SHA-256(name)>`; labels `herdr.space`, `herdr.tab` (P3), `where=<name>`, and the `tt.*` labels; flags `--outlive-parent --no-notify`.
-- **JSON results on Herdr** — `host: "herdr"`; `list` rows per P7.3; keys with no Herdr source are `null`.
+- **JSON results on Herdr** — `host: "herdr"`; `list` rows per P7.3 (no `window` key); `window` in `status`, `spawn-agent`, `launch` is the `herdr.tab` label or `null`; keys with no Herdr source are `null`.
 - **`status --format json`** — adds `host_word: string | null` on every host; always `null` on tmux and Orca.
 - **`self --format json`** — `host` adds `"herdr"`; `driven` per P7.2.
 - **Exit code 3 on Herdr** — `--split tile`, `--size`, `--session`, `--window`, `rebalance` (P3.3).
-- **stderr texts** — `notify: not delivered on herdr` (exit 0); `cannot type on herdr: U+<XXXX>` (exit 1); `prompt target blocked: <reason>` (exit 1).
+- **stderr texts** — `notify: not delivered on herdr` (exit 0); `cannot type on herdr: U+<XXXX>` and `cannot type on herdr: <argument as written>` (exit 1); `prompt target blocked: <reason>` (exit 1); `claude-teams: no team: no teammate shim on herdr; starting claude without teammate panes` (P7.7).
 - **Test switches** — `TT_TEST_HERDR=1` (private core), `TMUX_TOOLS_LIVE_HERDR=1` (live run).
 
 ## Verification and release
@@ -220,10 +235,10 @@ Rollback is reverting the release: the previous version cannot select `herdr`, a
 ## Open Questions
 
 ### herdr-history-mark
-How is the History mark taken on Herdr, and when is Completeness true? `hc read` has no read cursor; it reports `complete` and `how` (`screen` | `history` | `stitched`) and `cols`. Default if not resolved: Completeness is false for every Herdr `prompt` result, as on Orca. · dimension: contracts/integrations · resolve-by: during-triage · owner: maintainer
+How is the History mark taken on Herdr, when is Completeness true, which `hc read` call serves `capture --all`, and does the PRD-260918-0323-01 P4 no-scrollback notice fire? `hc read` has no read cursor; it reports `complete` and `how` (`screen` | `history` | `stitched`) and `cols`. Default if not resolved: Completeness is false for every Herdr `prompt` result, as on Orca; `capture --all` reads the largest history `hc read` returns; no notice fires. · dimension: contracts/integrations · resolve-by: during-triage · owner: agent (live check), maintainer approves the resolution
 
 ### herdr-bracketed-paste
-Does `hc send` wrap the text in bracketed paste when the program has mode 2004 on? A live check in a private core decides; a pass makes delivery guaranteed for an agent pane whose Host state is not `null` (P6.6). · dimension: contracts/integrations · resolve-by: during-triage · owner: maintainer
+Does `hc send` wrap the text in bracketed paste when the program has mode 2004 on? A live check in a private core decides; a pass makes delivery guaranteed for an agent pane whose Host state is not `null`, and lifts the P6.6 refusal for it. · dimension: contracts/integrations · resolve-by: during-triage · owner: agent (live check), maintainer approves the resolution
 
 ## Dimension Scan
 
@@ -239,7 +254,3 @@ Does `hc send` wrap the text in bracketed paste when the program has mode 2004 o
 | UX (if UI) | decided | P3 (window placement); Verification item 3 |
 | testing/seams | decided | P8 |
 
-## Notes
-
-- Q156 (maintainer, 2026-11-09, Changes prior decision): backend order is Orca → Herdr → Rex (was Orca → Rex → Herdr).
-- Live facts, 2026-11-09, on the agent Mac: `hc` 0.1.19 (herdr-core) in `~/.local/bin`; `herdr-app` 0.1.13 cannot reach a window here, because the Herdr window runs on the control Mac and reaches this core over ssh (`hc connect`). The older `herdr pane …` CLI in PRD-261108-0447-01 Notes is obsolete. `HC_SESSION=<x>` starts a separate core with its own id and state directory. hc names allow 1–32 characters of `a-z 0-9 - _`. `hc kill` on a terminal started with `--rm` returned `not_found`. Claude 2.1.321 probes and reports OSC 7501 (`PROGRAM_STATUS`) and sends OSC 777; hc parses both. Inside tmux, panes do not get `HC_*` variables, and the tmux client's terminal reports status `null`. `hc send` pastes and presses Enter after about 3 s without typing; `hc keys` codes keys for the program's current keyboard modes.
