@@ -1,10 +1,10 @@
 ---
 id: PRD-261109-2223-01
 kind: prd
-status: draft
+status: active
 scale: epic
 stakes: internal
-gate: pending
+gate: passed 2026-11-09
 contracts: approved 2026-11-09
 contexts: [tmux-tools]
 terms: [Host, Host backend, Host selection, Host capabilities, Host state, Pane registration, Pane state, Target, Ownership, Parent, hc terminal, hc name, History mark, Completeness, Keep-alive wrap, Surface, Readiness, Idle detection, Turn observation]
