@@ -12,8 +12,9 @@ use tmux_tools_core::{
 
 use crate::{
     cmd::launch::{
-        concise_landing_fields, destination, invoking_cwd, keep_alive, require_placement_options,
-        spawn_json, warn_if_unmeasured, WindowJson,
+        caller_dir, caller_dir_prefix, cd_prefix, concise_landing_fields, destination,
+        invoking_cwd, keep_alive, require_placement_options, spawn_json, warn_if_unmeasured,
+        WindowJson,
     },
     util::rfc3339_utc_now,
     CommonArgs,
@@ -191,9 +192,11 @@ fn launch_command(argv: &[String], cwd: Option<&PathBuf>, bare: bool) -> Result<
             let cwd = cwd
                 .to_str()
                 .ok_or_else(|| anyhow!("--cwd path is not valid UTF-8: {}", cwd.display()))?;
-            Some(format!("cd -- {} &&", shell_quote(cwd)))
+            Some(cd_prefix(cwd))
         }
-        None => None,
+        // With no --cwd, tmux starts the pane in the caller's directory; on Orca the
+        // pane command `cd`s there.
+        None => caller_dir_prefix(),
     };
 
     if bare && !host::current().uses_pane_records() {
@@ -212,23 +215,6 @@ fn launch_command(argv: &[String], cwd: Option<&PathBuf>, bare: bool) -> Result<
         Some(prefix) => format!("{prefix} {wrapped}"),
         None => wrapped,
     })
-}
-
-/// The caller's directory as tmux starts a client's new pane in it: the logical `$PWD`
-/// when it is absolute and names the same directory as the physical cwd, else the
-/// physical cwd. A shell `cd` then resolves `..` against the logical path, as on tmux.
-fn caller_dir() -> Result<PathBuf> {
-    use std::os::unix::fs::MetadataExt;
-    let physical = std::env::current_dir()
-        .map_err(|error| anyhow!("--cwd: cannot read the current directory: {error}"))?;
-    let logical = std::env::var_os("PWD").map(PathBuf::from).filter(|pwd| {
-        pwd.is_absolute()
-            && match (std::fs::metadata(pwd), std::fs::metadata(&physical)) {
-                (Ok(a), Ok(b)) => a.dev() == b.dev() && a.ino() == b.ino(),
-                _ => false,
-            }
-    });
-    Ok(logical.unwrap_or(physical))
 }
 
 pub(crate) fn shell_quote(value: &str) -> String {

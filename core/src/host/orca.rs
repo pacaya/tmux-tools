@@ -51,9 +51,14 @@ const READ_ONLY_COMMANDS: &[&str] = &[
     "worktree ps",
 ];
 
-/// The pauses between the attempts of a retried read-only call: at most 3 attempts
-/// over about 1 s.
-const EMPTY_ANSWER_PAUSES: [Duration; 2] = [Duration::from_millis(250), Duration::from_millis(500)];
+/// The pauses between the attempts of a retried read-only call, growing: at most 5
+/// attempts over at most 1.9 s of waiting.
+const EMPTY_ANSWER_PAUSES: [Duration; 4] = [
+    Duration::from_millis(200),
+    Duration::from_millis(300),
+    Duration::from_millis(500),
+    Duration::from_millis(900),
+];
 
 /// How many fresh derivations a spawn tries when a derived name is already reserved.
 const DERIVED_NAME_ATTEMPTS: usize = 16;

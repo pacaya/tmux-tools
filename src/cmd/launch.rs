@@ -1,6 +1,7 @@
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use clap::Args;
 use serde::Serialize;
+use std::path::PathBuf;
 use tmux_tools_core::{
     format::Format,
     host,
@@ -9,7 +10,7 @@ use tmux_tools_core::{
 };
 
 use crate::{
-    cmd::hosted,
+    cmd::{hosted, spawn_agent::shell_quote},
     util::{load_registry_for_floors, rfc3339_utc_now},
     CommonArgs,
 };
@@ -110,6 +111,14 @@ pub fn run(args: &LaunchArgs) -> Result<()> {
     }
     require_placement_options(args.split, args.size.is_some())?;
     let cmd_for_tmux = keep_alive(&args.cmd, args.bare);
+    // tmux starts the pane in the caller's directory; on Orca the pane command `cd`s
+    // there. The free-form `--cmd` runs through `eval` after the `cd`, so a top-level
+    // `&` in it cannot move the `cd` into a background job: every part of it, and the
+    // login shell that stays, starts in the caller's directory on any POSIX shell.
+    let cmd_for_tmux = match caller_dir_prefix() {
+        Some(prefix) => format!("{prefix} eval {}", shell_quote(&cmd_for_tmux)),
+        None => cmd_for_tmux,
+    };
     let launched_at = rfc3339_utc_now()?;
     let cwd = invoking_cwd();
     let parent = crate::cmd::self_::calling_pane_name()?;
@@ -169,6 +178,42 @@ pub(crate) fn invoking_cwd() -> Option<String> {
     std::env::current_dir()
         .ok()
         .map(|cwd| cwd.to_string_lossy().into_owned())
+}
+
+/// The caller's directory as tmux starts a client's new pane in it: the logical `$PWD`
+/// when it is absolute and names the same directory as the physical cwd, else the
+/// physical cwd. A shell `cd` then resolves `..` against the logical path, as on tmux.
+pub(crate) fn caller_dir() -> Result<PathBuf> {
+    use std::os::unix::fs::MetadataExt;
+    let physical = std::env::current_dir()
+        .map_err(|error| anyhow!("--cwd: cannot read the current directory: {error}"))?;
+    let logical = std::env::var_os("PWD").map(PathBuf::from).filter(|pwd| {
+        pwd.is_absolute()
+            && match (std::fs::metadata(pwd), std::fs::metadata(&physical)) {
+                (Ok(a), Ok(b)) => a.dev() == b.dev() && a.ino() == b.ino(),
+                _ => false,
+            }
+    });
+    Ok(logical.unwrap_or(physical))
+}
+
+/// The pane command prefix that starts the command in `dir`. `cd --` makes the next
+/// argument a positional path even if it starts with `-`.
+pub(crate) fn cd_prefix(dir: &str) -> String {
+    format!("cd -- {} &&", shell_quote(dir))
+}
+
+/// The prefix of a pane command spawned without a directory. tmux starts a client's
+/// new pane in the caller's directory, so a tmux pane command has none. An Orca pane's
+/// shell starts in the worktree root, so on Orca the command `cd`s to the caller's
+/// directory. When that directory is unreadable or not UTF-8, there is no prefix and
+/// the pane starts where Orca starts it.
+pub(crate) fn caller_dir_prefix() -> Option<String> {
+    if !host::current().uses_pane_records() {
+        return None;
+    }
+    let dir = caller_dir().ok()?;
+    Some(cd_prefix(dir.to_str()?))
 }
 
 /// The Keep-alive wrap of `cmd` on the current host, or `cmd` bare. On a registry host

@@ -13122,10 +13122,12 @@ fn spawn_agent_claude_on_orca_starts_claude_through_the_launcher() {
         .assert_success("spawn-agent claude --name lead");
 
     let tmux_tools = std::fs::canonicalize(BIN).unwrap();
+    let work = std::fs::canonicalize(fake.dir.join("work")).unwrap();
     assert_eq!(
         fake.pane_commands(),
         vec![format!(
-            "'{}' 'claude-teams' '--claude' 'claude' '--' '--permission-mode' 'plan'",
+            "cd -- '{}' && '{}' 'claude-teams' '--claude' 'claude' '--' '--permission-mode' 'plan'",
+            work.display(),
             tmux_tools.display()
         )],
         "{:?}",
@@ -13166,18 +13168,23 @@ args = ["--x"]
     );
     fake.cli(&["spawn-agent", "claude", "--name", "lead"], &[])
         .assert_success("spawn-agent claude with a wrapper binary");
+    let work = std::fs::canonicalize(fake.dir.join("work")).unwrap();
     assert_eq!(
         fake.pane_commands(),
-        vec!["'/opt/tools/claude-wrapper' '--x'".to_owned()],
+        vec![format!(
+            "cd -- '{}' && '/opt/tools/claude-wrapper' '--x'",
+            work.display()
+        )],
         "{:?}",
         fake.log()
     );
 }
 
-/// Orca --cwd fix: an Orca pane's shell starts in the worktree root, not in the
-/// caller's cwd, so a relative `--cwd` is made absolute against the caller's cwd before
-/// the pane command `cd`s to it, as tmux resolves it. An absolute `--cwd` is kept, and
-/// no `--cwd` keeps the pane command without a `cd`.
+/// Orca --cwd fix and Orca cwd default: an Orca pane's shell starts in the worktree
+/// root, not in the caller's cwd, so a relative `--cwd` is made absolute against the
+/// caller's cwd before the pane command `cd`s to it, as tmux resolves it. An absolute
+/// `--cwd` is kept. With no `--cwd`, `spawn-agent` and `launch` `cd` to the caller's
+/// directory, where tmux starts the pane.
 #[test]
 fn spawn_agent_on_orca_cds_to_a_relative_cwd_resolved_against_the_caller() {
     let fake = FakeOrca::start("orca-spawn-cwd");
@@ -13192,10 +13199,23 @@ args = []
     );
     let work = std::fs::canonicalize(fake.dir.join("work")).unwrap();
     std::fs::create_dir_all(work.join("sub dir")).unwrap();
-    fake.cli(&["spawn-agent", "ttpwd", "--name", "rel", "--cwd", "sub dir"], &[])
-        .assert_success("spawn-agent --cwd <relative>");
-    fake.cli(&["spawn-agent", "ttpwd", "--name", "abs", "--cwd", "/opt/elsewhere"], &[])
-        .assert_success("spawn-agent --cwd <absolute>");
+    fake.cli(
+        &["spawn-agent", "ttpwd", "--name", "rel", "--cwd", "sub dir"],
+        &[],
+    )
+    .assert_success("spawn-agent --cwd <relative>");
+    fake.cli(
+        &[
+            "spawn-agent",
+            "ttpwd",
+            "--name",
+            "abs",
+            "--cwd",
+            "/opt/elsewhere",
+        ],
+        &[],
+    )
+    .assert_success("spawn-agent --cwd <absolute>");
     fake.cli(&["spawn-agent", "ttpwd", "--name", "none"], &[])
         .assert_success("spawn-agent without --cwd");
     // A logical $PWD through a symlink that names the caller's directory is kept, so
@@ -13208,6 +13228,18 @@ args = []
         &[("PWD", link_str.as_str())],
     )
     .assert_success("spawn-agent --cwd ../x with a symlinked PWD");
+    fake.cli(
+        &["spawn-agent", "ttpwd", "--name", "logical-none"],
+        &[("PWD", link_str.as_str())],
+    )
+    .assert_success("spawn-agent without --cwd and a symlinked PWD");
+    fake.cli(&["launch", "--name", "l-none", "--cmd", "sleep 30"], &[])
+        .assert_success("launch");
+    fake.cli(
+        &["launch", "--name", "l-bare", "--cmd", "sleep 30", "--bare"],
+        &[],
+    )
+    .assert_success("launch --bare");
 
     assert_eq!(
         fake.pane_commands(),
@@ -13217,16 +13249,57 @@ args = []
                 work.join("sub dir").display()
             ),
             "cd -- '/opt/elsewhere' && '/opt/tools/pwd-agent'".to_owned(),
-            "'/opt/tools/pwd-agent'".to_owned(),
+            format!("cd -- '{}' && '/opt/tools/pwd-agent'", work.display()),
             format!("cd -- '{link_str}/../x' && '/opt/tools/pwd-agent'"),
+            format!("cd -- '{link_str}' && '/opt/tools/pwd-agent'"),
+            format!("cd -- '{}' && eval 'sleep 30'", work.display()),
+            format!("cd -- '{}' && eval 'exec sleep 30'", work.display()),
         ],
         "{:?}",
         fake.log()
     );
 }
 
+/// Orca cwd default: every part of a `launch --cmd` with a top-level `&` starts in the
+/// caller's directory under a POSIX `sh`, as on tmux; the `cd` is not moved into the
+/// background job.
+#[test]
+fn launch_on_orca_runs_a_backgrounded_cmd_in_the_caller_directory() {
+    let fake = FakeOrca::start("orca-launch-amp");
+    let work = std::fs::canonicalize(fake.dir.join("work")).unwrap();
+    fake.cli(
+        &[
+            "launch",
+            "--name",
+            "l-amp",
+            "--cmd",
+            "pwd -P > one.txt & pwd -P > two.txt",
+        ],
+        &[],
+    )
+    .assert_success("launch with a top-level &");
+    let command = fake.pane_commands().pop().expect("the pane command");
+    // Orca starts the pane's shell elsewhere (the worktree root); `/` stands in for it.
+    let out = Command::new("sh")
+        .args(["-c", &format!("{command}; wait")])
+        .current_dir("/")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    for file in ["one.txt", "two.txt"] {
+        assert_eq!(
+            std::fs::read_to_string(work.join(file))
+                .unwrap_or_default()
+                .trim(),
+            work.display().to_string(),
+            "{file} from {command}"
+        );
+    }
+}
+
 /// Lead decision of ISSUE-261108-2323-02: an `orca` call that exits 0 without a JSON
-/// answer is retried, at most 3 attempts in total, before the existing error.
+/// answer is retried, at most 5 attempts in total (Orca cwd default release), before
+/// the existing error.
 #[test]
 fn list_on_orca_retries_an_empty_terminal_list_answer() {
     let fake = FakeOrca::start("orca-empty-answer");
@@ -13237,9 +13310,9 @@ fn list_on_orca_retries_an_empty_terminal_list_answer() {
     let rows = json_payload(
         &fake.cli(
             &["list", "--format", "json"],
-            &[("FAKE_ORCA_EMPTY_LISTS", "2")],
+            &[("FAKE_ORCA_EMPTY_LISTS", "4")],
         ),
-        "list after two empty answers",
+        "list after four empty answers",
     );
     assert_eq!(rows[0]["name"], "c-one", "{rows}");
 
@@ -13265,7 +13338,7 @@ fn list_on_orca_retries_an_empty_terminal_list_answer() {
         .iter()
         .filter(|call| call.len() >= 2 && call[0] == "terminal" && call[1] == "list")
         .count();
-    assert_eq!(lists, 3, "at most 3 attempts: {:?}", fake.log());
+    assert_eq!(lists, 5, "at most 5 attempts: {:?}", fake.log());
 }
 
 /// PRD-261108-0447-01 P9.2 (out of scope until P11 step 3): on tmux, `spawn-agent` of
