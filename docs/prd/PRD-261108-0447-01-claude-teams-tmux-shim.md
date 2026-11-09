@@ -5,6 +5,7 @@ status: draft
 scale: epic
 stakes: internal
 contracts: approved 2026-11-08
+gate: passed 2026-11-08
 contexts: [tmux-tools]
 terms: [Host, Host backend, Host selection, Pane record, Pane registration, Pane liveness, Ownership, Target, Keep-alive wrap, Surface, Team, Team record, Leader, Teammate pane, Launcher, Shim, Shim id, Parent, Orphan, Close-on-success wrap]
 contract:
