@@ -37,16 +37,26 @@ contract:
       repository: tmux-tools
       record: PRD-261107-0825-01
       clause: p10-tests
+    - relation: requires
+      repository: claude
+      record: PRD-261108-0235-01
+      clause: p9-rollout
     - relation: implementation_after
       repository: tmux-tools
       record: ISSUE-261108-2323-02
+    - relation: runtime_dependency
+      repository: claude
+      record: ISSUE-261109-0201-02
+    - relation: runtime_dependency
+      repository: claude
+      record: ISSUE-261109-0201-04
 ---
 
 ## Agent Brief
 
 **Outcome and scope:** Step 3 of `PRD-261108-0447-01` P11: on tmux, `spawn-agent claude --name lead` starts Claude through the Launcher, with the same outcome as on Orca: teammate `lead.tm1` with `team` and `parent: "lead"`, and `prompt`, `wait-idle`, and `kill` work on `lead`.
 
-**Required sources:** `tmux-tools:PRD-261108-0447-01` — P8.4, and P8.5 except its Orca live check (Leader verbs); P9.1, P9.2 (the pane command of P9.1, extended to tmux); P11.3, P11.4 (release conditions, minor bump); `## Contracts` item "Pane command of `spawn-agent claude` on Orca" (the same command on tmux by P9.2); `## Verification and release` items 4, 5 (tmux run). `tmux-tools:PRD-261107-0825-01` — P10.1, P10.4 (tmux contract suite, no leaked pane).
+**Required sources:** `tmux-tools:PRD-261108-0447-01` — P8.4, and P8.5 except its Orca live check (Leader verbs); P9.1, P9.2 (the pane command of P9.1, extended to tmux); P11.3, P11.4 (release conditions, minor bump); `## Contracts` item "Pane command of `spawn-agent claude` on Orca" (the same command on tmux by P9.2); `## Verification and release` items 4, 5 (tmux run). `tmux-tools:PRD-261107-0825-01` — P10.1, P10.4 (tmux contract suite, no leaked pane). `claude:PRD-261108-0235-01` — P9 rollout steps 2 (hooks) and 3 (text and scripts) (release condition).
 
 **Current observable:** On tmux, `spawn-agent claude --name lead` starts the profile's `claude` binary directly in the pane, so a teammate of that session is not a tmux-tools pane.
 
@@ -60,6 +70,6 @@ contract:
 - [ ] On that Leader, `prompt --target lead` and `wait-idle --target lead` give the same result as for the same fake `claude` started without the Launcher; `kill --target lead` closes `lead` and removes its row from `list --format json`. The run closes `lead.tm1` itself and ends with no leaked pane.
 - [ ] Given a profile whose binary basename is not `claude`, the `spawn-agent` pane command is unchanged.
 
-**Verification and release:** The default `cargo test --workspace --features test-fixtures` run passes. Release only when the P11.3 conditions hold: step 2 (`ISSUE-261108-2323-02`) is released, and harness `PRD-261108-0235-01` rollout steps 2 (hooks) and 3 (text and scripts) are released. Rollback is reverting the release.
+**Verification and release:** The default `cargo test --workspace --features test-fixtures` run passes. Release only when the P11.3 conditions hold: step 2 (`ISSUE-261108-2323-02`) is released, and harness `PRD-261108-0235-01` rollout steps 2 (`claude:ISSUE-261109-0201-02`, hooks) and 3 (`claude:ISSUE-261109-0201-04`, text and scripts) are released. Rollback is reverting the release.
 
 **Out of scope:** Orca behavior (`ISSUE-261108-2323-02`); Launcher, Shim, and Team behavior (`ISSUE-261108-2323-01`); harness hook, skill, and `cl` alias changes (repository `claude`).
