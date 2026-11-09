@@ -21,9 +21,21 @@ use std::time::{Duration, Instant};
 
 const BIN: &str = env!("CARGO_BIN_EXE_tmux-tools");
 
+/// The child-process environment of the suite (P10): applied when the executable
+/// loads, before any test runs.
+#[path = "../core/src/test_child_env.rs"]
+mod test_child_env;
+
+use test_child_env::original_environment;
+
+fn sanitize_child_environment() {
+    test_child_env::sanitize();
+}
+
 /// Serializes the integration suite. Hold this guard for the lifetime of a
 /// test to keep things deterministic under default `cargo test`.
 fn serial_guard() -> MutexGuard<'static, ()> {
+    sanitize_child_environment();
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
         .lock()
@@ -169,6 +181,7 @@ impl IsolatedTmuxServer {
     }
 
     fn start(mode: CliMode) -> Self {
+        sanitize_child_environment();
         let n = NEXT_SERVER.fetch_add(1, Ordering::SeqCst);
         let label = format!("tt-tests-{}-{n}", std::process::id());
         // A short base keeps the derived unix socket path under the OS limit (macOS's
@@ -13261,4 +13274,436 @@ fn list_json_rows_carry_host_and_host_state_and_an_empty_list_is_an_empty_array(
         assert_host_tmux(row, "list row");
         assert_host_state_null(row, "list row");
     }
+}
+
+// --- The contract suite's live Orca run (P10.2), opt-in -------------------------------
+
+#[cfg(feature = "test-fixtures")]
+#[path = "contract/orca.rs"]
+mod orca_contract;
+
+// --- P3 host selection and the P4.1 name check, on tmux (ISSUE-261107-0921-03) -------
+
+/// Acceptance: on tmux, `launch --name <v>` and `spawn-agent <agent> --name <v>` with
+/// an invalid name exit 1 with stderr exactly `invalid name: <v>`, and create no pane;
+/// `--name A.b_c-9` is accepted.
+#[cfg(feature = "test-fixtures")]
+#[test]
+fn an_invalid_name_fails_both_spawning_verbs_on_tmux_without_a_pane() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    let config = fake_tui_agent_config();
+    let before = all_pane_ids(&server);
+
+    for name in ["a/b", "..", ".", "a b", ""] {
+        let launched = server.cli(&["launch", "--name", name, "--cmd", "sleep 30"]);
+        assert_eq!(launched.status, 1, "launch --name {name:?}: {launched:?}");
+        assert_eq!(
+            launched.stderr,
+            format!("invalid name: {name}\n"),
+            "launch --name {name:?}"
+        );
+
+        let spawned = server.cli_env(
+            &["spawn-agent", "tt-fake-tui", "--bare", "--name", name],
+            config.xdg(),
+        );
+        assert_eq!(
+            spawned.status, 1,
+            "spawn-agent --name {name:?}: {spawned:?}"
+        );
+        assert_eq!(
+            spawned.stderr,
+            format!("invalid name: {name}\n"),
+            "spawn-agent --name {name:?}"
+        );
+    }
+    assert_eq!(
+        all_pane_ids(&server),
+        before,
+        "an invalid name must create no pane"
+    );
+
+    server
+        .cli(&["launch", "--name", "A.b_c-9", "--cmd", "sleep 30"])
+        .assert_success("launch --name A.b_c-9");
+    assert!(pane_id_by_name(&server, "A.b_c-9").is_some());
+}
+
+/// Acceptance: `TMUX_TOOLS_HOST=foo` fails any verb with exit 1, and stderr names both
+/// valid hosts.
+#[test]
+fn an_unknown_tmux_tools_host_fails_every_verb_naming_tmux_and_orca() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    for args in [
+        vec!["list"],
+        vec!["self", "--format", "json"],
+        vec!["status"],
+        vec!["launch", "--cmd", "true"],
+    ] {
+        let out = server.run_cli(
+            &args,
+            CliOptions {
+                env: &[("TMUX_TOOLS_HOST", "foo")],
+                ..CliOptions::default()
+            },
+        );
+        assert_eq!(out.status, 1, "{args:?} with TMUX_TOOLS_HOST=foo: {out:?}");
+        assert!(
+            out.stderr.contains("tmux") && out.stderr.contains("orca"),
+            "{args:?}: stderr must name tmux and orca: {}",
+            out.stderr
+        );
+    }
+}
+
+/// Acceptance: `$TMUX` wins over `ORCA_TERMINAL_HANDLE`, and `TMUX_TOOLS_HOST=tmux`
+/// wins over `ORCA_TERMINAL_HANDLE` alone.
+#[test]
+fn tmux_is_selected_over_orca_by_tmux_and_by_the_override() {
+    let _serial = serial_guard();
+    let inside = IsolatedTmuxServer::start_inside();
+    let both = inside.run_cli(
+        &["self", "--format", "json"],
+        CliOptions {
+            env: &[("ORCA_TERMINAL_HANDLE", "term_decoy")],
+            ..CliOptions::default()
+        },
+    );
+    both.assert_success("self with $TMUX and ORCA_TERMINAL_HANDLE");
+    assert_eq!(json_payload(&both, "self")["host"], "tmux");
+
+    let outside = IsolatedTmuxServer::start_outside();
+    let overridden = outside.run_cli(
+        &["self", "--format", "json"],
+        CliOptions {
+            env: &[
+                ("TMUX_TOOLS_HOST", "tmux"),
+                ("ORCA_TERMINAL_HANDLE", "term_decoy"),
+            ],
+            ..CliOptions::default()
+        },
+    );
+    overridden.assert_success("self with TMUX_TOOLS_HOST=tmux and ORCA_TERMINAL_HANDLE");
+    assert_eq!(json_payload(&overridden, "self")["host"], "tmux");
+}
+
+/// Acceptance: with only `ORCA_TERMINAL_HANDLE` set and no reachable Orca runtime (no
+/// `orca` on `PATH`), `list` exits 1 naming `orca` and the selection source, and no
+/// tmux pane or session is created.
+#[test]
+fn an_unreachable_orca_fails_list_naming_the_selection_source_without_falling_back() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_outside();
+    let sessions = || {
+        server
+            .tmux(&["list-sessions", "-F", "#{session_id}"])
+            .stdout
+    };
+    let before_sessions = sessions();
+    let before_panes = all_pane_ids(&server);
+    let state = tempfile_dir("orca-unreachable");
+
+    let out = server.run_cli(
+        &["list"],
+        CliOptions {
+            env: &[
+                ("ORCA_TERMINAL_HANDLE", "term_decoy"),
+                ("XDG_STATE_HOME", state.to_str().unwrap()),
+            ],
+            ..CliOptions::default()
+        },
+    );
+
+    assert_eq!(out.status, 1, "list with an unreachable Orca: {out:?}");
+    assert!(
+        out.stderr.contains("orca") && out.stderr.contains("ORCA_TERMINAL_HANDLE"),
+        "stderr must name orca and ORCA_TERMINAL_HANDLE: {}",
+        out.stderr
+    );
+    assert_eq!(
+        sessions(),
+        before_sessions,
+        "no tmux session may be created"
+    );
+    assert_eq!(
+        all_pane_ids(&server),
+        before_panes,
+        "no tmux pane may be created"
+    );
+    let _ = std::fs::remove_dir_all(&state);
+}
+
+/// A fresh empty directory under the harness temp base.
+fn tempfile_dir(label: &str) -> std::path::PathBuf {
+    let dir = harness_tmp_base().join(format!(
+        "tt-{label}-{}-{}",
+        std::process::id(),
+        NEXT_SERVER.fetch_add(1, Ordering::SeqCst)
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+// The acceptance that every child of the default suite runs without the host-selection
+// variables and a real `orca` is `test_child_env::child_processes_see_no_host_selection_variables_and_no_orca`,
+// which runs in every test executable that includes that module.
+
+// --- Orca regressions against a fake `orca` CLI (default run, no real Orca) ---------
+
+/// A stand-in `orca` CLI first on the CLI's `PATH`, its pane state, and the run's
+/// registry. No real Orca runtime is reached.
+struct FakeOrca {
+    dir: std::path::PathBuf,
+}
+
+const FAKE_ORCA: &str = include_str!("contract/fake_orca.py");
+const FAKE_RUNTIME: &str = "fake-runtime";
+
+impl FakeOrca {
+    fn start(label: &str) -> FakeOrca {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile_dir(label);
+        std::fs::create_dir_all(dir.join("bin")).unwrap();
+        std::fs::create_dir_all(dir.join("state")).unwrap();
+        std::fs::create_dir_all(dir.join("config")).unwrap();
+        std::fs::create_dir_all(dir.join("work")).unwrap();
+        let orca = dir.join("bin/orca");
+        std::fs::write(&orca, FAKE_ORCA).unwrap();
+        std::fs::set_permissions(&orca, std::fs::Permissions::from_mode(0o755)).unwrap();
+        FakeOrca { dir }
+    }
+
+    fn registry(&self) -> std::path::PathBuf {
+        self.dir.join("state/tmux-tools/orca").join(FAKE_RUNTIME)
+    }
+
+    fn record(&self, name: &str) -> Option<serde_json::Value> {
+        let bytes = std::fs::read(self.registry().join(format!("{name}.json"))).ok()?;
+        Some(serde_json::from_slice(&bytes).unwrap())
+    }
+
+    fn log(&self) -> Vec<Vec<String>> {
+        std::fs::read_to_string(self.dir.join("log.jsonl"))
+            .unwrap_or_default()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
+    }
+
+    fn open_handles(&self) -> Vec<String> {
+        let state: serde_json::Value = std::fs::read(self.dir.join("state.json"))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .unwrap_or(serde_json::json!({"terminals": []}));
+        state["terminals"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|terminal| terminal["handle"].as_str().unwrap().to_owned())
+            .collect()
+    }
+
+    /// Run the CLI on Orca (selected by `ORCA_TERMINAL_HANDLE`) with `env` added.
+    fn cli(&self, args: &[&str], env: &[(&str, &str)]) -> CmdOutput {
+        let _ = sanitize_child_environment;
+        let path = format!(
+            "{}:{}",
+            self.dir.join("bin").display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        let mut command = Command::new(BIN);
+        command
+            .args(args)
+            .current_dir(self.dir.join("work"))
+            .env_remove("TMUX")
+            .env_remove("TMUX_PANE")
+            .env("PATH", path)
+            .env("ORCA_TERMINAL_HANDLE", "term_caller")
+            .env("ORCA_WORKTREE_ID", "fake-worktree")
+            .env("XDG_STATE_HOME", self.dir.join("state"))
+            .env("XDG_CONFIG_HOME", self.dir.join("config"))
+            .env("FAKE_ORCA_STATE", self.dir.join("state.json"))
+            .env("FAKE_ORCA_LOG", self.dir.join("log.jsonl"));
+        for (key, value) in env {
+            command.env(key, value);
+        }
+        let child = command
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn tmux-tools");
+        wait_for_child(
+            child,
+            &format!("tmux-tools {args:?}"),
+            Duration::from_secs(30),
+        )
+    }
+}
+
+impl Drop for FakeOrca {
+    fn drop(&mut self) {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(self.registry(), std::fs::Permissions::from_mode(0o755));
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+/// P3.1: a present but empty `TMUX_TOOLS_HOST` is an invalid value; it never selects
+/// a host.
+#[test]
+fn an_empty_tmux_tools_host_fails_naming_tmux_and_orca() {
+    let fake = FakeOrca::start("orca-empty-host");
+    for args in [vec!["list"], vec!["self", "--format", "json"]] {
+        let out = fake.cli(&args, &[("TMUX_TOOLS_HOST", "")]);
+        assert_eq!(out.status, 1, "{args:?} with TMUX_TOOLS_HOST=\"\": {out:?}");
+        assert!(
+            out.stderr.contains("tmux") && out.stderr.contains("orca"),
+            "{args:?}: stderr must name tmux and orca: {}",
+            out.stderr
+        );
+    }
+    assert!(
+        fake.log().is_empty(),
+        "no orca call may run: {:?}",
+        fake.log()
+    );
+}
+
+/// P4.1, P9.12: a valid leading-dot name is spawned, listed, resolved as a Target, and
+/// killed with its record.
+#[test]
+fn a_leading_dot_name_works_through_spawn_list_target_and_kill_on_orca() {
+    let fake = FakeOrca::start("orca-dot-name");
+    fake.cli(&["launch", "--name", ".hidden", "--cmd", "sleep 30"], &[])
+        .assert_success("launch --name .hidden");
+    let handle = fake.record(".hidden").expect("the record of .hidden")["handle"]
+        .as_str()
+        .expect("the record holds the handle")
+        .to_owned();
+
+    let rows = json_payload(&fake.cli(&["list", "--format", "json"], &[]), "list");
+    let names: Vec<&str> = rows
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|row| row["name"].as_str())
+        .collect();
+    assert_eq!(names, vec![".hidden"], "list shows .hidden: {rows}");
+
+    let status = json_payload(
+        &fake.cli(&["status", "--target", ".hidden", "--format", "json"], &[]),
+        "status --target .hidden",
+    );
+    assert_eq!(status["pane_id"], handle.as_str(), "{status}");
+
+    fake.cli(&["kill", "--target", ".hidden"], &[])
+        .assert_success("kill --target .hidden");
+    assert!(fake.open_handles().is_empty(), "the pane is closed");
+    assert!(fake.record(".hidden").is_none(), "the record is deleted");
+}
+
+/// P4.4–P4.5: a record whose handle a concurrent spawn writes after the pane list was
+/// taken is never judged dead against that list.
+#[test]
+fn reconciliation_keeps_the_record_of_a_concurrently_spawned_pane() {
+    let fake = FakeOrca::start("orca-race");
+    let out = fake.cli(
+        &["list", "--format", "json"],
+        &[("FAKE_ORCA_ON_LIST_SPAWN", "c-race")],
+    );
+    out.assert_success("list during a concurrent spawn");
+    let record = fake
+        .record("c-race")
+        .expect("the concurrent spawn's record must survive the reconciliation");
+    let handle = record["handle"].as_str().unwrap().to_owned();
+    assert_eq!(fake.open_handles(), vec![handle.clone()]);
+
+    let rows = json_payload(&fake.cli(&["list", "--format", "json"], &[]), "list");
+    assert_eq!(rows[0]["name"], "c-race", "{rows}");
+    assert_eq!(rows[0]["status"], "running", "{rows}");
+    assert_eq!(rows[0]["pane"], handle.as_str(), "{rows}");
+}
+
+/// P3.4: an installed Orca CLI whose runtime is unreachable fails every verb naming
+/// the host and the selection source, whichever orca call comes first.
+#[test]
+fn an_unreachable_orca_runtime_names_the_host_and_the_selection_source() {
+    let fake = FakeOrca::start("orca-runtime-down");
+    for args in [
+        vec!["list"],
+        vec!["list", "--format", "json"],
+        vec!["status", "--format", "json"],
+        vec!["self", "--format", "json"],
+        vec!["capture", "--target", "term_x"],
+        vec!["send", "--target", "term_x", "hi"],
+        vec!["kill", "--target", "term_x", "--any"],
+        vec!["launch", "--name", "c-down", "--cmd", "sleep 30"],
+    ] {
+        let out = fake.cli(&args, &[("FAKE_ORCA_UNAVAILABLE", "1")]);
+        assert_eq!(out.status, 1, "{args:?} with the runtime down: {out:?}");
+        assert!(
+            out.stderr.contains("orca") && out.stderr.contains("ORCA_TERMINAL_HANDLE"),
+            "{args:?}: stderr must name orca and ORCA_TERMINAL_HANDLE: {}",
+            out.stderr
+        );
+    }
+}
+
+/// P4.4: when the handle cannot be written, the reservation is released only after
+/// the pane is closed; a failed close keeps it and reports the pane.
+#[test]
+fn a_failed_handle_write_releases_the_reservation_only_after_a_close() {
+    let fake = FakeOrca::start("orca-write-fails");
+    let kept = fake.cli(
+        &["launch", "--name", "c-keep", "--cmd", "sleep 30"],
+        &[
+            ("FAKE_ORCA_LOCK_REGISTRY", "1"),
+            ("FAKE_ORCA_CLOSE_FAIL", "1"),
+        ],
+    );
+    assert_eq!(kept.status, 1, "{kept:?}");
+    let handle = fake.open_handles().pop().expect("the pane stays open");
+    assert!(
+        kept.stderr.contains(&handle) && kept.stderr.contains("could not close"),
+        "stderr names the unresolved pane and the close failure: {}",
+        kept.stderr
+    );
+    let reservation = fake.record("c-keep").expect("the reservation stays");
+    assert!(reservation["handle"].is_null(), "{reservation}");
+
+    let closed = fake.cli(
+        &["launch", "--name", "c-close", "--cmd", "sleep 30"],
+        &[("FAKE_ORCA_LOCK_REGISTRY", "1")],
+    );
+    assert_eq!(closed.status, 1, "{closed:?}");
+    assert_eq!(fake.open_handles(), vec![handle], "the new pane is closed");
+    assert!(
+        fake.record("c-close").is_none(),
+        "its reservation is released"
+    );
+}
+
+/// `list --format json` on Orca reads `worktree ps` once and needs no `terminal show`
+/// for listed panes.
+#[test]
+fn list_json_on_orca_reads_worktree_ps_once() {
+    let fake = FakeOrca::start("orca-list-ps");
+    for name in ["c-one", "c-two", "c-three"] {
+        fake.cli(&["launch", "--name", name, "--cmd", "sleep 30"], &[])
+            .assert_success(&format!("launch {name}"));
+    }
+    let _ = std::fs::remove_file(fake.dir.join("log.jsonl"));
+    let rows = json_payload(&fake.cli(&["list", "--format", "json"], &[]), "list");
+    assert_eq!(rows.as_array().unwrap().len(), 3, "{rows}");
+    let log = fake.log();
+    let count = |path: &[&str]| {
+        log.iter()
+            .filter(|call| call.len() >= path.len() && call[..path.len()] == *path)
+            .count()
+    };
+    assert_eq!(count(&["worktree", "ps"]), 1, "{log:?}");
+    assert_eq!(count(&["terminal", "show"]), 0, "{log:?}");
 }

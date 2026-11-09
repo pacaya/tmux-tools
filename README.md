@@ -33,6 +33,8 @@ $ tmux-tools prompt --target codex-helper "explain src/main.rs" --idle-seconds 3
 
 Most pane verbs accept `--target <name|id>`, `--format concise|json|raw`, `--session NAME`, and `--window NAME`. Defaults: `--format concise`, `--idle-seconds 2.0`, `--ready-stable-seconds 2.0`, `--timeout 120.0`.
 
+Every verb runs on the selected host, tmux or Orca (see "Hosts"). Every `--format json` object carries `host`; `list --format json` rows carry `host` and `host_state`. On every host a `--name` value must match `[A-Za-z0-9._-]+` and must not be `.` or `..`; any other value exits 1 with `invalid name: <name>` and creates no pane. An optional verb or option the host lacks (`rebalance`, `--split tile`, `--size`; on Orca also `--session` and `--window`) exits 3 with `unsupported: <verb> on <host>`.
+
 | Verb | Signature | Notes |
 | --- | --- | --- |
 | `launch` | `--cmd <SHELL> [--name NAME] [--split tile\|h\|v\|window] [--size N] [--bare]` | Creates a pane/window and always registers `@tt-name`: the `--name` value, or, when `--name` is absent, a name derived from the command's first word plus a random suffix (`--cmd 'npm run dev'` → `npm-a3f2`; the stem is `pane` when that word has no letter or digit). `concise` and `json` output report the registered name, which `--target` accepts like any other. **The default changed:** inside tmux, placement is now `tile` (it used to be a horizontal split giving the new pane 70%). A tile placement splits, then retiles the window with tmux's `tiled` layout and marks it with the `@tt-tiled` window option, when the window already held a pane tmux-tools owns (`@tt-name` or `@tt-agent`, from the same cwd) before the split. First-pane rule: the first pane put into a window not yet owned, such as your own shell's window, is still the horizontal split giving it 70%, with no retile, so tiling engages from the second pane. Sizing opts out of tiling and is placed as before: `--split h\|v` (tmux's native 50/50 unless `--size N` overrides it), `--size N` alone (a horizontal split at N%), and `--split window` (a new window); `--split h\|v` and `--size` also clear `@tt-tiled` on the window they target. `--split tile --size N` is rejected, because a tiled layout has no percentage. Without `--target`, `--session`/`--window` still create a new window unless `--split tile\|h\|v` is given, which splits the scoped window. By default the command is wrapped as `<cmd>; exec $SHELL` so the pane survives the command's exit and output is preserved; pass `--bare` for raw `tmux split-window <cmd>` semantics. A session it creates gets `history-limit` 50000 (see "Pane history and `prompt` results"). |
@@ -46,13 +48,19 @@ Most pane verbs accept `--target <name|id>`, `--format concise|json|raw`, `--ses
 | `interrupt` | `[--target name\|id]` | Sends the resolved surface's declared `interrupt_key` (`C-c` when the pane has no surface). Refuses when that key quits the agent while idle and the pane is not positively busy, and refuses any surface-unvalidated pane on such a surface; a surface declaring no quit hazard always sends. Same `--force`/`--any` guards as `kill`. |
 | `escape` | `[--target name\|id]` | Sends `Escape`. |
 | `send-enter` | `[--target name\|id]` | Sends `Enter`. Same `--force`/`--any` guards as `kill`. Useful when an agent didn't process the Enter from `send --enter`/`prompt`. |
-| `list` | `[--session NAME] [--all]` | Lists panes in the managed/current scope by default. |
+| `list` | `[--session NAME] [--all]` | Lists panes in the managed/current scope by default. On Orca it lists the Pane records of the current runtime: `session` is the pane's worktree id, `pane` its `term_…` handle, and `status` is `running`, `dead` (shown once, then the record is deleted) or `unknown` (the pane list was incomplete; stderr says `list incomplete: orca`). |
 | `status` | `[--target name\|id]` | Shows session, window, pane, name, and agent metadata; `concise` and `json` add the pane's window geometry (`min_pane_cols`, `min_pane_rows`) and floor verdict (`below_floor`, see "Floors"). `raw` is unchanged. |
 | `rebalance` | `[--target name\|id]` | Retiles the target pane's window with tmux's `tiled` layout, the arrangement tile placement applies, and reports it: `concise` and `json` carry `window_id`, `min_pane_cols`, `min_pane_rows` and `below_floor` with the meanings `launch` gives them (see "Floors"); `raw` prints the window id. Use it to repair a window left ragged, for example by a raw `tmux split-window`, instead of a raw `tmux select-layout tiled`. Inside tmux with no selector it acts on the calling pane's window; outside tmux it needs `--target`, `--session` or `--window` and otherwise fails, so it never creates the managed session. It refuses with a non-zero exit, leaving the window untouched, unless the window carries `@tt-tiled` (layout intent) and holds a pane tmux-tools owns (`@tt-name` or `@tt-agent`, from the same cwd) — the window guard `kill` applies before it retiles; the error names the guard that failed, and there is no override. It moves no pane, so it cannot repair an over-full window: exit 0 with `below_floor` true means the window is still below its effective floor. Like `status`, it uses the registry only for floors: an `agents.toml` that cannot be read or parsed gives a warning and the built-in floors. |
-| `notify` | `--title T --body B [--target name\|id]` | Shows a desktop notification for the target pane, or for the calling pane (`TMUX_PANE`) when `--target` is absent; without `--target` and with `TMUX_PANE` unset it exits 1. On tmux it writes the tmux-wrapped OSC 777 sequence to the pane's tty, and tmux passes `ESC ]777;notify;T;B BEL` to the client's terminal; control bytes are removed from the title and body and `;` becomes `,`. Under tmux, delivery needs the tmux option `allow-passthrough` set to `on` (only a pane that is visible in an attached client) or `all` (any pane), and the outer terminal must support OSC 777. When the pane's session has no attached client, or the host cannot notify, it exits 0 and prints `notify: not delivered on <host>` on stderr. |
-| `self` | `[--format concise\|json\|raw]` | Reports whether the calling pane is driven by tmux-tools: `json` is `{"host":"tmux","driven":bool,"name":string\|null,"agent":string\|null}`. `driven` is true when the pane has `@tt-name` or `@tt-agent`; `name` and `agent` are null when unknown. Outside tmux it reports `host: tmux, driven: false`. |
+| `notify` | `--title T --body B [--target name\|id]` | Shows a desktop notification for the target pane, or for the calling pane (`TMUX_PANE`) when `--target` is absent; without `--target` and with `TMUX_PANE` unset it exits 1. On tmux it writes the tmux-wrapped OSC 777 sequence to the pane's tty, and tmux passes `ESC ]777;notify;T;B BEL` to the client's terminal; control bytes are removed from the title and body and `;` becomes `,`. Under tmux, delivery needs the tmux option `allow-passthrough` set to `on` (only a pane that is visible in an attached client) or `all` (any pane), and the outer terminal must support OSC 777. When the pane's session has no attached client, or the host cannot notify, it exits 0 and prints `notify: not delivered on <host>` on stderr. Orca has no notification command (its own agent hooks notify), so on Orca `notify` always reports `notify: not delivered on orca`. |
+| `self` | `[--format concise\|json\|raw]` | Reports whether the calling pane is driven by tmux-tools: `json` is `{"host":"tmux","driven":bool,"name":string\|null,"agent":string\|null}`. `driven` is true when the pane has `@tt-name` or `@tt-agent`; `name` and `agent` are null when unknown. Outside tmux it reports `host: tmux, driven: false`. On Orca the calling pane is `ORCA_TERMINAL_HANDLE` (required), and it is driven when a live Pane record holds that handle. |
 
 ## Configuration
+
+### Host selection: `TMUX_TOOLS_HOST`
+
+`TMUX_TOOLS_HOST=tmux|orca` selects the host explicitly; any other value fails every verb with exit 1 and names the valid values. Unset, the first match selects: `$TMUX` set → tmux; `ORCA_TERMINAL_HANDLE` set → orca; otherwise tmux, with the Managed session outside tmux as before. When the selected host's CLI or runtime is unreachable, the verb exits 1 and names the host and what selected it; it never falls back to another host.
+
+### Agent profiles
 
 Agent profiles are loaded from built-ins and deep-merged with `$XDG_CONFIG_HOME/tmux-tools/agents.toml` (falling back to `~/.config/tmux-tools/agents.toml`). Existing built-ins can override `binary`, individual access profiles, or individual surfaces; new agents need a `binary`. A readiness field written at the agent level (the pre-surface shape below) binds to the agent's **pre-surface rendering**; named `surfaces` carry their own fields. See "Surfaces" below.
 
@@ -314,6 +322,21 @@ Cursor and Antigravity (now built-ins) reuse the same triad. Cursor maps `read-o
 
 On `wait-idle` timeout, concise output starts with `reason=timed_out duration=<seconds> idle_for=<seconds>`, then a greppable marker and the bottom `--hint-lines` non-blank lines from the loop's final capture. The hint reuses that capture; it does not make another `capture-pane` call. JSON includes numeric `idle_for` seconds and keeps `final_capture` unchanged. Non-timeout concise output keeps its existing one-line shape.
 
+## Hosts
+
+tmux-tools drives the panes of one host per invocation through a pane-level Host port: tmux, or Orca through the `orca` CLI. The tmux backend keeps every behaviour described in this README.
+
+### Orca
+
+Inside an Orca terminal (`ORCA_TERMINAL_HANDLE` and `ORCA_WORKTREE_ID` set, no `$TMUX`) every verb drives Orca panes. A Target is a pane name or a `term_…` handle; a verb without `--target` acts on the calling pane. A spawn without `--split`, or with `--split window`, opens a tab in the calling worktree (or the target's worktree); `--split h|v` runs `orca terminal split --direction horizontal|vertical` on the calling or target pane. Orca keeps the pane open in its login shell after the command exits, which is the keep-alive wrap; `--bare` runs `exec <cmd>`. Host state (`host_state`) comes from `orca worktree ps --json`: `working`, `blocked`, `done` or `null` (Orca never reports `idle`); without `--until` or `--idle-seconds`, `wait-idle` and the settle step of `prompt` end on `done` or `blocked` and keep waiting while it is `working`. `prompt` reports `submit` from Orca's send receipt (`confirmed`, `accepted` or `assumed`). JSON keys Orca has no source for (`window_index`, `pane`, the window geometry fields, `relocated`, `last_activity`) are `null`.
+
+Limits on Orca:
+
+- **Registration is lost on an Orca restart.** Orca cannot store data on a pane, so each pane's registration is a Pane record at `${XDG_STATE_HOME:-$HOME/.local/state}/tmux-tools/orca/<runtimeId>/<name>.json`. Orca makes a new `runtimeId` and new handles on every runtime restart while its panes stay open: after a restart every pane spawned before it stays open in Orca but is unregistered, and its name is free again. Record directories of earlier runtimes are deleted.
+- **Every `prompt` result is `complete: false`.** Orca reports no pane width and no full-screen state, so Completeness cannot be established. `capture --all` prints no full-screen notice. The History mark is Orca's read cursor; history is paged to the settle point, and a full-screen program, which keeps no line history, yields its rendered screen.
+- **Cursor and keypad keys always send their normal-mode bytes.** `send` classifies each argument by tmux's own key grammar and writes the bytes tmux's xterm key output produces (`M-x` → `ESC x`, `F1` → `ESC O P`, `Up` → `ESC [ A`, `^c` → `0x03`); Orca does not expose a pane's application cursor or keypad mode, so an application that enabled it receives the normal-mode bytes. `interrupt` sends the surface's `interrupt_key` the same way, never Orca's `--interrupt`.
+- **One-submission delivery is a proxy, with a remaining risk.** `prompt` refuses before sending anything when the runtime lacks the capability `terminal.prompt-delivery.v1`. Otherwise delivery is guaranteed only when `terminal show` reports the pane's registered agent, `worktree ps` reports that agent live, and the capability is present; a multi-line prompt to a bracketed-paste surface is refused when delivery is not guaranteed. Orca decides on its server whether to bracket the text, and nothing it reports before sending reproduces that check: it can still write the raw text, and a shell in the pane then runs each line.
+
 ## Pane history and `prompt` results
 
 `launch` and `spawn-agent` raise the `history-limit` of **every session they create** to 50000 before the launched command's window can emit output. `history-limit` is a tmux **session** option (it cannot be set per pane); new windows inherit it. tmux-tools never changes the option on a session it did not create, and never sets it globally. `tmux show-options -t <session> history-limit` reports it. This is what lets `prompt` return a completed turn whose response scrolled past the visible screen: tmux defaults the limit to 2000, so a deep turn can silently drop its own beginning.
@@ -335,61 +358,25 @@ Raw and concise carry both dimensions on stderr; JSON carries them as the `turn_
 
 `prompt` settles on the resolved surface's classification or, when the surface supplies no patterns, on idle detection; with patterns present it never treats an unknown capture (neither or both matching) as idle. `wait-idle` is unchanged and keeps its idle-detection fallback.
 
-## Library: configurable invocation
+## Library: the Host port
 
-`tmux_tools_core` exposes a programmatic API for shaping how every tmux subprocess is spawned. Re-exported from the crate root: `TmuxInvocation`, `set_global_invocation`, `with_invocation`.
+`tmux-tools-core` is the library behind the CLI. Its public modules are `host`, `registry`, `agents`, `format`, `idle`, `layout`, `names` and `target`; the modules other than `host` reach a host only through the Host port. The former tmux paths (`tmux`, `stream`, `TmuxInvocation`, `with_invocation`, `set_global_invocation`) are gone.
 
-### `TmuxInvocation`
+- `host::HostPort` — the pane-level port: create, list, capture, send text and keys, close, the Pane registration, Host state, notify, capabilities, and the layout operations gated by `tile`. `host::TmuxHost` and `host::OrcaHost` implement it.
+- `host::HostSelection` — `{ host: Host, source: SelectionSource }`, made by `HostSelection::from_env()` (or `from_lookup` over any variable source) with the rules of "Host selection". `host::selection()` returns the invocation's selection and `host::current()` its backend.
+- `host::HostCapabilities` — `native_state`, `submit_confirmation`, `notify`, `tile`, `rebalance`, `size`. An optional feature a host lacks is the error `host::Unsupported`.
+- `host::Host`, `host::HostState`, `host::Submission` — the host, its reported agent state, and what `prompt` knows of its submission.
+- `registry::PaneRecord` and `registry::PaneLiveness` — the Pane records of a host without pane data (Orca) and their `live` / `dead` / `orphan-reservation` states.
 
 ```rust
-pub struct TmuxInvocation {
-    pub prefix: Vec<String>,   // command prefix (empty by default)
-    pub socket: Option<String>,  // tmux socket name → `-L <name>` (None by default)
-    pub tmux_bin: String,       // tmux binary name (defaults to "tmux")
+use tmux_tools_core::host::{self, Host, HostSelection};
+
+let selection = HostSelection::from_env()?;
+let backend = host::current();
+assert_eq!(backend.host(), selection.host);
+if selection.host == Host::Orca {
+    assert!(!backend.capabilities().tile);
 }
-```
-
-`TmuxInvocation::default()` → `tmux_bin = "tmux"`, empty `prefix`, `socket = None`.
-
-### `set_global_invocation(invocation: Option<TmuxInvocation>)`
-
-Sets or clears the process-wide default invocation. Pass `None` to restore plain `tmux`.
-
-### `with_invocation(inv: TmuxInvocation, f: impl FnOnce() -> T) -> T`
-
-RAII thread-local override. Correct for per-thread / concurrent use (e.g. `spawn_blocking` threads each running commands under a different user). Takes precedence over the global invocation.
-
-### Resolution order
-
-thread-local → process-global → plain `tmux` (`TmuxInvocation::default()`).
-
-### Command construction
-
-Every `tmux::run*` call resolves the active invocation and builds:
-
-- **Prefix non-empty:** `Command::new(prefix[0])` with args `prefix[1..] ++ [tmux_bin] ++ ["-L", socket]? ++ user_args`
-- **Prefix empty:** `Command::new(tmux_bin)` with args `["-L", socket]? ++ user_args`
-
-This is how a consumer (e.g. SilverBond) runs all tmux control commands (`send-keys`, `capture-pane`, `new-session`, etc.) as another user via `sudo -u <user> … -L <socket>`.
-
-### Example
-
-```rust
-use tmux_tools_core::{with_invocation, TmuxInvocation};
-
-with_invocation(
-    TmuxInvocation {
-        prefix: vec!["sudo".into(), "-u".into(), "agent".into(), "-H".into(), "--".into()],
-        socket: Some("silverbond".into()),
-        tmux_bin: "tmux".into(),
-    },
-    || {
-        // Every tmux call in this closure runs as:
-        // sudo -u agent -H -- tmux -L silverbond <args>
-        tmux_tools_core::tmux::run_checked(&["new-session", "-d", "-s", "work"])?;
-        Ok::<_, anyhow::Error>(())
-    },
-)?;
 ```
 
 ## Testing
@@ -403,7 +390,18 @@ cargo test --workspace --features test-fixtures
 ```
 
 A bare `cargo test` still passes; it compiles the fixture-gated tests out and simply runs that many
-fewer tests.
+fewer tests. The default run never reaches Orca: its child processes get no `TMUX_TOOLS_HOST`,
+`ORCA_TERMINAL_HANDLE` or `ORCA_WORKTREE_ID`, and no `orca` on `PATH`.
+
+The same contract suite runs against a live Orca runtime only when opted in, from inside an Orca
+terminal with the runtime reachable:
+
+```sh
+TMUX_TOOLS_LIVE_ORCA=1 cargo test --features test-fixtures --test integration orca_contract_suite -- --nocapture
+```
+
+It closes every pane it creates, also on failure, and ends by asserting that neither `tmux-tools list`
+nor `orca terminal list` shows one of them.
 
 The live vendor surfaces are validated separately, by a manual smoke that never runs under
 `cargo test` (it drives the real `claude`, `codex` and `dsh` binaries):

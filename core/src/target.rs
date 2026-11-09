@@ -3,7 +3,8 @@
 use anyhow::{anyhow, Result};
 use std::env;
 
-use crate::{host, names};
+use crate::host::{self, Host, Unsupported};
+use crate::names;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TargetSpec {
@@ -30,6 +31,9 @@ pub fn parse(s: &str) -> TargetSpec {
 }
 
 pub fn resolve(spec: &TargetSpec, session: Option<&str>, window: Option<&str>) -> Result<String> {
+    if host::current().host() == Host::Orca {
+        return resolve_on_orca(spec, session, window);
+    }
     match spec {
         TargetSpec::PaneId(pane_id) => Ok(pane_id.to_owned()),
         TargetSpec::WindowId(window_id) => host::current().active_pane(window_id),
@@ -45,6 +49,53 @@ pub fn resolve_from_common(common: &impl TargetArgs) -> Result<String> {
         None => TargetSpec::SmartDefault,
     };
     resolve(&spec, common.session(), common.window())
+}
+
+/// P9.1: on Orca a Target is a pane name or a `term_…` handle, and a verb without
+/// `--target` acts on the calling pane. `--session` and `--window` are unsupported.
+fn resolve_on_orca(
+    spec: &TargetSpec,
+    session: Option<&str>,
+    window: Option<&str>,
+) -> Result<String> {
+    require_no_scope(session, window)?;
+    let name = match spec {
+        TargetSpec::SmartDefault => return host::current().calling_pane(),
+        TargetSpec::PaneId(value) | TargetSpec::WindowId(value) | TargetSpec::Name(value) => value,
+    };
+    if is_orca_handle(name) {
+        return Ok(name.to_owned());
+    }
+    names::find_pane_by_name(name)?.ok_or_else(|| anyhow!("no pane registered with name {name:?}"))
+}
+
+/// Exit 3 for `--session` or `--window` on a host without sessions and windows (P9.1).
+pub fn require_no_scope(session: Option<&str>, window: Option<&str>) -> Result<()> {
+    let host = host::current().host();
+    if host == Host::Orca {
+        if session.is_some() {
+            return Err(Unsupported {
+                feature: "--session",
+                host,
+            }
+            .into());
+        }
+        if window.is_some() {
+            return Err(Unsupported {
+                feature: "--window",
+                host,
+            }
+            .into());
+        }
+    }
+    Ok(())
+}
+
+/// Whether `value` is an Orca terminal handle (`term_…`).
+pub fn is_orca_handle(value: &str) -> bool {
+    value
+        .strip_prefix("term_")
+        .is_some_and(|rest| !rest.is_empty())
 }
 
 fn resolve_smart_default(session: Option<&str>, window: Option<&str>) -> Result<String> {
@@ -73,6 +124,11 @@ pub fn in_tmux() -> bool {
 /// tmux); falls back to the Host port's calling pane when `$TMUX_PANE` is
 /// unset but `$TMUX` is set. Returns `None` outside tmux.
 pub fn calling_pane_id() -> Option<String> {
+    if host::current().host() == Host::Orca {
+        return env::var(host::ORCA_TERMINAL_HANDLE)
+            .ok()
+            .filter(|handle| !handle.trim().is_empty());
+    }
     if let Ok(pane) = env::var("TMUX_PANE") {
         let trimmed = pane.trim();
         if !trimmed.is_empty() {

@@ -169,9 +169,12 @@ fn format_activity(activity: Option<i64>, now: i64) -> String {
 
 fn render_json(rows: &[PaneRow]) -> Result<()> {
     let host = host::current();
+    let pane_ids: Vec<String> = rows.iter().map(|row| row.pane_id.clone()).collect();
+    let host_states = host.host_states(&pane_ids)?;
     let json_rows = rows
         .iter()
-        .map(|row| {
+        .zip(host_states)
+        .map(|(row, host_state)| {
             Ok(ListJsonRow {
                 host: host.host(),
                 name: row.name.clone(),
@@ -182,7 +185,7 @@ fn render_json(rows: &[PaneRow]) -> Result<()> {
                 launched: row.launched_at.clone(),
                 status: pane_status(row),
                 last_activity: row.last_activity,
-                host_state: host.host_state(&row.pane_id)?,
+                host_state,
             })
         })
         .collect::<Result<Vec<_>>>()?;
@@ -206,6 +209,9 @@ fn display_value(value: Option<&str>) -> String {
 }
 
 fn pane_label(row: &PaneRow) -> String {
+    if let Some(label) = &row.label {
+        return label.clone();
+    }
     format!(
         "{}.{}:{}.{}",
         row.window_index_sort, row.window_name, row.pane_index_sort, row.pane_id
@@ -213,6 +219,9 @@ fn pane_label(row: &PaneRow) -> String {
 }
 
 fn pane_status(row: &PaneRow) -> String {
+    if row.unknown {
+        return "unknown".to_owned();
+    }
     if !row.pane_dead {
         return "running".to_owned();
     }
@@ -243,6 +252,8 @@ mod tests {
             pane_dead: false,
             pane_dead_status: None,
             last_activity: Some(1_700_000_000),
+            label: None,
+            unknown: false,
         };
 
         let json_row = ListJsonRow {

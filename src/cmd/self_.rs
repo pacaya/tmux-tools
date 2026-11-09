@@ -28,7 +28,15 @@ struct SelfJson {
 
 pub fn run(args: &SelfArgs) -> Result<()> {
     let host = host::current();
-    let calling = if target::in_tmux() {
+    let calling = if host.uses_pane_records() {
+        // On Orca the calling pane is `ORCA_TERMINAL_HANDLE`, required (P9.1); it is
+        // driven when a live Pane record holds that handle (P8).
+        let handle = host.calling_pane()?;
+        host.pane_names()?
+            .iter()
+            .any(|(pane, _)| *pane == handle)
+            .then_some(handle)
+    } else if target::in_tmux() {
         target::calling_pane_id()
     } else {
         None

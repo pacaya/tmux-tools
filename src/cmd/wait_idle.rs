@@ -8,8 +8,9 @@ use tmux_tools_core::{
     format::Format,
     host::{self, Host, HostState},
     idle::{
-        bottom_non_blank_lines, resolve_timeout, validate_seconds, wait_for_idle, IdleConfig,
-        IdleReason, SurfacePatterns, DEFAULT_READY_SCAN_LINES, DEFAULT_READY_STABLE_SECONDS,
+        bottom_non_blank_lines, resolve_timeout, validate_seconds, wait_for_idle, HostStateGate,
+        IdleConfig, IdleReason, SurfacePatterns, DEFAULT_READY_SCAN_LINES,
+        DEFAULT_READY_STABLE_SECONDS,
     },
     names, target,
 };
@@ -66,6 +67,9 @@ pub fn run(args: &WaitIdleArgs) -> Result<()> {
         until_regex: args.until.as_deref().map(Regex::new).transpose()?,
         // `wait-idle` keeps the historical fallback: a quiet `Unknown` capture settles it.
         idle_on_unknown: true,
+        host_state: host_state_gate(args.until.is_some(), None),
+        until_decides_alone: until_decides_alone(args.until.is_some()),
+        observe_host_state: false,
     };
     let outcome = wait_for_idle(&pane, &cfg)?;
 
@@ -111,6 +115,29 @@ pub fn run(args: &WaitIdleArgs) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// P6.2: Host state takes part in the wait on a host with `native_state`, unless
+/// `--until` or `--idle-seconds` was given explicitly, which then decides as today.
+/// `began_after_ms` is the submission instant of `prompt`'s settle step.
+pub(crate) fn host_state_gate(
+    until_given: bool,
+    began_after_ms: Option<u64>,
+) -> Option<HostStateGate> {
+    let explicit = until_given || idle_seconds_given();
+    (host::current().capabilities().native_state && !explicit)
+        .then_some(HostStateGate { began_after_ms })
+}
+
+/// P6.2: on a host with `native_state`, an explicit `--until` without an explicit
+/// `--idle-seconds` decides the wait by itself.
+pub(crate) fn until_decides_alone(until_given: bool) -> bool {
+    host::current().capabilities().native_state && until_given && !idle_seconds_given()
+}
+
+/// Whether `--idle-seconds` is on the command line (its default does not count).
+fn idle_seconds_given() -> bool {
+    std::env::args().any(|arg| arg == "--idle-seconds" || arg.starts_with("--idle-seconds="))
 }
 
 /// The resolved surface facts `prompt`/`wait-idle` need: readiness patterns and the

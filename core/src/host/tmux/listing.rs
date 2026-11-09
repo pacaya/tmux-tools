@@ -123,6 +123,8 @@ fn parse_pane_row(line: &str) -> Result<PaneListing> {
         pane_dead: fields[9] == "1",
         pane_dead_status: non_empty(fields[10]),
         last_activity,
+        label: None,
+        unknown: false,
     })
 }
 

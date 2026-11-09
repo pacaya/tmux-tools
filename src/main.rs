@@ -1,8 +1,15 @@
 use anyhow::Result;
 use clap::{Args, Parser, Subcommand};
-use tmux_tools_core::{host::Unsupported, Format};
+use tmux_tools_core::{
+    host::{self, Unsupported},
+    names::InvalidName,
+    Format,
+};
 
 mod cmd;
+#[cfg(test)]
+#[path = "../core/src/test_child_env.rs"]
+mod test_child_env;
 mod util;
 
 use crate::cmd::{
@@ -98,14 +105,20 @@ const EXIT_UNSUPPORTED: i32 = 3;
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    match run(cli.command) {
-        Err(error) => match error.downcast_ref::<Unsupported>() {
-            Some(unsupported) => {
+    // P3.1: an invalid `TMUX_TOOLS_HOST` fails every verb before it runs.
+    match host::selection().and_then(|_| run(cli.command)) {
+        Err(error) => {
+            if let Some(unsupported) = error.downcast_ref::<Unsupported>() {
                 eprintln!("{unsupported}");
                 std::process::exit(EXIT_UNSUPPORTED);
             }
-            None => Err(error),
-        },
+            if let Some(invalid) = error.downcast_ref::<InvalidName>() {
+                // P4.1: stderr is exactly `invalid name: <name>`.
+                eprintln!("{invalid}");
+                std::process::exit(1);
+            }
+            Err(error)
+        }
         Ok(()) => Ok(()),
     }
 }

@@ -2,7 +2,8 @@
 //! panes of a Host.
 //!
 //! A [`Host`] is the terminal program whose panes the tool drives. A Host backend is the
-//! implementation of [`HostPort`] for one host; [`TmuxHost`] is the only backend. Every
+//! implementation of [`HostPort`] for one host: [`TmuxHost`] and [`OrcaHost`]. The
+//! [`HostSelection`] of an invocation picks one (P3); [`current`] returns it. Every
 //! module outside a backend (the verbs, [`crate::layout`], [`crate::target`],
 //! [`crate::names`] and [`crate::idle`]) reaches a host only through this port, and no
 //! module outside a backend builds host commands. [`HostCapabilities`] names the
@@ -19,27 +20,116 @@ use std::fmt;
 use anyhow::Result;
 use serde::Serialize;
 
-use crate::layout::WindowGeometry;
+use crate::layout::{Registration, WindowGeometry};
 use crate::names::Registered;
 
+mod orca;
 mod tmux;
 
+pub use self::orca::{OrcaHost, ORCA_TERMINAL_HANDLE, ORCA_WORKTREE_ID};
 pub use self::tmux::TmuxHost;
 
 /// The terminal program whose panes the tool drives.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Host {
     Tmux,
+    Orca,
 }
 
 impl Host {
-    /// The host's name as the CLI reports it: `tmux`.
+    /// The host's name as the CLI reports it: `tmux` or `orca`.
     pub fn as_str(self) -> &'static str {
         match self {
             Host::Tmux => "tmux",
+            Host::Orca => "orca",
         }
     }
+}
+
+/// The environment variable that selects the host explicitly (P3.1).
+pub const TMUX_TOOLS_HOST: &str = "TMUX_TOOLS_HOST";
+
+/// Where a [`HostSelection`] came from.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SelectionSource {
+    /// `TMUX_TOOLS_HOST` named the host.
+    Override,
+    /// The named environment variable detected the host (P3.2).
+    Detected(String),
+    /// Nothing matched; the host is tmux (P3.3).
+    Default,
+}
+
+impl fmt::Display for SelectionSource {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            SelectionSource::Override => formatter.write_str(TMUX_TOOLS_HOST),
+            SelectionSource::Detected(env_var) => formatter.write_str(env_var),
+            SelectionSource::Default => formatter.write_str("default"),
+        }
+    }
+}
+
+/// The host chosen for one invocation and the source of that choice (P3).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HostSelection {
+    pub host: Host,
+    pub source: SelectionSource,
+}
+
+impl HostSelection {
+    /// Select the host from the process environment: `TMUX_TOOLS_HOST` when set
+    /// (`tmux` or `orca`; anything else, the empty value included, is an error); otherwise `$TMUX` set selects
+    /// tmux and `ORCA_TERMINAL_HANDLE` set selects orca, in that order; otherwise tmux.
+    pub fn from_env() -> Result<HostSelection> {
+        Self::from_lookup(|name| std::env::var(name).ok())
+    }
+
+    /// [`HostSelection::from_env`] over an arbitrary variable lookup.
+    pub fn from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Result<HostSelection> {
+        if let Some(value) = lookup(TMUX_TOOLS_HOST) {
+            let host = match value.as_str() {
+                "tmux" => Host::Tmux,
+                "orca" => Host::Orca,
+                other => anyhow::bail!(
+                    "{TMUX_TOOLS_HOST}={other:?} is not a host; valid values are tmux and orca"
+                ),
+            };
+            return Ok(HostSelection {
+                host,
+                source: SelectionSource::Override,
+            });
+        }
+        let set = |name: &str| lookup(name).is_some_and(|value| !value.is_empty());
+        for (env_var, host) in [("TMUX", Host::Tmux), (ORCA_TERMINAL_HANDLE, Host::Orca)] {
+            if set(env_var) {
+                return Ok(HostSelection {
+                    host,
+                    source: SelectionSource::Detected(env_var.to_owned()),
+                });
+            }
+        }
+        Ok(HostSelection {
+            host: Host::Tmux,
+            source: SelectionSource::Default,
+        })
+    }
+}
+
+/// The selection of this invocation, made once from the environment.
+fn selection_cell() -> &'static std::result::Result<HostSelection, String> {
+    static SELECTION: std::sync::OnceLock<std::result::Result<HostSelection, String>> =
+        std::sync::OnceLock::new();
+    SELECTION.get_or_init(|| HostSelection::from_env().map_err(|error| format!("{error:#}")))
+}
+
+/// The [`HostSelection`] of this invocation; an error when `TMUX_TOOLS_HOST` names no
+/// host. The CLI checks it before any verb runs.
+pub fn selection() -> Result<HostSelection> {
+    selection_cell()
+        .clone()
+        .map_err(|message| anyhow::anyhow!(message))
 }
 
 impl fmt::Display for Host {
@@ -129,9 +219,18 @@ pub struct HostCapabilities {
     pub size: bool,
 }
 
-/// The backend the current invocation drives. Only the tmux backend exists.
+/// The backend the current invocation drives, from its [`HostSelection`]. An invalid
+/// selection falls back to tmux here; the CLI rejects it through [`selection`] before
+/// any verb runs.
 pub fn current() -> &'static dyn HostPort {
-    &TmuxHost
+    static ORCA: std::sync::OnceLock<OrcaHost> = std::sync::OnceLock::new();
+    match selection_cell() {
+        Ok(HostSelection {
+            host: Host::Orca,
+            source,
+        }) => ORCA.get_or_init(|| OrcaHost::new(source.clone())),
+        _ => &TmuxHost,
+    }
 }
 
 /// The environment variable of the test-only capability override: a comma-separated
@@ -264,6 +363,12 @@ pub struct PaneListing {
     pub pane_dead: bool,
     pub pane_dead_status: Option<String>,
     pub last_activity: Option<i64>,
+    /// The `pane` value `list` prints for this row, when the host names its panes by
+    /// one handle (Orca); `None` for the tmux `<window>.<name>:<pane>.<id>` label.
+    pub label: Option<String>,
+    /// Whether the host's pane list was incomplete and did not list this row's pane, so
+    /// its liveness is unknown (P4.5).
+    pub unknown: bool,
 }
 
 /// One pane as `status` reports it.
@@ -450,9 +555,92 @@ pub trait HostPort: Sync {
     /// The Host state of `pane`; `None` when the host reports none.
     fn host_state(&self, pane: &str) -> Result<Option<HostState>>;
 
+    /// The Host state of each of `panes`, in order, read with one host query where the
+    /// host allows it (`list`).
+    fn host_states(&self, panes: &[String]) -> Result<Vec<Option<HostState>>> {
+        panes.iter().map(|pane| self.host_state(pane)).collect()
+    }
+
     /// Show a desktop notification with `title` and `body` for `pane`. Called only on a
     /// host with [`HostCapabilities::notify`].
     fn notify(&self, pane: &str, title: &str, body: &str) -> Result<Delivery>;
+
+    // --- Pane records, prompts, and Host state with its start ----------------------
+    //
+    // The defaults serve a host that keeps the Pane registration on the pane itself
+    // (tmux); a registry host (Orca) overrides them.
+
+    /// Whether this host keeps the Pane registration in Pane records (P4.3).
+    fn uses_pane_records(&self) -> bool {
+        false
+    }
+
+    /// The pane registered with `name`; `None` when no pane is. An error when the name
+    /// is ambiguous, or the host cannot tell whether it is live.
+    fn find_registered(&self, name: &str) -> Result<Option<String>> {
+        let panes: Vec<String> = self
+            .pane_names()?
+            .into_iter()
+            .filter(|(_, pane_name)| pane_name == name)
+            .map(|(pane_id, _)| pane_id)
+            .collect();
+        match panes.len() {
+            0 => Ok(None),
+            1 => Ok(panes.into_iter().next()),
+            _ => anyhow::bail!(
+                "name '{}' resolves to multiple panes: {}; use a pane id (%N) explicitly",
+                name,
+                panes.join(", ")
+            ),
+        }
+    }
+
+    /// On a registry host: reserve the name, create a pane running `command` (a new tab
+    /// when `split` is `None`, else a split of `target` or the calling pane), and
+    /// register it (P4.4). Returns the new pane's handle and its name.
+    fn create_registered(
+        &self,
+        _command: &str,
+        _split: Option<SplitDirection>,
+        _target: Option<&str>,
+        _registration: &Registration<'_>,
+    ) -> Result<(String, String)> {
+        anyhow::bail!("{} keeps no Pane records", self.host())
+    }
+
+    /// The History mark of a host whose history is a read cursor (P9.3).
+    fn history_cursor(&self, _pane: &str) -> Result<String> {
+        anyhow::bail!("{} has no history read cursor", self.host())
+    }
+
+    /// Every history line of `pane` after `cursor`, paged to its end.
+    fn read_history_since(&self, _pane: &str, _cursor: &str) -> Result<String> {
+        anyhow::bail!("{} has no history read cursor", self.host())
+    }
+
+    /// On a host with `submit_confirmation`: whether one-submission delivery of a prompt
+    /// to `pane`, registered with `agent`, is guaranteed (P9.6). An error when the host
+    /// cannot deliver a prompt at all.
+    fn prompt_delivery_guaranteed(&self, _pane: &str, _agent: Option<&str>) -> Result<bool> {
+        anyhow::bail!("{} does not observe prompt submission", self.host())
+    }
+
+    /// On a host with `submit_confirmation`: send `text` plus Enter as one prompt and
+    /// observe its submission for up to `wait`.
+    fn submit_prompt(
+        &self,
+        _pane: &str,
+        _text: &str,
+        _wait: std::time::Duration,
+    ) -> Result<Submission> {
+        anyhow::bail!("{} does not observe prompt submission", self.host())
+    }
+
+    /// The Host state of `pane` with the time it began, in milliseconds since the Unix
+    /// epoch when the host reports it.
+    fn host_state_since(&self, pane: &str) -> Result<Option<(HostState, Option<u64>)>> {
+        Ok(self.host_state(pane)?.map(|state| (state, None)))
+    }
 
     // --- Layout (gated by `tile`) --------------------------------------------------
 
@@ -484,4 +672,49 @@ pub trait HostPort: Sync {
     /// Move `pane` into a new window of `session` (a session id); the window is not
     /// selected.
     fn break_pane(&self, pane: &str, session: &str) -> Result<()>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn select(vars: &[(&str, &str)]) -> Result<HostSelection> {
+        let vars: std::collections::HashMap<String, String> = vars
+            .iter()
+            .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+            .collect();
+        HostSelection::from_lookup(|name| vars.get(name).cloned())
+    }
+
+    #[test]
+    fn selection_follows_p3() {
+        let both = select(&[("TMUX", "/s,1,0"), (ORCA_TERMINAL_HANDLE, "term_x")]).unwrap();
+        assert_eq!(both.host, Host::Tmux);
+        assert_eq!(both.source, SelectionSource::Detected("TMUX".to_owned()));
+
+        let orca = select(&[(ORCA_TERMINAL_HANDLE, "term_x")]).unwrap();
+        assert_eq!(orca.host, Host::Orca);
+        assert_eq!(orca.source.to_string(), ORCA_TERMINAL_HANDLE);
+
+        let overridden = select(&[(TMUX_TOOLS_HOST, "orca"), ("TMUX", "/s,1,0")]).unwrap();
+        assert_eq!(
+            (overridden.host, overridden.source),
+            (Host::Orca, SelectionSource::Override)
+        );
+
+        let none = select(&[]).unwrap();
+        assert_eq!(
+            (none.host, none.source),
+            (Host::Tmux, SelectionSource::Default)
+        );
+
+        let error = select(&[(TMUX_TOOLS_HOST, "foo")]).unwrap_err().to_string();
+        assert!(error.contains("tmux") && error.contains("orca"), "{error}");
+
+        // P3.1: a present but empty value is an invalid value, not an unset one.
+        let empty = select(&[(TMUX_TOOLS_HOST, ""), ("TMUX", "/s,1,0")])
+            .unwrap_err()
+            .to_string();
+        assert!(empty.contains("tmux") && empty.contains("orca"), "{empty}");
+    }
 }

@@ -115,7 +115,16 @@ pub fn run(args: &PromptArgs) -> Result<()> {
         ready_stable_seconds: validate_seconds(args.ready_stable_seconds, "ready-stable-seconds")?,
         until_regex: args.until.as_deref().map(Regex::new).transpose()?,
         idle_on_unknown,
+        host_state: None,
+        until_decides_alone: crate::cmd::wait_idle::until_decides_alone(args.until.is_some()),
+        // Turn observation counts Host state `working` (P9.3).
+        observe_host_state: host::current().capabilities().native_state,
     };
+
+    // A host that observes submission (P6.4) delivers through its own transport.
+    if host::current().capabilities().submit_confirmation {
+        return run_with_submission(args, &pane, declared_bracketed_paste, cfg);
+    }
 
     // P7's history mark is fixed at the submission point (the cursor row) before anything
     // is submitted, and the pane is captured at the same instant so pre-submission output
@@ -222,6 +231,102 @@ pub fn run(args: &PromptArgs) -> Result<()> {
         Format::Raw => print!("{output_since_prompt}"),
     }
 
+    Ok(())
+}
+
+/// `prompt` on a host with `submit_confirmation` (Orca, P9.6). Delivery is determined
+/// before any transmission; the prompt is one host send that observes its submission;
+/// the History mark is the host's read cursor; Host state takes part in the settle; the
+/// host reports no width or alternate-screen state, so Completeness is false (P9.3).
+fn run_with_submission(
+    args: &PromptArgs,
+    pane: &str,
+    declared_bracketed_paste: bool,
+    mut cfg: IdleConfig,
+) -> Result<()> {
+    let host = host::current();
+    let registered = names::read(pane)?;
+    let guaranteed = match host.prompt_delivery_guaranteed(pane, registered.agent.as_deref()) {
+        Ok(guaranteed) => guaranteed,
+        Err(error) => {
+            report_refusal(args.common.format, pane, &args.text, &format!("{error:#}"))?;
+            return Err(error);
+        }
+    };
+    let delivery = if guaranteed {
+        DeliveryOutcome::Guaranteed
+    } else if declared_bracketed_paste && args.text.contains('\n') {
+        DeliveryOutcome::Refused(format!(
+            "refusing to send a multi-line prompt to pane {pane}: the surface declares \
+             bracketed-paste support but the host cannot guarantee one-submission delivery \
+             (the agent is not reported live in the pane), so delivering could submit \
+             fragments; wait for the agent to come up and retry"
+        ))
+    } else {
+        DeliveryOutcome::Unavailable
+    };
+    if let DeliveryOutcome::Refused(message) = &delivery {
+        report_refusal(args.common.format, pane, &args.text, message)?;
+        return Err(anyhow!("{message}"));
+    }
+
+    let mark = host.history_cursor(pane)?;
+    let submitted_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis() as u64)
+        .unwrap_or_default();
+    let submit = host.submit_prompt(pane, &args.text, cfg.timeout)?;
+    let delivery_str = delivery.as_str();
+    if matches!(args.common.format, Format::Raw | Format::Concise) {
+        match delivery {
+            DeliveryOutcome::Guaranteed => eprintln!(
+                "tmux-tools: prompt: one-submission delivery guaranteed: the host reports the \
+                 agent live in pane {pane}"
+            ),
+            _ => eprintln!(
+                "tmux-tools: prompt: one-submission delivery unavailable: the host does not \
+                 report the agent live in pane {pane}"
+            ),
+        }
+    }
+
+    cfg.host_state =
+        crate::cmd::wait_idle::host_state_gate(args.until.is_some(), Some(submitted_ms));
+    let outcome = wait_for_idle(pane, &cfg)?;
+    let output_since_prompt = strip_ansi(&host.read_history_since(pane, &mark)?);
+    let turn_observed = outcome.busy_seen;
+    let complete = false;
+
+    if matches!(args.common.format, Format::Raw | Format::Concise) {
+        emit_turn_observation(turn_observed);
+        eprintln!(
+            "tmux-tools: prompt: completeness: incomplete: {} reports no pane width or \
+             full-screen state",
+            host.host()
+        );
+    }
+
+    match args.common.format {
+        Format::Concise => print!("{}", render_capture(&output_since_prompt, Format::Concise)),
+        Format::Json => {
+            let rendered = render_capture(&output_since_prompt, Format::Concise);
+            let output = PromptJson {
+                target: pane,
+                name: registered.name.as_deref(),
+                prompt_sent: &args.text,
+                output_since_prompt: &rendered,
+                reason: outcome.reason.as_str(),
+                duration_ms: outcome.duration.as_millis(),
+                one_submission_delivery: delivery_str,
+                turn_observed,
+                complete,
+                host_state: host.host_state(pane)?,
+                submit,
+            };
+            println!("{}", serde_json::to_string(&hosted(&output))?);
+        }
+        Format::Raw => print!("{output_since_prompt}"),
+    }
     Ok(())
 }
 

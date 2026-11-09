@@ -5,16 +5,15 @@ use std::path::PathBuf;
 use tmux_tools_core::{
     agents::Registry,
     format::{display_value, Format},
+    host,
     layout::{self, AgentRegistration, Landing, Registration, Split},
+    names,
 };
 
 use crate::{
-    cmd::{
-        hosted,
-        launch::{
-            concise_landing_fields, destination, invoking_cwd, require_placement_options,
-            warn_if_unmeasured, wrap_keep_open, WindowJson,
-        },
+    cmd::launch::{
+        concise_landing_fields, destination, invoking_cwd, keep_alive, require_placement_options,
+        spawn_json, warn_if_unmeasured, WindowJson,
     },
     util::rfc3339_utc_now,
     CommonArgs,
@@ -71,6 +70,9 @@ struct SpawnAgentJson<'a> {
 }
 
 pub fn run(args: &SpawnAgentArgs) -> Result<()> {
+    if let Some(name) = &args.name {
+        names::validate_name(name)?;
+    }
     require_placement_options(args.split, args.size.is_some())?;
     let (registry, warnings) = Registry::load()?;
     for warning in &warnings {
@@ -146,7 +148,7 @@ fn launch_command(argv: &[String], cwd: Option<&PathBuf>, bare: bool) -> Result<
         None => None,
     };
 
-    if bare {
+    if bare && !host::current().uses_pane_records() {
         return Ok(match cwd_prefix {
             Some(prefix) => format!("{prefix} {command}"),
             None => command,
@@ -157,7 +159,7 @@ fn launch_command(argv: &[String], cwd: Option<&PathBuf>, bare: bool) -> Result<
     // the cwd if `cd` succeeded. `&&` binds tighter than `;`, so `cd && (cmd);
     // exec <shell>` runs the exec whether `cd` or the inner command fails —
     // output is preserved in every branch.
-    let wrapped = wrap_keep_open(&command);
+    let wrapped = keep_alive(&command, bare);
     Ok(match cwd_prefix {
         Some(prefix) => format!("{prefix} {wrapped}"),
         None => wrapped,
@@ -202,7 +204,7 @@ fn render_output(
                 relocated: landing.relocated,
                 window: WindowJson::of(landing),
             };
-            println!("{}", serde_json::to_string(&hosted(&output))?);
+            println!("{}", spawn_json(&output)?);
         }
         Format::Raw => println!("{}", landing.pane_id),
     }

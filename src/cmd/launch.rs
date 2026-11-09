@@ -93,9 +93,10 @@ pub(crate) fn concise_window_fields(window: &WindowReport) -> String {
     )
 }
 
-/// Warn on stderr, once, when the pane was gone before its window was measured.
+/// Warn on stderr, once, when the pane was gone before its window was measured. A host
+/// without `tile` measures no window, so it never warns.
 pub(crate) fn warn_if_unmeasured(landing: &Landing) {
-    if landing.window.is_none() {
+    if landing.window.is_none() && !host::current().uses_pane_records() {
         eprintln!(
             "warning: pane {} no longer exists; window geometry not measured",
             landing.pane_id
@@ -104,12 +105,11 @@ pub(crate) fn warn_if_unmeasured(landing: &Landing) {
 }
 
 pub fn run(args: &LaunchArgs) -> Result<()> {
+    if let Some(name) = &args.name {
+        names::validate_name(name)?;
+    }
     require_placement_options(args.split, args.size.is_some())?;
-    let cmd_for_tmux = if args.bare {
-        args.cmd.clone()
-    } else {
-        wrap_keep_open(&args.cmd)
-    };
+    let cmd_for_tmux = keep_alive(&args.cmd, args.bare);
     let launched_at = rfc3339_utc_now()?;
     let cwd = invoking_cwd();
     // Loaded before the pane exists: the verdict needs it, and its warnings belong to
@@ -168,6 +168,41 @@ pub(crate) fn invoking_cwd() -> Option<String> {
         .map(|cwd| cwd.to_string_lossy().into_owned())
 }
 
+/// The Keep-alive wrap of `cmd` on the current host, or `cmd` bare. On a registry host
+/// (Orca) the login shell that runs `--command` stays after the command exits, which
+/// is the wrap; `--bare` runs `exec <cmd>` so the pane closes with it (P9.9).
+pub(crate) fn keep_alive(cmd: &str, bare: bool) -> String {
+    match (host::current().uses_pane_records(), bare) {
+        (true, true) => format!("exec {cmd}"),
+        (true, false) => cmd.to_owned(),
+        (false, true) => cmd.to_owned(),
+        (false, false) => wrap_keep_open(cmd),
+    }
+}
+
+/// The `--format json` object of a spawning verb. On a registry host the keys Orca has
+/// no source for are `null`, so every host gives the same keys (P9.13).
+pub(crate) fn spawn_json<T: Serialize>(output: &T) -> Result<String> {
+    if !host::current().uses_pane_records() {
+        return Ok(serde_json::to_string(&hosted(output))?);
+    }
+    let mut value = serde_json::to_value(hosted(output))?;
+    {
+        if let Some(object) = value.as_object_mut() {
+            for key in [
+                "relocated",
+                "window_id",
+                "min_pane_cols",
+                "min_pane_rows",
+                "below_floor",
+            ] {
+                object.insert(key.to_owned(), serde_json::Value::Null);
+            }
+        }
+    }
+    Ok(serde_json::to_string(&value)?)
+}
+
 /// Wrap a command so the pane survives its exit by `exec`-ing into a fallback
 /// shell. Without this, `tmux split-window <cmd>` reaps the pane the instant
 /// `<cmd>` exits — taking error output with it.
@@ -206,7 +241,7 @@ fn render_output(args: &LaunchArgs, landing: &Landing, launched_at: &str) -> Res
                 relocated: landing.relocated,
                 window: WindowJson::of(landing),
             };
-            println!("{}", serde_json::to_string(&hosted(&output))?);
+            println!("{}", spawn_json(&output)?);
         }
     }
 

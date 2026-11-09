@@ -2,7 +2,9 @@
 id: ISSUE-261107-0921-03
 kind: issue
 category: enhancement
-status: ready-for-agent
+status: done
+claimed_by: implement-issue@agentmac
+claimed_at: 2026-11-09T08:15:52Z
 brief_contract: agent-brief.v3
 context: tmux-tools
 summary: an Orca host backend serves every required verb, selected by TMUX_TOOLS_HOST or ORCA_TERMINAL_HANDLE, with a Pane record registry and a per-backend contract suite
@@ -139,6 +141,56 @@ Live run (opt-in switch, from inside an Orca terminal, Orca runtime reachable):
 **Verification and release:** The default suite passes with the decoy environment (`TMUX=/nonexistent/tt-decoy,1,0 TMUX_PANE=%999999 TMUX_TMPDIR=<empty temp dir> TMUX_TOOLS_HOST=orca ORCA_TERMINAL_HANDLE=term_decoy ORCA_WORKTREE_ID=decoy`). The implementing agent runs the opt-in live suite and items 2 and 4 of the PRD's `## Verification and release` from a Claude session started inside an Orca terminal on the agent Mac, before review. Conditions: this repository is registered as an Orca worktree; the Orca version and its `orca status` capabilities are named in the handoff; `claude` and `codex` are authenticated. The Host-state part of item 3 is checked with `orca worktree ps --json`. The maintainer does only the Orca GUI and desktop-notification checks of item 3. If no such session is available, the maintainer runs the live suite and items 2–4 before release. Each check is reported with its commands and result in the review handoff. The issue does not close until all pass. Rollback is reverting the release.
 
 **Out of scope:** Rex and Herdr backends; harness skill, hook, guard and `teammateMode` changes; moving `SilverBond` to the port; Pane identity across an Orca restart (`ISSUE-261107-1229-01`).
+
+## Context Pack — canonical at claim (2026-11-09T08:15:52Z)
+
+**Contract approval:** `dispatch-20261107T220745Z` · canonical · revision check complete
+
+**Issue binding:** `tmux-tools:ISSUE-261107-0921-03` · revision `aaa1d6419fabdde133687ed3ea8ef6624b4ca04f` · sha256 `0899e7f0efa21cae7c21a86886382a2c498393b94837405946c3bb9614026799`
+
+**Required source objects:**
+- `tmux-tools:ADR-260919-0146-01` · revision `2701f90f8f7b5aa76e8cb39d99f1947574865c6b` · sha256 `aff804f1931800a3a4ed23ac446114981100eb60483d6b8cc1aa6b224a9a73de` · `objects/aff804f1931800a3a4ed23ac446114981100eb60483d6b8cc1aa6b224a9a73de.md`
+- `tmux-tools:PRD-260918-0323-01#p1-transport` · revision `2701f90f8f7b5aa76e8cb39d99f1947574865c6b` · sha256 `8842bfd61bf171639a253a44e316076a470c48844b93a7069d7cdc6e9c9c1d18` · `objects/8842bfd61bf171639a253a44e316076a470c48844b93a7069d7cdc6e9c9c1d18.md`
+- `tmux-tools:PRD-260918-0323-01#p3-state` · revision `2701f90f8f7b5aa76e8cb39d99f1947574865c6b` · sha256 `5a416456cdbf417d93cf1cf17af464fbffe97c0511e3dcac6f472eb9ac9d0435` · `objects/5a416456cdbf417d93cf1cf17af464fbffe97c0511e3dcac6f472eb9ac9d0435.md`
+- `tmux-tools:PRD-260918-0323-01#p7-prompt` · revision `2701f90f8f7b5aa76e8cb39d99f1947574865c6b` · sha256 `05941c8a9b107818f53b60318fcb6990b213c10e6b0f3470e28eaf1feefa458c` · `objects/05941c8a9b107818f53b60318fcb6990b213c10e6b0f3470e28eaf1feefa458c.md`
+- `tmux-tools:PRD-261107-0825-01#contracts` · revision `2701f90f8f7b5aa76e8cb39d99f1947574865c6b` · sha256 `2dcaeaca0b58367d93fe50b56bb4f48c229f945537dd24be4bf26cb0306616b6` · `objects/2dcaeaca0b58367d93fe50b56bb4f48c229f945537dd24be4bf26cb0306616b6.md`
+- `tmux-tools:PRD-261107-0825-01#p1-definitions` · revision `2701f90f8f7b5aa76e8cb39d99f1947574865c6b` · sha256 `6886dd1c2efbdd1e7a3f7e7517de2f776154bdeea2537bfb994de40259ddc6bc` · `objects/6886dd1c2efbdd1e7a3f7e7517de2f776154bdeea2537bfb994de40259ddc6bc.md`
+- `tmux-tools:PRD-261107-0825-01#p10-tests` · revision `2701f90f8f7b5aa76e8cb39d99f1947574865c6b` · sha256 `a28eb660fd94942cad51db5869d5ba74757bff5b2ac3317f6e44699676aa3fcb` · `objects/a28eb660fd94942cad51db5869d5ba74757bff5b2ac3317f6e44699676aa3fcb.md`
+- `tmux-tools:PRD-261107-0825-01#p11-rollout` · revision `2701f90f8f7b5aa76e8cb39d99f1947574865c6b` · sha256 `e89d33cff298b7fb9f0b0d219cf7b826de7afcb6de8bfc30b7e4bb30465f22a5` · `objects/e89d33cff298b7fb9f0b0d219cf7b826de7afcb6de8bfc30b7e4bb30465f22a5.md`
+- `tmux-tools:PRD-261107-0825-01#p2-host-port` · revision `2701f90f8f7b5aa76e8cb39d99f1947574865c6b` · sha256 `57dfaef1b2a9e0c453e377e6b8b7f07730d8e891de67ab911255357cea195271` · `objects/57dfaef1b2a9e0c453e377e6b8b7f07730d8e891de67ab911255357cea195271.md`
+- `tmux-tools:PRD-261107-0825-01#p3-selection` · revision `2701f90f8f7b5aa76e8cb39d99f1947574865c6b` · sha256 `f9e205e8b5a0046153da498982bd63d179b48d390062414e75e01487a48b0bef` · `objects/f9e205e8b5a0046153da498982bd63d179b48d390062414e75e01487a48b0bef.md`
+- `tmux-tools:PRD-261107-0825-01#p4-registration` · revision `2701f90f8f7b5aa76e8cb39d99f1947574865c6b` · sha256 `4f3186b44eac6fb0216ee87b1f469f422617cadb577ee7033ab286156b50986c` · `objects/4f3186b44eac6fb0216ee87b1f469f422617cadb577ee7033ab286156b50986c.md`
+- `tmux-tools:PRD-261107-0825-01#p5-verb-classes` · revision `2701f90f8f7b5aa76e8cb39d99f1947574865c6b` · sha256 `126f8593490e6c1e977cd250f022086d9b8e12236740621981f2238d89d8acbe` · `objects/126f8593490e6c1e977cd250f022086d9b8e12236740621981f2238d89d8acbe.md`
+- `tmux-tools:PRD-261107-0825-01#p6-host-state` · revision `2701f90f8f7b5aa76e8cb39d99f1947574865c6b` · sha256 `8116a17457d9e0d4d77810f04fb8d25e9ceb7d9648425937e1a10758ecba2389` · `objects/8116a17457d9e0d4d77810f04fb8d25e9ceb7d9648425937e1a10758ecba2389.md`
+- `tmux-tools:PRD-261107-0825-01#p7-notify` · revision `2701f90f8f7b5aa76e8cb39d99f1947574865c6b` · sha256 `314e45ba7b329a7205cffe4ca13f1ef0295742983604de237a67bb2c2cddf9f4` · `objects/314e45ba7b329a7205cffe4ca13f1ef0295742983604de237a67bb2c2cddf9f4.md`
+- `tmux-tools:PRD-261107-0825-01#p8-self` · revision `2701f90f8f7b5aa76e8cb39d99f1947574865c6b` · sha256 `c9b5c2c4a75da7c6af673a9c3e73e9295a84bae0f5e841abd0790f711207e329` · `objects/c9b5c2c4a75da7c6af673a9c3e73e9295a84bae0f5e841abd0790f711207e329.md`
+- `tmux-tools:PRD-261107-0825-01#p9-orca` · revision `2701f90f8f7b5aa76e8cb39d99f1947574865c6b` · sha256 `689b0faaccf9198710903fe9aac136378099c40b1f0ce0727a655ee9b31c773c` · `objects/689b0faaccf9198710903fe9aac136378099c40b1f0ce0727a655ee9b31c773c.md`
+- `tmux-tools:PRD-261107-0825-01#verification` · revision `2701f90f8f7b5aa76e8cb39d99f1947574865c6b` · sha256 `33f44c92e13c8dc3dcef6788fb0aa3a64910863a329032f62e530e16a990cb1c` · `objects/33f44c92e13c8dc3dcef6788fb0aa3a64910863a329032f62e530e16a990cb1c.md`
+
+**Bundle manifest:** `.planning-contracts/bundles/ISSUE-261107-0921-03/manifest.json`
+
+**Test seam:** `cargo test --workspace --features test-fixtures --no-fail-fast` (CLI binary through the P10 contract suite in `tests/`, isolated tmux server; opt-in live Orca run), stdout/stderr/exit code of every verb, `orca terminal list`, the registry files, `cargo doc -p tmux-tools-core`, `README.md` and `CONTEXT.md`
+
+## Code Review
+
+Review: `issue-261107-0921-03-code-review-20261109-092225.md` — Outcome: ACCEPTED
+
+Scope proposals (unfixed, maintainer-owned):
+- C-1 — the live contract suite owns a late, untitled split pane by its membership in the tab of a run-owned split target (`tests/contract/orca.rs` `anchor_split`/`discover`); a pane that someone else splits into that short-lived, run-tagged tab during the scenario would be closed. CHANGE: correlate late splits with the run's own request/retry identity instead of tab membership. OWNER: maintainer
+- C-2 — the `claude-cli` P14 preflight S1 smoke requires tmux, so it fails closed on Orca (the five item-2 steps still complete with no skill text changed). CHANGE: make the harness preflight host-aware. OWNER: maintainer
+
+## Resolution
+
+- Commit: `feat: Orca host backend with host selection, Pane record registry and per-backend contract suite; v0.4.0 (ISSUE-261107-0921-03)`
+- Route: claude — deepseek-suspended (code-primary feature), Opus at effort medium; correction batch 1 on the same route; batches 2–3 claude — regression (RETAINED_REGRESSION: H3, M4, M6; tests only, effort medium).
+- TDD: red-green at the CLI binary through the P10 contract suite (tmux, fake-CLI Orca regressions, opt-in live Orca run).
+- Review: dual review (Claude + Codex); 10 findings (H1–H3, M1–M6, L1), all fixed and verified in three correction batches; one split recheck verdict adjudicated as maintainer proposal C-1; proposal C-2.
+- Suite: `cargo test --workspace --features test-fixtures --no-fail-fast` with the decoy environment — 456 passed, 0 failed; `orca terminal list` unchanged; decoy temp dir empty afterwards.
+- Live Orca (app 1.4.253, runtime reachable; capabilities include `terminal.prompt-delivery.v1`, `terminal.split-retry.v1`, `terminal.ordered-input.v1`, `terminal.program-status.v1`, `terminal.create-idempotency.v2`, `terminal.spawn-intent.v1`): `TMUX_TOOLS_LIVE_ORCA=1 cargo test --features test-fixtures --test integration orca_contract_suite` — 20/20 scenarios pass on the final code, no pane left. Repository registered with `orca repo add --path <repo>`.
+- Verification item 2: `codex-developer` and `claude-cli` each complete spawn, prompt, wait, resume-handle capture and kill under Orca with no skill text changed (C-2 notes the harness preflight gap). Item 3 Host-state part: `orca worktree ps --json` main state done → working → done matched `status` `host_state`; `notify` exits 0 with `notify: not delivered on orca`. Item 4: no leaked pane in `tmux-tools list` or `orca terminal list`.
+- Pending maintainer check: the Orca GUI Host-state display and desktop-notification parts of item 3; rollback is reverting the release.
+- Release: P11.4 minor bump to 0.4.0 (README and CONTEXT.md updated per the brief).
+- Date: 2026-11-09 (UTC)
 
 ## Triage Notes
 - 2026-11-07 dispatch readiness: not promoted; stays `needs-triage` (Q40–Q50).

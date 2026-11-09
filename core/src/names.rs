@@ -157,16 +157,34 @@ pub fn unset(pane_id: &str, key: RegistrationKey) -> Result<()> {
 }
 
 pub fn find_pane_by_name(name: &str) -> Result<Option<String>> {
-    let pane_ids = list_panes_with_name(name)?;
+    host::current().find_registered(name)
+}
 
-    match pane_ids.len() {
-        0 => Ok(None),
-        1 => Ok(Some(pane_ids.into_iter().next().unwrap())),
-        _ => Err(anyhow!(
-            "name '{}' resolves to multiple panes: {}; use a pane id (%N) explicitly",
-            name,
-            pane_ids.join(", ")
-        )),
+/// A `--name` value that P4.1 rejects. The CLI prints it as `invalid name: <name>`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InvalidName(pub String);
+
+impl std::fmt::Display for InvalidName {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "invalid name: {}", self.0)
+    }
+}
+
+impl std::error::Error for InvalidName {}
+
+/// P4.1: a pane name matches `[A-Za-z0-9._-]+` and is neither `.` nor `..`. Checked
+/// on every host before any pane or record is created.
+pub fn validate_name(name: &str) -> Result<()> {
+    let valid = !name.is_empty()
+        && name != "."
+        && name != ".."
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'));
+    if valid {
+        Ok(())
+    } else {
+        Err(InvalidName(name.to_owned()).into())
     }
 }
 
@@ -186,6 +204,17 @@ pub fn read(pane_id: &str) -> Result<Registered> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn validate_name_applies_the_p4_1_character_set() {
+        for bad in ["a/b", "..", ".", "a b", "", "é", "a:b"] {
+            let error = validate_name(bad).unwrap_err();
+            assert_eq!(error.to_string(), format!("invalid name: {bad}"));
+        }
+        for good in ["A.b_c-9", "x", ".hidden", "a..b"] {
+            validate_name(good).unwrap();
+        }
+    }
 
     #[test]
     fn derived_stem_is_the_basename_of_the_first_word() {

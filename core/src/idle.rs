@@ -6,7 +6,7 @@ use regex::Regex;
 use xxhash_rust::xxh3::xxh3_64;
 
 use crate::format::strip_ansi;
-use crate::host;
+use crate::host::{self, HostState};
 
 #[derive(Clone, Debug)]
 pub struct IdleConfig {
@@ -35,6 +35,35 @@ pub struct IdleConfig {
     /// (or the pane has no surface) `prompt` leaves it `true`, because idle detection is then
     /// the only completion signal.
     pub idle_on_unknown: bool,
+    /// On a host with `native_state` (P6.2), when neither `--until` nor `--idle-seconds`
+    /// was given: Host state decides first. `working` keeps the wait going; `idle`,
+    /// `done` or `blocked` ends it; any Host state other than `null` suppresses Readiness
+    /// and Idle detection. `None`: Host state is not read.
+    pub host_state: Option<HostStateGate>,
+    /// On a host with `native_state`, when `--until` is given and `--idle-seconds` is
+    /// not: only the `--until` match or the timeout ends the wait (P6.2).
+    pub until_decides_alone: bool,
+    /// Read Host state on every poll for Turn observation only, when
+    /// [`IdleConfig::host_state`] is `None` (an explicit option decides the wait).
+    pub observe_host_state: bool,
+}
+
+/// How Host state takes part in a wait (see [`IdleConfig::host_state`]).
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct HostStateGate {
+    /// The settle step of `prompt`: a Host state ends the wait only when it began after
+    /// this instant (milliseconds since the Unix epoch). `None` for `wait-idle`.
+    pub began_after_ms: Option<u64>,
+}
+
+/// The poll outcome of a [`HostStateGate`].
+enum GateVerdict {
+    /// Host state is `null`: Readiness and Idle detection decide.
+    Undecided,
+    /// Host state keeps the wait going.
+    Wait,
+    /// Host state ends the wait.
+    End,
 }
 
 pub const DEFAULT_READY_SCAN_LINES: usize = 1;
@@ -174,6 +203,9 @@ impl Default for IdleConfig {
             ready_stable_seconds: DEFAULT_READY_STABLE_SECONDS,
             until_regex: None,
             idle_on_unknown: true,
+            host_state: None,
+            until_decides_alone: false,
+            observe_host_state: false,
         }
     }
 }
@@ -241,6 +273,75 @@ pub fn wait_for_idle(pane_id: &str, cfg: &IdleConfig) -> Result<IdleOutcome> {
             });
         }
 
+        // P6.2: on a host with `native_state`, Host state decides first when it is not
+        // `null`. `working` also counts as Turn observation (P9.3).
+        let verdict = match &cfg.host_state {
+            Some(gate) => {
+                let observed = host::current().host_state_since(pane_id)?;
+                if matches!(observed, Some((HostState::Working, _))) {
+                    busy_seen = true;
+                }
+                gate_verdict(gate, observed)
+            }
+            None => {
+                // Host state `working` still counts as Turn observation when an explicit
+                // option decides the wait (P9.3).
+                if cfg.observe_host_state
+                    && matches!(
+                        host::current().host_state_since(pane_id)?,
+                        Some((HostState::Working, _))
+                    )
+                {
+                    busy_seen = true;
+                }
+                GateVerdict::Undecided
+            }
+        };
+        match verdict {
+            GateVerdict::End => {
+                return Ok(IdleOutcome {
+                    reason: IdleReason::ReadyMatched,
+                    duration: start.elapsed(),
+                    idle_for: now - last_change,
+                    final_capture: stripped,
+                    busy_seen,
+                    alternate_seen,
+                });
+            }
+            GateVerdict::Wait => {
+                if start.elapsed() >= cfg.timeout {
+                    return Ok(IdleOutcome {
+                        reason: IdleReason::TimedOut,
+                        duration: start.elapsed(),
+                        idle_for: now - last_change,
+                        final_capture: stripped,
+                        busy_seen,
+                        alternate_seen,
+                    });
+                }
+                sleep(cfg.poll_interval);
+                continue;
+            }
+            GateVerdict::Undecided => {}
+        }
+
+        // P6.2: an explicit `--until` alone on a host with `native_state` decides by
+        // itself; Readiness and Idle detection do not end the wait.
+        if cfg.until_decides_alone {
+            if start.elapsed() >= cfg.timeout {
+                return Ok(IdleOutcome {
+                    reason: IdleReason::TimedOut,
+                    duration: start.elapsed(),
+                    idle_for: now - last_change,
+                    final_capture: stripped,
+                    busy_seen,
+                    alternate_seen,
+                });
+            }
+            sleep(cfg.poll_interval);
+            continue;
+        }
+
         // P3's classifier is the only place pane state is derived. When the resolved
         // surface supplies no patterns (or there is no surface) the state is `Unknown`,
         // which falls through to idle detection below.
@@ -303,6 +404,19 @@ pub fn wait_for_idle(pane_id: &str, cfg: &IdleConfig) -> Result<IdleOutcome> {
         }
 
         sleep(cfg.poll_interval);
+    }
+}
+
+/// What one Host state observation means for a wait.
+fn gate_verdict(gate: &HostStateGate, observed: Option<(HostState, Option<u64>)>) -> GateVerdict {
+    match observed {
+        None => GateVerdict::Undecided,
+        Some((HostState::Working, _)) => GateVerdict::Wait,
+        Some((_, began)) => match gate.began_after_ms {
+            None => GateVerdict::End,
+            Some(submitted) if began.is_some_and(|began| began > submitted) => GateVerdict::End,
+            Some(_) => GateVerdict::Wait,
+        },
     }
 }
 

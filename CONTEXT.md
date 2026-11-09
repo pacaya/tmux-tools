@@ -7,21 +7,27 @@ the whole glossary.
 
 **Host** [VO] — the terminal program whose panes the tool drives: `tmux` or `orca`. Every verb reaches its host only through the Host port, a pane-level interface; no module outside a [[Host backend]] builds host commands. _Avoid_: terminal, multiplexer. ↔ core/src/host/mod.rs (`Host`, the `HostPort` trait)
 
-**Host backend** [adapter] — the implementation of the Host port for one [[Host]]. The tmux backend is the only one; tmux facts ([[Managed session]], [[Bracketed paste transport]], the `@tt-*` storage of [[Pane registration]], and [[Layout intent]] as `@tt-tiled`) live in it. _Avoid_: driver, plugin. ↔ core/src/host/tmux/ (`TmuxHost`)
+**Host backend** [adapter] — the implementation of the Host port for one [[Host]]: the tmux backend and the Orca backend. Host facts live in their backend: on tmux the [[Managed session]], [[Bracketed paste transport]], the `@tt-*` storage of [[Pane registration]], and [[Layout intent]] as `@tt-tiled`; on Orca every `orca` CLI invocation and the [[Pane record]] reconciliation. _Avoid_: driver, plugin. ↔ core/src/host/tmux/ (`TmuxHost`), core/src/host/orca.rs (`OrcaHost`)
 
-**Host capabilities** [VO] — the optional features a [[Host backend]] supports: `native_state`, `submit_confirmation`, `notify`, `tile`, `rebalance`, `size`. The tmux backend supports `notify`, `tile`, `rebalance` and `size`. Capabilities are read on each invocation: an optional verb or option (`rebalance`, `--split tile`, `--size`) on a host that lacks it exits 3 with `unsupported: <verb> on <host>`, and the automatic tile after a spawn is skipped silently on a host without `tile`. _Avoid_: features, flags. ↔ core/src/host/mod.rs (`HostCapabilities`, `Unsupported`)
+**Host selection** [VO] — the [[Host]] chosen for one invocation and the source of that choice: `TMUX_TOOLS_HOST` when set (`tmux` or `orca`; any other value is an error), else `$TMUX` set → tmux, else `ORCA_TERMINAL_HANDLE` set → orca, else tmux. An unreachable selected host fails the invocation naming the host and the source; it never falls back. _Avoid_: host detection, mode. ↔ core/src/host/mod.rs (`HostSelection`, `SelectionSource`)
 
-**Host state** [VO] — the agent state a [[Host]] itself reports for a pane: `working`, `blocked`, `done` or `idle`, or `null` when it reports none. Separate from [[Pane state]]; the tmux backend always reports `null`. `status`, `list`, `wait-idle` and `prompt` report it as `host_state` in JSON. _Avoid_: agent status, native state. ↔ core/src/host/mod.rs (`HostState`, `HostPort::host_state`)
+**Host capabilities** [VO] — the optional features a [[Host backend]] supports: `native_state`, `submit_confirmation`, `notify`, `tile`, `rebalance`, `size`. The tmux backend supports `notify`, `tile`, `rebalance` and `size`; the Orca backend supports `native_state` and `submit_confirmation`. Capabilities are read on each invocation: an optional verb or option (`rebalance`, `--split tile`, `--size`) on a host that lacks it exits 3 with `unsupported: <verb> on <host>`, and the automatic tile after a spawn is skipped silently on a host without `tile`. _Avoid_: features, flags. ↔ core/src/host/mod.rs (`HostCapabilities`, `Unsupported`)
+
+**Host state** [VO] — the agent state a [[Host]] itself reports for a pane: `working`, `blocked`, `done` or `idle`, or `null` when it reports none. Separate from [[Pane state]]; the tmux backend always reports `null`, and the Orca backend maps the pane's `orca worktree ps` agent row (it never reports `idle`). `status`, `list`, `wait-idle` and `prompt` report it as `host_state` in JSON. _Avoid_: agent status, native state. ↔ core/src/host/mod.rs (`HostState`, `HostPort::host_state`)
 
 ## Panes and sessions
 
 **Managed session** [entity] — the `tmux-tools` tmux session this tool creates and reuses when invoked from outside tmux. _Avoid_: default session, our session. ↔ core/src/host/tmux/session.rs
 
-**Target** [VO] — a resolved reference to one pane, parsed from a registered name, a pane id (`%3`), or a window id (`@7`). _Avoid_: selector, handle. ↔ core/src/target.rs
+**Target** [VO] — a resolved reference to one pane, parsed from a registered name, a pane id (`%3`), or a window id (`@7`) on tmux; on Orca from a pane name or a `term_…` handle. A verb without `--target` acts on the calling pane. _Avoid_: selector. ↔ core/src/target.rs
 
-**Pane registration** [VO] — the `@tt-*` tmux pane user-options recording what this tool knows about a pane: `@tt-name`, `@tt-agent`, `@tt-access`, `@tt-launched-at`, `@tt-cwd`, `@tt-surface`, `@tt-surface-unvalidated`. `@tt-surface` records the surface `spawn-agent` resolved and is written unconditionally; `@tt-surface-unvalidated` is present when caller-supplied trailing arguments could have changed the rendering out from under that record. `@tt-name` is set on every pane either spawning verb creates: `--name` when given, otherwise auto-derived from the command. _Avoid_: metadata, tags. ↔ core/src/names.rs (fields), core/src/host/tmux/registration.rs (`@tt-*` storage)
+**Pane registration** [VO] — what this tool records about a pane it created. On tmux it is the `@tt-*` pane user-options; on a registry host (Orca) it is the pane's [[Pane record]]. The fields: `@tt-name`, `@tt-agent`, `@tt-access`, `@tt-launched-at`, `@tt-cwd`, `@tt-surface`, `@tt-surface-unvalidated`. `@tt-surface` records the surface `spawn-agent` resolved and is written unconditionally; `@tt-surface-unvalidated` is present when caller-supplied trailing arguments could have changed the rendering out from under that record. `@tt-name` is set on every pane either spawning verb creates: `--name` when given (it must match `[A-Za-z0-9._-]+` and not be `.` or `..`, on every host), otherwise auto-derived from the command. A host title is display only and never resolves a [[Target]]. _Avoid_: metadata, tags. ↔ core/src/names.rs (fields, `validate_name`), core/src/host/tmux/registration.rs (`@tt-*` storage), core/src/registry.rs (Pane records)
 
-**Keep-alive wrap** [service] — wrapping a launched command as `(cmd); exec $SHELL` so the pane outlives the command and its output stays readable. _Avoid_: shell wrapper, persistence. ↔ src/cmd/launch.rs
+**Pane record** [entity] — the registry file holding the [[Pane registration]] of one pane on a host that cannot store custom data on a pane: `${XDG_STATE_HOME:-$HOME/.local/state}/tmux-tools/<host>/<server_id>/<name>.json`, where on Orca `server_id` is the runtime's `runtimeId`. A spawn reserves the name by exclusive create before the pane exists, then writes the handle by atomic rename. An Orca restart makes a new `runtimeId`, so every earlier record directory is deleted and those panes stay open unregistered. _Avoid_: registry entry, state file. ↔ core/src/registry.rs (`PaneRecord`)
+
+**Pane liveness** [VO] — the state of a [[Pane record]] checked against the host's pane list: `live` (its handle is listed), `dead` (not listed on a complete list: the record is deleted and reported once), or `orphan-reservation` (no handle and older than the 120-second spawn timeout: deleted). A handle not listed on an incomplete list stays and resolves to `pane list incomplete: <name>`; a younger reservation is a spawn in progress. _Avoid_: pane status, health. ↔ core/src/registry.rs (`PaneLiveness`)
+
+**Keep-alive wrap** [service] — keeping a pane open after its launched command exits so its output stays readable: on tmux the command is wrapped as `(cmd); exec $SHELL`; on Orca the login shell that runs the command stays after it exits, and `--bare` runs `exec <cmd>`. _Avoid_: shell wrapper, persistence. ↔ src/cmd/launch.rs (`keep_alive`)
 
 ## Agents and readiness
 
@@ -45,7 +51,7 @@ the whole glossary.
 
 **Surface-unvalidated pane** [entity] — a pane carrying a [[Surface]] record that caller-supplied trailing arguments may have invalidated, marked `@tt-surface-unvalidated`. Arguments the surface supplies itself are validated by construction and do not set the mark. _Avoid_: unchecked pane, unverified pane. ↔ core/src/names.rs
 
-**Readiness** [service] — one value of [[Pane state]]: the classification that an agent has finished its turn, derived from the resolved [[Surface]]'s `ready_regex`/`busy_regex` by the single classifier. It is no longer the whole determination; when the classifier cannot decide — no patterns, no surface, or `unknown` — the wait falls back to [[Idle detection]], and a `busy` classification suppresses it. _Avoid_: done, completion, finished. ↔ core/src/idle.rs
+**Readiness** [service] — one value of [[Pane state]]: the classification that an agent has finished its turn, derived from the resolved [[Surface]]'s `ready_regex`/`busy_regex` by the single classifier. On a host with `native_state`, [[Host state]] decides first when it is not `null` (unless `--until` or `--idle-seconds` is given); Readiness decides only when it is `null`. It is no longer the whole determination; when the classifier cannot decide — no patterns, no surface, or `unknown` — the wait falls back to [[Idle detection]], and a `busy` classification suppresses it. _Avoid_: done, completion, finished. ↔ core/src/idle.rs
 
 **Pane state** [VO] — the total three-valued classification of a pane capture against a resolved [[Surface]]'s patterns: `idle`, `busy`, or `unknown`. `unknown` is distinct from `busy` and consumers needing certainty branch on it explicitly. Derived in exactly one place. _Avoid_: status, readiness value. ↔ core/src/idle.rs
 
@@ -55,7 +61,7 @@ the whole glossary.
 
 **busy_regex** [VO] — the per-[[Surface]] pattern whose presence means the agent is generating. Matched against the whole capture, and never a synonym for `unknown`. _Avoid_: working marker, activity pattern. ↔ core/src/agents/mod.rs
 
-**Idle detection** [service] — the fallback completion signal used when the classifier cannot decide (no patterns, no [[Surface]], or `unknown`): the visible pane capture unchanged for a configured duration. A `busy` [[Pane state]] suppresses it. It is not a parallel definition of idleness alongside [[Readiness]]. _Avoid_: quiescence, settling. ↔ core/src/idle.rs
+**Idle detection** [service] — the fallback completion signal used when the classifier cannot decide (no patterns, no [[Surface]], or `unknown`), and only while [[Host state]] is `null`: the visible pane capture unchanged for a configured duration. A `busy` [[Pane state]] suppresses it. It is not a parallel definition of idleness alongside [[Readiness]]. _Avoid_: quiescence, settling. ↔ core/src/idle.rs
 
 **Exited-agent pane** [entity] — a pane whose agent process has exited but which the keep-alive wrap holds open as a shell; it still carries `@tt-agent` and still consumes window geometry. _Avoid_: zombie pane, dead pane, stale pane. ↔ src/cmd/launch.rs
 
@@ -63,11 +69,11 @@ the whole glossary.
 
 **Bracketed paste transport** [service] — delivering one prompt as one submission through `tmux load-buffer` from stdin followed by `paste-buffer -p -d`, keyed to the pane's live `bracket_paste_flag` rather than a [[Surface]]'s declared capability. _Avoid_: paste mode, chunked send. ↔ core/src/host/tmux/pane_io.rs (transport), src/cmd/prompt.rs (delivery decision)
 
-**History mark** [VO] — the pane-history offset taken before a prompt is submitted, from which `prompt`'s result begins. Never advanced: the result always includes the agent's echo of the prompt. _Avoid_: anchor, watermark. ↔ src/cmd/prompt.rs *(planned — PRD-260918-0323-01 · ISSUE-260918-0525-06)*
+**History mark** [VO] — the pane-history offset taken before a prompt is submitted, from which `prompt`'s result begins: on tmux the cursor row's absolute line, on Orca the `orca terminal read` cursor. Never advanced: the result always includes the agent's echo of the prompt. _Avoid_: anchor, watermark. ↔ src/cmd/prompt.rs
 
-**Turn observation** [VO] — whether `busy_regex` was observed between submission and settle. It reports that the agent took the turn and makes no claim about where content begins. _Avoid_: turn detection, completion. ↔ src/cmd/prompt.rs *(planned — PRD-260918-0323-01 · ISSUE-260918-0525-06)*
+**Turn observation** [VO] — whether `busy_regex` was observed, or [[Host state]] `working` was seen, between submission and settle. It reports that the agent took the turn and makes no claim about where content begins. _Avoid_: turn detection, completion. ↔ src/cmd/prompt.rs
 
-**Completeness** [VO] — whether everything after the [[History mark]] can be supplied: `false` when the pane has no scrollback (per live `alternate_on`), history has evicted lines, or the pane's width changed between the mark and settle. Reported independently of [[Turn observation]]. _Avoid_: truncation, fidelity. ↔ src/cmd/prompt.rs *(planned — PRD-260918-0323-01 · ISSUE-260918-0525-06)*
+**Completeness** [VO] — whether everything after the [[History mark]] can be supplied. On tmux it is `false` when the pane has no scrollback (per live `alternate_on`), history has evicted lines, or the pane's width changed between the mark and settle. On Orca it is always `false`: Orca reports no pane width and no full-screen state. Reported independently of [[Turn observation]]. _Avoid_: truncation, fidelity. ↔ src/cmd/prompt.rs
 
 ## Layout and geometry
 
@@ -87,6 +93,6 @@ the whole glossary.
 
 ## Ownership
 
-**Ownership** [service] — the predicate deciding whether a pane is this tool's: `@tt-name` or `@tt-agent` present, and where both the pane's `@tt-cwd` and the current working directory are known, they match; absence on either side passes. The rule is stable; what changes is the evidence it reads — once every created pane registers a name ([[Pane registration]]), the first clause holds for all of them, including a `launch` with no flags, which today it does not. _Avoid_: managed, ours, created-by. ↔ core/src/names.rs `pane_is_owned` (public in core; the safety evaluator in src/cmd/safety.rs delegates to it — PRD-260801-0656-01 · ISSUE-260801-1310-02)
+**Ownership** [service] — the predicate deciding whether a pane is this tool's, read from the [[Pane registration]] of the pane's host (on Orca, the pane's [[Pane record]] exists): `@tt-name` or `@tt-agent` present, and where both the pane's `@tt-cwd` and the current working directory are known, they match; absence on either side passes. The rule is stable; what changes is the evidence it reads — once every created pane registers a name ([[Pane registration]]), the first clause holds for all of them, including a `launch` with no flags, which today it does not. _Avoid_: managed, ours, created-by. ↔ core/src/names.rs `pane_is_owned` (public in core; the safety evaluator in src/cmd/safety.rs delegates to it — PRD-260801-0656-01 · ISSUE-260801-1310-02)
 
 **@tt-cwd** [VO] — the working directory of the invocation that *created* a pane — run identity, not where the agent works. _Avoid_: agent cwd, working directory. ↔ core/src/names.rs

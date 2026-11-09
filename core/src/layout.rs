@@ -379,6 +379,9 @@ pub fn place(
     registration: &Registration<'_>,
     registry: &Registry,
 ) -> Result<Landing> {
+    if host::current().uses_pane_records() {
+        return place_registered(command, destination, registration);
+    }
     let in_tmux = env::var_os("TMUX").is_some();
     let layout = resolve_layout(
         destination.split,
@@ -445,6 +448,43 @@ pub fn place(
         name,
         window,
         relocated,
+    })
+}
+
+/// Placement on a registry host (P9.2): no `--split` and `--split window` open a new
+/// tab, `--split h|v` split the target (or the calling pane). The backend reserves the
+/// name, creates the pane, and writes its Pane record (P4.4). The host controls the
+/// layout, so nothing is measured and the [`Landing`] carries no window.
+fn place_registered(
+    command: &str,
+    destination: &Destination<'_>,
+    registration: &Registration<'_>,
+) -> Result<Landing> {
+    let host = host::current();
+    target::require_no_scope(destination.session, destination.window)?;
+    let capabilities = host.capabilities();
+    if destination.split == Some(Split::Tile) {
+        host::require(capabilities.tile, "--split tile")?;
+    }
+    if destination.size.is_some() {
+        host::require(capabilities.size, "--size")?;
+    }
+    let split = match destination.split {
+        None | Some(Split::Window) | Some(Split::Tile) => None,
+        Some(Split::H) => Some(SplitDirection::Horizontal),
+        Some(Split::V) => Some(SplitDirection::Vertical),
+    };
+    let target = destination
+        .target
+        .map(|target| target::resolve(&target::parse(target), None, None))
+        .transpose()?;
+    let (pane_id, name) =
+        host.create_registered(command, split, target.as_deref(), registration)?;
+    Ok(Landing {
+        pane_id,
+        name,
+        window: None,
+        relocated: false,
     })
 }
 
