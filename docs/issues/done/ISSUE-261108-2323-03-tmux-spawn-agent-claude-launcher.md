@@ -109,7 +109,6 @@ Scope proposal (unfixed, OWNER: maintainer):
 - TDD: red-green at `spawn-agent` on the isolated tmux server with a fake `claude` and the Shim.
 - Review: Claude + Codex; 1 finding (L1 weak no-leak assertion) fixed in one correction batch and verified by both reviewers; CODEX-1 recorded as a maintainer scope proposal. Outcome ACCEPTED.
 - Suite: `cargo test --workspace --features test-fixtures` 488 passed, `cargo test --workspace` 355 passed, 0 failed.
-- Release: 0.7.0 installed 2026-11-09 (P11.3 conditions hold: step 2 released as 0.6.x; harness `claude:ISSUE-261109-0201-02` and `-04` done); backup `~/.cargo/bin/tmux-tools.prev-0.6.2`; smoke `tmux-tools --version` = 0.7.0, `tmux-tools list` exit 0.
 - Date: 2026-11-09
 
 ## Triage Notes
