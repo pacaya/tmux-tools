@@ -2,7 +2,9 @@
 id: ISSUE-261108-2323-03
 kind: issue
 category: enhancement
-status: ready-for-agent
+status: in-progress
+claimed_by: implement-issue@agentmac
+claimed_at: 2026-11-09T16:06:30Z
 brief_contract: agent-brief.v3
 context: tmux-tools
 summary: on tmux, spawn-agent claude starts Claude through tmux-tools claude-teams, so a driven Leader's teammates are tmux-tools panes
@@ -73,6 +75,25 @@ contract:
 **Verification and release:** The default `cargo test --workspace --features test-fixtures` run passes. Release only when the P11.3 conditions hold: step 2 (`ISSUE-261108-2323-02`) is released, and harness `PRD-261108-0235-01` rollout steps 2 (`claude:ISSUE-261109-0201-02`, hooks) and 3 (`claude:ISSUE-261109-0201-04`, text and scripts) are released. Rollback is reverting the release.
 
 **Out of scope:** Orca behavior (`ISSUE-261108-2323-02`); Launcher, Shim, and Team behavior (`ISSUE-261108-2323-01`); harness hook, skill, and `cl` alias changes (repository `claude`).
+
+## Context Pack — canonical at claim (2026-11-09T16:06:30Z)
+
+**Contract approval:** `review-20261109T160502Z` · canonical · revision check complete
+
+**Issue binding:** `tmux-tools:ISSUE-261108-2323-03` · revision `582ad713d3594e79bd309bc8728c1f978c5c723a` · sha256 `3a14cc11b7375e0fd5a0e47f52c28cfebbc5e6fbdf93d256a38987c23872359f` · `objects/3a14cc11b7375e0fd5a0e47f52c28cfebbc5e6fbdf93d256a38987c23872359f.md`
+
+**Required source objects:**
+- `claude:PRD-261108-0235-01#p9-rollout` · revision `6b2af70a54233220b6a389721c65d74690e851e7` · sha256 `d28505da2679649af7ca1fec3ffa56ff9e4a25f571f3c7af1ddc06fc0f9c0163` · `objects/d28505da2679649af7ca1fec3ffa56ff9e4a25f571f3c7af1ddc06fc0f9c0163.md`
+- `tmux-tools:PRD-261107-0825-01#p10-tests` · revision `582ad713d3594e79bd309bc8728c1f978c5c723a` · sha256 `a28eb660fd94942cad51db5869d5ba74757bff5b2ac3317f6e44699676aa3fcb` · `objects/a28eb660fd94942cad51db5869d5ba74757bff5b2ac3317f6e44699676aa3fcb.md`
+- `tmux-tools:PRD-261108-0447-01#contracts` · revision `582ad713d3594e79bd309bc8728c1f978c5c723a` · sha256 `241363a4efd4189d9f149e8f5d0f3844771647554109b145a8554dc26e37d12c` · `objects/241363a4efd4189d9f149e8f5d0f3844771647554109b145a8554dc26e37d12c.md`
+- `tmux-tools:PRD-261108-0447-01#p11-rollout` · revision `582ad713d3594e79bd309bc8728c1f978c5c723a` · sha256 `0b02e86d01691d885cc6a2bc74fb665fb56bb225bfef79e30a8fbf136bfa416f` · `objects/0b02e86d01691d885cc6a2bc74fb665fb56bb225bfef79e30a8fbf136bfa416f.md`
+- `tmux-tools:PRD-261108-0447-01#p8-output` · revision `582ad713d3594e79bd309bc8728c1f978c5c723a` · sha256 `02f668ee1a94c80c0a7b4728ebffec6a91308e700cdb1e50fe0857d4397eb97c` · `objects/02f668ee1a94c80c0a7b4728ebffec6a91308e700cdb1e50fe0857d4397eb97c.md`
+- `tmux-tools:PRD-261108-0447-01#p9-spawn-agent` · revision `582ad713d3594e79bd309bc8728c1f978c5c723a` · sha256 `491e059f74bb88b21be83ba2fcb07852f44d8dbb401da1357567f7e582075fc4` · `objects/491e059f74bb88b21be83ba2fcb07852f44d8dbb401da1357567f7e582075fc4.md`
+- `tmux-tools:PRD-261108-0447-01#verification` · revision `582ad713d3594e79bd309bc8728c1f978c5c723a` · sha256 `cdd232cbaf94d96badc6fd16204581849e9c8ba39c37ad685d7b70a573a032fa` · `objects/cdd232cbaf94d96badc6fd16204581849e9c8ba39c37ad685d7b70a573a032fa.md`
+
+**Bundle manifest:** `.planning-contracts/bundles/ISSUE-261108-2323-03/manifest.json`
+
+**Test seam:** `tmux-tools spawn-agent` on the isolated tmux server with a fake `claude` and the Shim (`pane_start_command`, `list --format json`, `prompt`, `wait-idle`, `kill`).
 
 ## Triage Notes
 
