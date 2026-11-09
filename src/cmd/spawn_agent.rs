@@ -89,6 +89,7 @@ pub fn run(args: &SpawnAgentArgs) -> Result<()> {
     let cmd = launch_command(&argv, args.cwd.as_ref(), args.bare)?;
     let launched_at = rfc3339_utc_now()?;
     let cwd = invoking_cwd();
+    let parent = crate::cmd::self_::calling_pane_name()?;
 
     let landing = layout::place(
         &cmd,
@@ -108,6 +109,8 @@ pub fn run(args: &SpawnAgentArgs) -> Result<()> {
                 // validated by construction and do not set the mark.
                 surface_unvalidated: !args.extra_args.is_empty(),
             }),
+            parent: parent.as_deref(),
+            team: None,
         },
         &registry,
     )?;

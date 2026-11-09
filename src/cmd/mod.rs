@@ -1,4 +1,5 @@
 pub mod capture;
+pub mod claude_teams;
 pub mod escape;
 pub mod execute;
 pub mod interrupt;

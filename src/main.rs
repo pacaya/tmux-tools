@@ -3,20 +3,23 @@ use clap::{Args, Parser, Subcommand};
 use tmux_tools_core::{
     host::{self, Unsupported},
     names::InvalidName,
+    team::TeamNotFound,
     Format,
 };
 
 mod cmd;
+mod shim;
 #[cfg(test)]
 #[path = "../core/src/test_child_env.rs"]
 mod test_child_env;
 mod util;
 
 use crate::cmd::{
-    capture::CaptureArgs, escape::EscapeArgs, execute::ExecuteArgs, interrupt::InterruptArgs,
-    kill::KillArgs, launch::LaunchArgs, list::ListArgs, notify::NotifyArgs, prompt::PromptArgs,
-    rebalance::RebalanceArgs, self_::SelfArgs, send::SendArgs, send_enter::SendEnterArgs,
-    spawn_agent::SpawnAgentArgs, status::StatusArgs, wait_idle::WaitIdleArgs,
+    capture::CaptureArgs, claude_teams::ClaudeTeamsArgs, escape::EscapeArgs, execute::ExecuteArgs,
+    interrupt::InterruptArgs, kill::KillArgs, launch::LaunchArgs, list::ListArgs,
+    notify::NotifyArgs, prompt::PromptArgs, rebalance::RebalanceArgs, self_::SelfArgs,
+    send::SendArgs, send_enter::SendEnterArgs, spawn_agent::SpawnAgentArgs, status::StatusArgs,
+    wait_idle::WaitIdleArgs,
 };
 
 #[derive(Debug, Parser)]
@@ -50,6 +53,8 @@ enum Commands {
     Notify(NotifyArgs),
     #[command(name = "self")]
     SelfPane(SelfArgs),
+    #[command(name = "claude-teams")]
+    ClaudeTeams(ClaudeTeamsArgs),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -103,7 +108,22 @@ impl tmux_tools_core::target::TargetArgs for CommonArgs {
 const EXIT_UNSUPPORTED: i32 = 3;
 
 fn main() -> Result<()> {
+    // PRD-261108-0447-01 P5.1: started as `tmux`, the binary is the Shim.
+    let mut argv = std::env::args();
+    let argv0 = argv.next().unwrap_or_default();
+    if std::path::Path::new(&argv0)
+        .file_name()
+        .is_some_and(|name| name == "tmux")
+    {
+        std::process::exit(shim::run(argv.collect()));
+    }
+
     let cli = Cli::parse();
+
+    // The Launcher selects its host itself and fails open (PRD-261108-0447-01 P2.7).
+    if let Commands::ClaudeTeams(args) = &cli.command {
+        std::process::exit(crate::cmd::claude_teams::run(args));
+    }
 
     // P3.1: an invalid `TMUX_TOOLS_HOST` fails every verb before it runs.
     match host::selection().and_then(|_| run(cli.command)) {
@@ -111,6 +131,11 @@ fn main() -> Result<()> {
             if let Some(unsupported) = error.downcast_ref::<Unsupported>() {
                 eprintln!("{unsupported}");
                 std::process::exit(EXIT_UNSUPPORTED);
+            }
+            if let Some(not_found) = error.downcast_ref::<TeamNotFound>() {
+                // PRD-261108-0447-01 P3.2: stderr is `team not found: <id>`.
+                eprintln!("{not_found}");
+                std::process::exit(1);
             }
             if let Some(invalid) = error.downcast_ref::<InvalidName>() {
                 // P4.1: stderr is exactly `invalid name: <name>`.
@@ -141,6 +166,7 @@ fn run(command: Commands) -> Result<()> {
         Commands::Rebalance(args) => crate::cmd::rebalance::run(&args)?,
         Commands::Notify(args) => crate::cmd::notify::run(&args)?,
         Commands::SelfPane(args) => crate::cmd::self_::run(&args)?,
+        Commands::ClaudeTeams(_) => unreachable!("claude-teams runs before host selection"),
     }
 
     Ok(())

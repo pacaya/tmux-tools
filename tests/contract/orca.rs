@@ -1226,7 +1226,7 @@ fn self_reports(run: &Run) {
     assert_eq!(
         out.trim(),
         format!(
-            r#"{{"host":"orca","driven":true,"name":"{}","agent":"ttself"}}"#,
+            r#"{{"host":"orca","driven":true,"name":"{}","agent":"ttself","team":null,"role":null,"parent":null}}"#,
             run.n("c-self")
         )
     );
@@ -1236,7 +1236,7 @@ fn self_reports(run: &Run) {
     let unregistered = run.ok(&["self", "--format", "json"]);
     assert_eq!(
         unregistered.stdout.trim(),
-        r#"{"host":"orca","driven":false,"name":null,"agent":null}"#
+        r#"{"host":"orca","driven":false,"name":null,"agent":null,"team":null,"role":null,"parent":null}"#
     );
 }
 

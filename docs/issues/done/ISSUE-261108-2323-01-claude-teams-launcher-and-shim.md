@@ -2,7 +2,9 @@
 id: ISSUE-261108-2323-01
 kind: issue
 category: enhancement
-status: ready-for-agent
+status: done
+claimed_by: implement-issue@agentmac
+claimed_at: 2026-11-09T11:40:44Z
 brief_contract: agent-brief.v3
 context: tmux-tools
 summary: tmux-tools claude-teams starts Claude with a tmux Shim so that every teammate is a tmux-tools pane with team, parent, and shim_id, on tmux and on Orca by hand
@@ -138,6 +140,54 @@ contract:
 
 **Out of scope:** `spawn-agent claude` through the Launcher on any host (`PRD-261108-0447-01` P9); the Orca contract run additions of P10.6 and the live Orca checks of P6.5 (the P6.5 fake-`orca` test is in scope) and P8.5; harness hook, skill, and `cl` alias changes (repository `claude`); Rex and Herdr; Pane identity across an Orca restart (`ISSUE-261107-1229-01`).
 
+## Context Pack — canonical at claim (2026-11-09T11:40:44Z)
+
+**Contract approval:** `dispatch-review-20261109T114013Z` · canonical · revision check complete
+
+**Issue binding:** `tmux-tools:ISSUE-261108-2323-01` · revision `f55cfe4ccb7bc1ce9496c3de43fff2483841aa03` · sha256 `09b6f2ab0ad4d05b56d334681cef06011603b92f9ccd240669ffdab69f993888` · `objects/09b6f2ab0ad4d05b56d334681cef06011603b92f9ccd240669ffdab69f993888.md`
+
+**Required source objects:**
+- `tmux-tools:PRD-261107-0825-01#contracts` · revision `f55cfe4ccb7bc1ce9496c3de43fff2483841aa03` · sha256 `2dcaeaca0b58367d93fe50b56bb4f48c229f945537dd24be4bf26cb0306616b6` · `objects/2dcaeaca0b58367d93fe50b56bb4f48c229f945537dd24be4bf26cb0306616b6.md`
+- `tmux-tools:PRD-261107-0825-01#p1-definitions` · revision `f55cfe4ccb7bc1ce9496c3de43fff2483841aa03` · sha256 `6886dd1c2efbdd1e7a3f7e7517de2f776154bdeea2537bfb994de40259ddc6bc` · `objects/6886dd1c2efbdd1e7a3f7e7517de2f776154bdeea2537bfb994de40259ddc6bc.md`
+- `tmux-tools:PRD-261107-0825-01#p10-tests` · revision `f55cfe4ccb7bc1ce9496c3de43fff2483841aa03` · sha256 `a28eb660fd94942cad51db5869d5ba74757bff5b2ac3317f6e44699676aa3fcb` · `objects/a28eb660fd94942cad51db5869d5ba74757bff5b2ac3317f6e44699676aa3fcb.md`
+- `tmux-tools:PRD-261107-0825-01#p2-host-port` · revision `f55cfe4ccb7bc1ce9496c3de43fff2483841aa03` · sha256 `57dfaef1b2a9e0c453e377e6b8b7f07730d8e891de67ab911255357cea195271` · `objects/57dfaef1b2a9e0c453e377e6b8b7f07730d8e891de67ab911255357cea195271.md`
+- `tmux-tools:PRD-261107-0825-01#p3-selection` · revision `f55cfe4ccb7bc1ce9496c3de43fff2483841aa03` · sha256 `f9e205e8b5a0046153da498982bd63d179b48d390062414e75e01487a48b0bef` · `objects/f9e205e8b5a0046153da498982bd63d179b48d390062414e75e01487a48b0bef.md`
+- `tmux-tools:PRD-261107-0825-01#p4-registration` · revision `f55cfe4ccb7bc1ce9496c3de43fff2483841aa03` · sha256 `4f3186b44eac6fb0216ee87b1f469f422617cadb577ee7033ab286156b50986c` · `objects/4f3186b44eac6fb0216ee87b1f469f422617cadb577ee7033ab286156b50986c.md`
+- `tmux-tools:PRD-261107-0825-01#p5-verb-classes` · revision `f55cfe4ccb7bc1ce9496c3de43fff2483841aa03` · sha256 `126f8593490e6c1e977cd250f022086d9b8e12236740621981f2238d89d8acbe` · `objects/126f8593490e6c1e977cd250f022086d9b8e12236740621981f2238d89d8acbe.md`
+- `tmux-tools:PRD-261107-0825-01#p8-self` · revision `f55cfe4ccb7bc1ce9496c3de43fff2483841aa03` · sha256 `c9b5c2c4a75da7c6af673a9c3e73e9295a84bae0f5e841abd0790f711207e329` · `objects/c9b5c2c4a75da7c6af673a9c3e73e9295a84bae0f5e841abd0790f711207e329.md`
+- `tmux-tools:PRD-261107-0825-01#p9-orca` · revision `f55cfe4ccb7bc1ce9496c3de43fff2483841aa03` · sha256 `689b0faaccf9198710903fe9aac136378099c40b1f0ce0727a655ee9b31c773c` · `objects/689b0faaccf9198710903fe9aac136378099c40b1f0ce0727a655ee9b31c773c.md`
+- `tmux-tools:PRD-261108-0447-01#contracts` · revision `f55cfe4ccb7bc1ce9496c3de43fff2483841aa03` · sha256 `241363a4efd4189d9f149e8f5d0f3844771647554109b145a8554dc26e37d12c` · `objects/241363a4efd4189d9f149e8f5d0f3844771647554109b145a8554dc26e37d12c.md`
+- `tmux-tools:PRD-261108-0447-01#outcome` · revision `f55cfe4ccb7bc1ce9496c3de43fff2483841aa03` · sha256 `183e1a369782393cb3e54f5a309276d59283572dac76b2c66c606d8e43348b77` · `objects/183e1a369782393cb3e54f5a309276d59283572dac76b2c66c606d8e43348b77.md`
+- `tmux-tools:PRD-261108-0447-01#p1-definitions` · revision `f55cfe4ccb7bc1ce9496c3de43fff2483841aa03` · sha256 `5f2f67ebe183937a3d6c0bb54cd0f1a00a7614e80a493f5ce5ae71987a0c5ca6` · `objects/5f2f67ebe183937a3d6c0bb54cd0f1a00a7614e80a493f5ce5ae71987a0c5ca6.md`
+- `tmux-tools:PRD-261108-0447-01#p10-tests` · revision `f55cfe4ccb7bc1ce9496c3de43fff2483841aa03` · sha256 `bf1a91dd7f52ca8cfaaa10a9bc020b976fc3e8a6a1377b98fdd740051bba0cb1` · `objects/bf1a91dd7f52ca8cfaaa10a9bc020b976fc3e8a6a1377b98fdd740051bba0cb1.md`
+- `tmux-tools:PRD-261108-0447-01#p11-rollout` · revision `f55cfe4ccb7bc1ce9496c3de43fff2483841aa03` · sha256 `0b02e86d01691d885cc6a2bc74fb665fb56bb225bfef79e30a8fbf136bfa416f` · `objects/0b02e86d01691d885cc6a2bc74fb665fb56bb225bfef79e30a8fbf136bfa416f.md`
+- `tmux-tools:PRD-261108-0447-01#p2-launcher` · revision `f55cfe4ccb7bc1ce9496c3de43fff2483841aa03` · sha256 `6b2eb1fbd83eaa40af4b96d98442b69f4cdcc43c00acbde2a864611d425c035c` · `objects/6b2eb1fbd83eaa40af4b96d98442b69f4cdcc43c00acbde2a864611d425c035c.md`
+- `tmux-tools:PRD-261108-0447-01#p3-team-selection` · revision `f55cfe4ccb7bc1ce9496c3de43fff2483841aa03` · sha256 `d014d6fde9e61030997482ab48b0deec9e261e4822e7b4fd745f8eaa07247f97` · `objects/d014d6fde9e61030997482ab48b0deec9e261e4822e7b4fd745f8eaa07247f97.md`
+- `tmux-tools:PRD-261108-0447-01#p4-team-record` · revision `f55cfe4ccb7bc1ce9496c3de43fff2483841aa03` · sha256 `67a1722e1af96f495903579c2bddc3ebd1d39dda881480ba81cb2ac0d0150fbc` · `objects/67a1722e1af96f495903579c2bddc3ebd1d39dda881480ba81cb2ac0d0150fbc.md`
+- `tmux-tools:PRD-261108-0447-01#p5-shim-surface` · revision `f55cfe4ccb7bc1ce9496c3de43fff2483841aa03` · sha256 `71e1d71379efedb8f9fd374f425f4ea48ece67dd2052d19bbd38815039eeef9f` · `objects/71e1d71379efedb8f9fd374f425f4ea48ece67dd2052d19bbd38815039eeef9f.md`
+- `tmux-tools:PRD-261108-0447-01#p6-teammate-panes` · revision `f55cfe4ccb7bc1ce9496c3de43fff2483841aa03` · sha256 `e18f30de1e63f34d7f6e73184ec994ffe4ff17441958f2df0fa8e0aa46abbe75` · `objects/e18f30de1e63f34d7f6e73184ec994ffe4ff17441958f2df0fa8e0aa46abbe75.md`
+- `tmux-tools:PRD-261108-0447-01#p7-parent` · revision `f55cfe4ccb7bc1ce9496c3de43fff2483841aa03` · sha256 `95737dfe26516ef9c5236d638b465fbdd35e179211b3a0e850323e24b663aac2` · `objects/95737dfe26516ef9c5236d638b465fbdd35e179211b3a0e850323e24b663aac2.md`
+- `tmux-tools:PRD-261108-0447-01#p8-output` · revision `f55cfe4ccb7bc1ce9496c3de43fff2483841aa03` · sha256 `9782f4efcccedeca6b5b781fff40d01e62141c7cccb1b96ce815afa3378e0a8d` · `objects/9782f4efcccedeca6b5b781fff40d01e62141c7cccb1b96ce815afa3378e0a8d.md`
+- `tmux-tools:PRD-261108-0447-01#verification` · revision `f55cfe4ccb7bc1ce9496c3de43fff2483841aa03` · sha256 `cdd232cbaf94d96badc6fd16204581849e9c8ba39c37ad685d7b70a573a032fa` · `objects/cdd232cbaf94d96badc6fd16204581849e9c8ba39c37ad685d7b70a573a032fa.md`
+
+**Bundle manifest:** `.planning-contracts/bundles/ISSUE-261108-2323-01/manifest.json`
+
+**Test seam:** `tmux-tools` CLI (`claude-teams`, the `tmux` Shim, `list`/`self --format json`, `spawn-agent`/`launch`, `kill`) on the isolated tmux server (`tests/claude_teams.rs`, shared harness) and with the fake `orca` CLI on `PATH`.
+
+## Code Review
+
+Review: `issue-261108-2323-01-code-review-20261109-121336.md` — Outcome: ACCEPTED
+
 ## Triage Notes
 - 2026-11-09: `needs-triage → ready-for-agent` (dispatch readiness passed; `orca-close-on-clean-exit` decided in `PRD-261108-0447-01` P6.3).
 - 2026-11-09: REOPENED at claim — implementer PREMISE_CHANGED (Claude 2.1.319 startup probes `show`/`show-environment` are refused by P5.8). Lead decision: P10.3 pass rule corrected in `PRD-261108-0447-01`; brief verification line aligned; claim reset `in-progress → ready-for-agent` and re-dispatched.
+
+## Resolution
+
+- Commit: `feat: tmux-tools claude-teams starts Claude with a tmux Shim so that every teammate is a tmux-tools pane with team, parent, and shim_id, on tmux and on Orca by hand (ISSUE-261108-2323-01)`
+- Route: `claude — deepseek-suspended` (code-primary feature, Opus, effort medium); correction batch 1 on the same route; batch 2 `claude — regression` (RETAINED_REGRESSION: M7, production code, effort high).
+- TDD: red-green at the `tmux-tools` CLI on the isolated tmux server and the fake `orca` seam.
+- Review: dual review (Claude + Codex), ACCEPTED after 2 correction batches; 8 findings fixed (M1–M7, L1), 1 dismissed (L2).
+- Suite: `cargo test --workspace --features test-fixtures` (decoy env) 480 passed, 0 failed; no leaked pane; release build has no `tt-fixture`.
+- Live: P10.3 live test with Claude 2.1.319 passes under the corrected P10.3 rule; by-hand Orca run: teammate in both lists as `lead.tm1` with `team` and `parent: "lead"`, clean exit closes it, killed Launcher leaves an Orphan that `kill` closes, no leak.
+- Date: 2026-11-09 (UTC).

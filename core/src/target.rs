@@ -124,6 +124,10 @@ pub fn in_tmux() -> bool {
 /// tmux); falls back to the Host port's calling pane when `$TMUX_PANE` is
 /// unset but `$TMUX` is set. Returns `None` outside tmux.
 pub fn calling_pane_id() -> Option<String> {
+    // PRD-261108-0447-01 P3.3: inside a team the calling pane is the Leader.
+    if let Some(leader) = crate::team::leader_handle() {
+        return Some(leader);
+    }
     if host::current().host() == Host::Orca {
         return env::var(host::ORCA_TERMINAL_HANDLE)
             .ok()

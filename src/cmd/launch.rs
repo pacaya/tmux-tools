@@ -112,6 +112,7 @@ pub fn run(args: &LaunchArgs) -> Result<()> {
     let cmd_for_tmux = keep_alive(&args.cmd, args.bare);
     let launched_at = rfc3339_utc_now()?;
     let cwd = invoking_cwd();
+    let parent = crate::cmd::self_::calling_pane_name()?;
     // Loaded before the pane exists: the verdict needs it, and its warnings belong to
     // this invocation whether or not placement succeeds.
     let registry = load_registry_for_floors();
@@ -126,6 +127,8 @@ pub fn run(args: &LaunchArgs) -> Result<()> {
             launched_at: &launched_at,
             cwd: cwd.as_deref(),
             agent: None,
+            parent: parent.as_deref(),
+            team: None,
         },
         &registry,
     )?;

@@ -16,6 +16,9 @@ It never reaches a real Orca runtime. Its panes live in the JSON file FAKE_ORCA_
   titled <title> in the same worktree, as another session would meanwhile.
 - FAKE_ORCA_CREATE_LATE=<n>: `terminal create` answers a timeout error; its pane
   opens only on the <n>-th `terminal list` after it.
+- FAKE_ORCA_SCROLLBACK=<n>: every pane holds the lines `line1`..`line<n>`; its
+  screen is the last 5, `terminal read --limit <k>` answers the last k, and a read
+  without either answers all.
 - FAKE_ORCA_SPLIT_LATE=<n>: `terminal split` answers a timeout error without a
   leafId; its untitled pane opens in the target's tab only on the <n>-th
   `terminal list` after it.
@@ -177,7 +180,13 @@ if path == ["worktree", "ps"]:
     answer({"worktrees": []})
 
 if path == ["terminal", "read"]:
-    answer({"terminal": {"tail": []}})
+    scrollback = int(os.environ.get("FAKE_ORCA_SCROLLBACK", "0"))
+    lines = ["line%d" % n for n in range(1, scrollback + 1)]
+    if "--screen" in args:
+        lines = lines[-5:]
+    elif flag("--limit"):
+        lines = lines[-int(flag("--limit")):]
+    answer({"terminal": {"tail": lines}})
 
 if path == ["terminal", "send"]:
     answer({"send": {"accepted": True}})

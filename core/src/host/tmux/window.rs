@@ -21,13 +21,14 @@ pub(super) fn create_split(
     direction: SplitDirection,
     percent: Option<u32>,
     command: &str,
+    detached: bool,
 ) -> Result<String> {
-    created_pane_id(&split_window_args(
-        command,
-        direction_flag(direction),
-        percent,
-        Some(target),
-    ))
+    let mut args = split_window_args(command, direction_flag(direction), percent, Some(target));
+    if detached {
+        // `-d`: the new pane does not become the active pane.
+        args.insert(1, "-d".to_owned());
+    }
+    created_pane_id(&args)
 }
 
 pub(super) fn create_window(session: &str, command: &str) -> Result<String> {

@@ -3,7 +3,7 @@ members = [".", "core"]
 
 [package]
 name = "tmux-tools"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2021"
 
 [features]
@@ -28,6 +28,11 @@ path = "src/bin/tt-fake-tui.rs"
 required-features = ["test-fixtures"]
 
 [[bin]]
+name = "tt-fixture"
+path = "src/bin/tt-fixture.rs"
+required-features = ["test-fixtures"]
+
+[[bin]]
 name = "tt-vendor-smoke"
 path = "src/bin/tt-vendor-smoke.rs"
 required-features = ["vendor-smoke"]
@@ -43,6 +48,12 @@ xxhash-rust = { version = "0.8", features = ["xxh3"] }
 toml = "0.8"
 dirs = "5"
 tmux-tools-core = { path = "core" }
+libc = "0.2"
 
 [dev-dependencies]
 serde_json = "1"
+
+# The Launcher hashes the Claude binary (hundreds of MB) at every start; an
+# unoptimized SHA-256 makes a debug build take seconds for it.
+[profile.dev.package.sha2]
+opt-level = 3

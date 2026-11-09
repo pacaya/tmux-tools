@@ -68,14 +68,19 @@ impl HostPort for TmuxHost {
         session::managed_pane()
     }
 
+    fn server_identity(&self) -> Result<String> {
+        session::server_socket()
+    }
+
     fn create_split(
         &self,
         target: &str,
         direction: SplitDirection,
         percent: Option<u32>,
         command: &str,
+        detached: bool,
     ) -> Result<String> {
-        window::create_split(target, direction, percent, command)
+        window::create_split(target, direction, percent, command, detached)
     }
 
     fn create_window(&self, session: &str, command: &str) -> Result<String> {

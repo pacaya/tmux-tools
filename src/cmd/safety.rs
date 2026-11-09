@@ -123,6 +123,7 @@ mod tests {
             cwd: None,
             surface: None,
             surface_unvalidated: false,
+            ..Default::default()
         }
     }
 
@@ -135,6 +136,7 @@ mod tests {
             cwd: cwd.map(str::to_owned),
             surface: None,
             surface_unvalidated: false,
+            ..Default::default()
         }
     }
 
@@ -325,6 +327,7 @@ mod tests {
             cwd: Some("/work".to_owned()),
             surface: None,
             surface_unvalidated: false,
+            ..Default::default()
         };
         let input = SafetyInput {
             verb: "kill",

@@ -46,6 +46,10 @@ pub fn run(args: &NotifyArgs) -> Result<()> {
 /// The calling pane on tmux: `TMUX_PANE`, with no fallback, so a notification never
 /// goes to a pane the caller did not name.
 fn calling_pane() -> Result<String> {
+    // PRD-261108-0447-01 P3.3: inside a team the calling pane is the Leader.
+    if let Some(leader) = tmux_tools_core::team::leader_handle() {
+        return Ok(leader);
+    }
     match env::var("TMUX_PANE") {
         Ok(pane) if !pane.trim().is_empty() => Ok(pane.trim().to_owned()),
         _ => bail!(

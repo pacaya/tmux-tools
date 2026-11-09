@@ -13,8 +13,14 @@ pub const KEY_LAUNCHED_AT: RegistrationKey = RegistrationKey::LaunchedAt;
 pub const KEY_CWD: RegistrationKey = RegistrationKey::Cwd;
 pub const KEY_SURFACE: RegistrationKey = RegistrationKey::Surface;
 pub const KEY_SURFACE_UNVALIDATED: RegistrationKey = RegistrationKey::SurfaceUnvalidated;
+pub const KEY_PARENT: RegistrationKey = RegistrationKey::Parent;
+pub const KEY_TEAM: RegistrationKey = RegistrationKey::Team;
+pub const KEY_SHIM_ID: RegistrationKey = RegistrationKey::ShimId;
+pub const KEY_TITLE: RegistrationKey = RegistrationKey::Title;
+pub const KEY_CLAUDE_AGENT_NAME: RegistrationKey = RegistrationKey::ClaudeAgentName;
+pub const KEY_CLAUDE_TEAM_NAME: RegistrationKey = RegistrationKey::ClaudeTeamName;
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Registered {
     pub name: Option<String>,
     pub agent: Option<String>,
@@ -26,6 +32,18 @@ pub struct Registered {
     pub surface: Option<String>,
     /// Whether caller-supplied trailing arguments left the recorded surface unvalidated.
     pub surface_unvalidated: bool,
+    /// The name of the tmux-tools pane this pane was created from (PRD-261108-0447-01 P7).
+    pub parent: Option<String>,
+    /// The team id of a Teammate pane (P6.4).
+    pub team: Option<String>,
+    /// The Shim id of a Teammate pane (P6.4).
+    pub shim_id: Option<String>,
+    /// Display data (P6.4); never resolves a Target.
+    pub title: Option<String>,
+    /// Display data (P6.4); never resolves a Target.
+    pub claude_agent_name: Option<String>,
+    /// Display data (P6.4); never resolves a Target.
+    pub claude_team_name: Option<String>,
 }
 
 /// The single ownership rule: is this pane ours?
@@ -293,6 +311,7 @@ mod tests {
             cwd: cwd.map(str::to_owned),
             surface: None,
             surface_unvalidated: false,
+            ..Registered::default()
         }
     }
 

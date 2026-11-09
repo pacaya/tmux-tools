@@ -4,7 +4,10 @@ use serde::Serialize;
 use tmux_tools_core::{
     format::{self, Format, MISSING_GLYPH},
     host::{self, Host, HostState, ListScope, PaneListing as PaneRow},
+    team,
 };
+
+use crate::util::{instant_later, parse_rfc3339_utc};
 
 #[derive(Args, Debug)]
 pub struct ListArgs {
@@ -28,6 +31,10 @@ struct ListJsonRow {
     status: String,
     last_activity: Option<i64>,
     host_state: Option<HostState>,
+    parent: Option<String>,
+    team: Option<String>,
+    shim_id: Option<String>,
+    orphan: bool,
 }
 
 pub fn run(args: &ListArgs) -> Result<()> {
@@ -42,11 +49,66 @@ pub fn run(args: &ListArgs) -> Result<()> {
 
     match args.format {
         Format::Raw => render_raw(&rows),
-        Format::Concise => render_concise(&rows),
-        Format::Json => render_json(&rows)?,
+        Format::Concise => {
+            let orphans = orphans(&rows, args)?;
+            render_concise(&rows, &orphans)
+        }
+        Format::Json => {
+            let orphans = orphans(&rows, args)?;
+            render_json(&rows, &orphans)?
+        }
     }
 
     Ok(())
+}
+
+/// Whether each row is an Orphan (PRD-261108-0447-01 P8.3): its `parent` does not
+/// resolve to a live pane, or resolves to a pane launched later than the row; or it has
+/// a `team` whose team directory does not exist or whose `leader.lock` is not held.
+fn orphans(rows: &[PaneRow], args: &ListArgs) -> Result<Vec<bool>> {
+    let live: Vec<PaneRow>;
+    let live_rows = if rows.iter().all(|row| row.parent.is_none()) {
+        &[][..]
+    } else if args.all || host::current().uses_pane_records() {
+        rows
+    } else {
+        // A parent can live outside the listed scope.
+        live = host::current().list_panes(ListScope::All)?;
+        &live[..]
+    };
+    Ok(rows
+        .iter()
+        .map(|row| {
+            let parent_gone = row.parent.as_deref().is_some_and(|parent| {
+                !live_rows.iter().any(|candidate| {
+                    candidate.name.as_deref() == Some(parent)
+                        && !candidate.pane_dead
+                        && !launched_later(candidate, row)
+                })
+            });
+            let team_gone = row.team.as_deref().is_some_and(|id| !team::is_running(id));
+            parent_gone || team_gone
+        })
+        .collect())
+}
+
+/// Whether `candidate` was launched after `row`, compared as parsed instants (whole-
+/// second and sub-second records both read). An unknown time is never later.
+fn launched_later(candidate: &PaneRow, row: &PaneRow) -> bool {
+    let instant = |row: &PaneRow| row.launched_at.as_deref().and_then(parse_rfc3339_utc);
+    match (instant(candidate), instant(row)) {
+        (Some(candidate), Some(row)) => instant_later(candidate, row),
+        _ => false,
+    }
+}
+
+/// The `PARENT` cell: `orphan:<parent>` or `orphan` for an Orphan, else the parent.
+fn parent_cell(row: &PaneRow, orphan: bool) -> String {
+    match (orphan, row.parent.as_deref()) {
+        (true, Some(parent)) => format!("orphan:{parent}"),
+        (true, None) => "orphan".to_owned(),
+        (false, parent) => display_value(parent),
+    }
 }
 
 /// The panes `list` reads: `--session`, `--all`, else the host's default scope.
@@ -66,17 +128,19 @@ fn render_raw(rows: &[PaneRow]) {
     }
 }
 
-fn render_concise(rows: &[PaneRow]) {
-    render_concise_at(rows, current_unix_time())
+fn render_concise(rows: &[PaneRow], orphans: &[bool]) {
+    render_concise_at(rows, orphans, current_unix_time())
 }
 
-fn render_concise_at(rows: &[PaneRow], now: i64) {
-    let table: Vec<[String; 8]> = rows
+fn render_concise_at(rows: &[PaneRow], orphans: &[bool], now: i64) {
+    let table: Vec<[String; 9]> = rows
         .iter()
-        .map(|row| {
+        .zip(orphans)
+        .map(|(row, orphan)| {
             [
                 display_value(row.name.as_deref()),
                 display_value(row.agent.as_deref()),
+                parent_cell(row, *orphan),
                 row.session.clone(),
                 pane_label(row),
                 display_value(row.access.as_deref()),
@@ -88,51 +152,24 @@ fn render_concise_at(rows: &[PaneRow], now: i64) {
         .collect();
 
     let headers = [
-        "NAME", "AGENT", "SESSION", "PANE", "ACCESS", "LAUNCHED", "STATUS", "ACTIVITY",
+        "NAME", "AGENT", "PARENT", "SESSION", "PANE", "ACCESS", "LAUNCHED", "STATUS", "ACTIVITY",
     ];
     let widths = column_widths(&headers, &table);
-
-    println!(
-        "{:<w0$}  {:<w1$}  {:<w2$}  {:<w3$}  {:<w4$}  {:<w5$}  {:<w6$}  {:<w7$}",
-        headers[0],
-        headers[1],
-        headers[2],
-        headers[3],
-        headers[4],
-        headers[5],
-        headers[6],
-        headers[7],
-        w0 = widths[0],
-        w1 = widths[1],
-        w2 = widths[2],
-        w3 = widths[3],
-        w4 = widths[4],
-        w5 = widths[5],
-        w6 = widths[6],
-        w7 = widths[7],
-    );
-
+    println!("{}", table_line(&headers.map(str::to_owned), &widths));
     for row in table {
-        println!(
-            "{:<w0$}  {:<w1$}  {:<w2$}  {:<w3$}  {:<w4$}  {:<w5$}  {:<w6$}  {:<w7$}",
-            row[0],
-            row[1],
-            row[2],
-            row[3],
-            row[4],
-            row[5],
-            row[6],
-            row[7],
-            w0 = widths[0],
-            w1 = widths[1],
-            w2 = widths[2],
-            w3 = widths[3],
-            w4 = widths[4],
-            w5 = widths[5],
-            w6 = widths[6],
-            w7 = widths[7],
-        );
+        println!("{}", table_line(&row, &widths));
     }
+}
+
+/// One table line: every cell left-aligned to its column width, two spaces apart, as
+/// the earlier fixed format printed it (trailing padding included).
+fn table_line(cells: &[String; 9], widths: &[usize; 9]) -> String {
+    cells
+        .iter()
+        .zip(widths)
+        .map(|(cell, width)| format!("{cell:<width$}"))
+        .collect::<Vec<_>>()
+        .join("  ")
 }
 
 fn current_unix_time() -> i64 {
@@ -167,14 +204,15 @@ fn format_activity(activity: Option<i64>, now: i64) -> String {
     }
 }
 
-fn render_json(rows: &[PaneRow]) -> Result<()> {
+fn render_json(rows: &[PaneRow], orphans: &[bool]) -> Result<()> {
     let host = host::current();
     let pane_ids: Vec<String> = rows.iter().map(|row| row.pane_id.clone()).collect();
     let host_states = host.host_states(&pane_ids)?;
     let json_rows = rows
         .iter()
         .zip(host_states)
-        .map(|(row, host_state)| {
+        .zip(orphans)
+        .map(|((row, host_state), orphan)| {
             Ok(ListJsonRow {
                 host: host.host(),
                 name: row.name.clone(),
@@ -186,6 +224,10 @@ fn render_json(rows: &[PaneRow]) -> Result<()> {
                 status: pane_status(row),
                 last_activity: row.last_activity,
                 host_state,
+                parent: row.parent.clone(),
+                team: row.team.clone(),
+                shim_id: row.shim_id.clone(),
+                orphan: *orphan,
             })
         })
         .collect::<Result<Vec<_>>>()?;
@@ -194,7 +236,7 @@ fn render_json(rows: &[PaneRow]) -> Result<()> {
     Ok(())
 }
 
-fn column_widths(headers: &[&str; 8], rows: &[[String; 8]]) -> [usize; 8] {
+fn column_widths(headers: &[&str; 9], rows: &[[String; 9]]) -> [usize; 9] {
     let mut widths = headers.map(str::len);
     for row in rows {
         for (index, value) in row.iter().enumerate() {
@@ -254,6 +296,9 @@ mod tests {
             last_activity: Some(1_700_000_000),
             label: None,
             unknown: false,
+            parent: None,
+            team: None,
+            shim_id: None,
         };
 
         let json_row = ListJsonRow {
@@ -267,6 +312,10 @@ mod tests {
             status: pane_status(&row),
             last_activity: row.last_activity,
             host_state: None,
+            parent: None,
+            team: None,
+            shim_id: None,
+            orphan: false,
         };
 
         let json = serde_json::to_string(&json_row).unwrap();
@@ -289,6 +338,10 @@ mod tests {
             status: "running".into(),
             last_activity: None,
             host_state: None,
+            parent: None,
+            team: None,
+            shim_id: None,
+            orphan: false,
         };
 
         let json = serde_json::to_string(&json_row).unwrap();

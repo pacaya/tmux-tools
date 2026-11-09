@@ -61,11 +61,14 @@ fn list_all_panes() -> Result<Vec<PaneListing>> {
 
 fn list_format() -> String {
     format!(
-        "#{{session_name}}\x1f#{{window_index}}\x1f#{{window_name}}\x1f#{{pane_index}}\x1f#{{pane_id}}\x1f{}\x1f{}\x1f{}\x1f{}\x1f#{{pane_dead}}\x1f#{{pane_dead_status}}\x1f#{{window_activity}}",
+        "#{{session_name}}\x1f#{{window_index}}\x1f#{{window_name}}\x1f#{{pane_index}}\x1f#{{pane_id}}\x1f{}\x1f{}\x1f{}\x1f{}\x1f#{{pane_dead}}\x1f#{{pane_dead_status}}\x1f#{{window_activity}}\x1f{}\x1f{}\x1f{}",
         option_format(RegistrationKey::Name),
         option_format(RegistrationKey::Agent),
         option_format(RegistrationKey::Access),
         option_format(RegistrationKey::LaunchedAt),
+        option_format(RegistrationKey::Parent),
+        option_format(RegistrationKey::Team),
+        option_format(RegistrationKey::ShimId),
     )
 }
 
@@ -83,7 +86,7 @@ fn stderr_indicates_no_server(stderr: &str) -> bool {
 
 fn parse_pane_row(line: &str) -> Result<PaneListing> {
     let fields: Vec<&str> = line.split(FIELD_SEP).collect();
-    if fields.len() != 12 {
+    if fields.len() != 15 {
         return Err(anyhow!("unexpected tmux list-panes output: {line:?}"));
     }
 
@@ -125,6 +128,9 @@ fn parse_pane_row(line: &str) -> Result<PaneListing> {
         last_activity,
         label: None,
         unknown: false,
+        parent: non_empty(fields[12]),
+        team: non_empty(fields[13]),
+        shim_id: non_empty(fields[14]),
     })
 }
 
@@ -201,6 +207,9 @@ mod tests {
             "0",
             "",
             "1700000000",
+            "",
+            "",
+            "",
         ]);
 
         let row = parse_pane_row(&line).expect("row parses");
@@ -235,6 +244,9 @@ mod tests {
             "0",
             "",
             "0",
+            "",
+            "",
+            "",
         ]);
 
         let row = parse_pane_row(&line).expect("row parses with tab in name");
@@ -250,7 +262,9 @@ mod tests {
 
     #[test]
     fn last_activity_zero_is_none() {
-        let line = build_line(&["s", "0", "w", "0", "%1", "", "", "", "", "0", "", "0"]);
+        let line = build_line(&[
+            "s", "0", "w", "0", "%1", "", "", "", "", "0", "", "0", "", "", "",
+        ]);
         let row = parse_pane_row(&line).expect("row parses");
         assert_eq!(row.last_activity, None);
     }

@@ -42,6 +42,25 @@ pub struct PaneRecord {
     pub cwd: PathBuf,
     /// RFC 3339.
     pub launched_at: String,
+    /// The name of the tmux-tools pane this pane was created from (PRD-261108-0447-01
+    /// P7). Absent key = `None`, as for every field below.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<String>,
+    /// The team id of a Teammate pane (P6.4).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub team: Option<String>,
+    /// The Shim id of a Teammate pane (P6.4).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shim_id: Option<String>,
+    /// Display data from `select-pane -T` (P6.4).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// Display data from `--agent-name` of the `respawn-pane` command (P6.4).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claude_agent_name: Option<String>,
+    /// Display data from `--team-name` of the `respawn-pane` command (P6.4).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claude_team_name: Option<String>,
 }
 
 impl PaneRecord {
@@ -56,6 +75,12 @@ impl PaneRecord {
             cwd: (!cwd.is_empty()).then(|| cwd.into_owned()),
             surface: self.surface.clone(),
             surface_unvalidated: self.surface_unvalidated,
+            parent: self.parent.clone(),
+            team: self.team.clone(),
+            shim_id: self.shim_id.clone(),
+            title: self.title.clone(),
+            claude_agent_name: self.claude_agent_name.clone(),
+            claude_team_name: self.claude_team_name.clone(),
         }
     }
 }
@@ -101,14 +126,9 @@ pub fn check(
 
 /// `${XDG_STATE_HOME:-$HOME/.local/state}/tmux-tools/<host>`.
 pub fn host_dir(host: Host) -> Result<PathBuf> {
-    let state = match std::env::var_os("XDG_STATE_HOME").filter(|value| !value.is_empty()) {
-        Some(state) => PathBuf::from(state),
-        None => dirs::home_dir()
-            .ok_or_else(|| anyhow!("cannot locate the Pane registry: HOME is unset"))?
-            .join(".local")
-            .join("state"),
-    };
-    Ok(state.join("tmux-tools").join(host.as_str()))
+    Ok(crate::team::state_root()
+        .map_err(|_| anyhow!("cannot locate the Pane registry: HOME is unset"))?
+        .join(host.as_str()))
 }
 
 /// The registry directory of one host server.
@@ -259,6 +279,12 @@ mod tests {
             surface_unvalidated: false,
             cwd: PathBuf::from("/w"),
             launched_at: "2026-01-01T00:00:00Z".to_owned(),
+            parent: None,
+            team: None,
+            shim_id: None,
+            title: None,
+            claude_agent_name: None,
+            claude_team_name: None,
         }
     }
 
@@ -296,5 +322,7 @@ mod tests {
         assert_eq!(json["schema"], PANE_RECORD_SCHEMA);
         assert!(json["handle"].is_null());
         assert_eq!(json["surface_unvalidated"], false);
+        // PRD-261108-0447-01: an absent team field is an absent key.
+        assert!(json.get("parent").is_none() && json.get("team").is_none());
     }
 }

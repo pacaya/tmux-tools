@@ -1,6 +1,6 @@
 [package]
 name = "tmux-tools-core"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2021"
 
 [features]
@@ -18,6 +18,7 @@ strip-ansi-escapes = "0.2"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 toml = "0.8"
 dirs = "5"
+sha2 = "0.10"
 tokio = { version = "1", features = ["full"] }
 
 [target.'cfg(unix)'.dependencies]

@@ -28,6 +28,7 @@ mod tmux;
 
 pub use self::orca::{OrcaHost, ORCA_TERMINAL_HANDLE, ORCA_WORKTREE_ID};
 pub use self::tmux::TmuxHost;
+use crate::team::{TT_HOST, TT_TEAM};
 
 /// The terminal program whose panes the tool drives.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, serde::Deserialize)]
@@ -59,6 +60,8 @@ pub enum SelectionSource {
     Detected(String),
     /// Nothing matched; the host is tmux (P3.3).
     Default,
+    /// Inside a team, `TT_HOST` named the host (PRD-261108-0447-01 P3.1).
+    Team(String),
 }
 
 impl fmt::Display for SelectionSource {
@@ -67,6 +70,7 @@ impl fmt::Display for SelectionSource {
             SelectionSource::Override => formatter.write_str(TMUX_TOOLS_HOST),
             SelectionSource::Detected(env_var) => formatter.write_str(env_var),
             SelectionSource::Default => formatter.write_str("default"),
+            SelectionSource::Team(team_id) => write!(formatter, "TT_HOST (team {team_id})"),
         }
     }
 }
@@ -88,6 +92,21 @@ impl HostSelection {
 
     /// [`HostSelection::from_env`] over an arbitrary variable lookup.
     pub fn from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Result<HostSelection> {
+        // PRD-261108-0447-01 P3.1: inside a team, `TT_HOST` selects first.
+        if let Some(team_id) = lookup(TT_TEAM).filter(|value| !value.trim().is_empty()) {
+            let host = match lookup(TT_HOST).as_deref() {
+                None => anyhow::bail!("{TT_TEAM} is set but {TT_HOST} is unset"),
+                Some("tmux") => Host::Tmux,
+                Some("orca") => Host::Orca,
+                Some(other) => anyhow::bail!(
+                    "{TT_HOST}={other:?} is not a host; valid values are tmux and orca"
+                ),
+            };
+            return Ok(HostSelection {
+                host,
+                source: SelectionSource::Team(team_id.trim().to_owned()),
+            });
+        }
         if let Some(value) = lookup(TMUX_TOOLS_HOST) {
             let host = match value.as_str() {
                 "tmux" => Host::Tmux,
@@ -125,11 +144,17 @@ fn selection_cell() -> &'static std::result::Result<HostSelection, String> {
 }
 
 /// The [`HostSelection`] of this invocation; an error when `TMUX_TOOLS_HOST` names no
-/// host. The CLI checks it before any verb runs.
+/// host, or, inside a team, when `TT_HOST` is missing or invalid or the Team record
+/// does not exist ([`crate::team::TeamNotFound`], PRD-261108-0447-01 P3.2). The CLI
+/// checks it before any verb runs.
 pub fn selection() -> Result<HostSelection> {
-    selection_cell()
+    let selection = selection_cell()
         .clone()
-        .map_err(|message| anyhow::anyhow!(message))
+        .map_err(|message| anyhow::anyhow!(message))?;
+    if let SelectionSource::Team(_) = selection.source {
+        crate::team::current()?;
+    }
+    Ok(selection)
 }
 
 impl fmt::Display for Host {
@@ -276,6 +301,14 @@ pub enum RegistrationKey {
     Cwd,
     Surface,
     SurfaceUnvalidated,
+    /// PRD-261108-0447-01 P7.
+    Parent,
+    /// PRD-261108-0447-01 P6.4: the team id of a Teammate pane.
+    Team,
+    ShimId,
+    Title,
+    ClaudeAgentName,
+    ClaudeTeamName,
 }
 
 /// The direction of a split: the new pane goes right of (`Horizontal`) or below
@@ -369,6 +402,10 @@ pub struct PaneListing {
     /// Whether the host's pane list was incomplete and did not list this row's pane, so
     /// its liveness is unknown (P4.5).
     pub unknown: bool,
+    /// The registration's `parent`, `team` and `shim_id` (PRD-261108-0447-01 P8.2).
+    pub parent: Option<String>,
+    pub team: Option<String>,
+    pub shim_id: Option<String>,
 }
 
 /// One pane as `status` reports it.
@@ -438,19 +475,26 @@ pub trait HostPort: Sync {
     /// The pane that invoked the tool, inside the host.
     fn calling_pane(&self) -> Result<String>;
 
+    /// The identity of the host server the panes live on: the tmux server socket path,
+    /// or the Orca `runtimeId` (a Team record's `server_id`, PRD-261108-0447-01 P4.3).
+    fn server_identity(&self) -> Result<String>;
+
     /// The most recently active pane of the Managed session, which is created when
     /// absent.
     fn managed_pane(&self) -> Result<String>;
 
     // --- Create --------------------------------------------------------------------
 
-    /// Split `target` and run `command` in the new pane; returns its pane id.
+    /// Split `target` and run `command` in the new pane; returns its pane id. With
+    /// `detached`, the new pane does not become the active pane (tmux `split-window -d`);
+    /// a host without such an option ignores it.
     fn create_split(
         &self,
         target: &str,
         direction: SplitDirection,
         percent: Option<u32>,
         command: &str,
+        detached: bool,
     ) -> Result<String>;
 
     /// Create a window in `session` (a session id) running `command`; returns the pane
@@ -712,6 +756,28 @@ mod tests {
         assert!(error.contains("tmux") && error.contains("orca"), "{error}");
 
         // P3.1: a present but empty value is an invalid value, not an unset one.
+        // PRD-261108-0447-01 P3.1: inside a team `TT_HOST` selects first.
+        let team = select(&[
+            (TT_TEAM, "0a1b2c3d"),
+            (TT_HOST, "orca"),
+            ("TMUX", "/s,1,0"),
+            (TMUX_TOOLS_HOST, "tmux"),
+        ])
+        .unwrap();
+        assert_eq!(
+            (team.host, team.source),
+            (Host::Orca, SelectionSource::Team("0a1b2c3d".to_owned()))
+        );
+        let missing = select(&[(TT_TEAM, "0a1b2c3d")]).unwrap_err().to_string();
+        assert!(missing.contains("TT_HOST"), "{missing}");
+        let invalid = select(&[(TT_TEAM, "0a1b2c3d"), (TT_HOST, "rex")])
+            .unwrap_err()
+            .to_string();
+        assert!(
+            invalid.contains("tmux") && invalid.contains("orca"),
+            "{invalid}"
+        );
+
         let empty = select(&[(TMUX_TOOLS_HOST, ""), ("TMUX", "/s,1,0")])
             .unwrap_err()
             .to_string();

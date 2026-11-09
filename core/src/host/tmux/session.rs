@@ -40,6 +40,11 @@ pub(super) fn scoped_target(session: Option<&str>, window: Option<&str>) -> Stri
 }
 
 pub(super) fn current_pane() -> Result<String> {
+    // PRD-261108-0447-01 P3.3: inside a team the calling pane is the Leader, and
+    // `TMUX_PANE` (the Leader's Shim id) is never read.
+    if let Some(leader) = crate::team::leader_handle() {
+        return Ok(leader);
+    }
     // Prefer $TMUX_PANE: tmux sets it per-pane and child processes inherit it,
     // so it identifies the *calling* pane unambiguously. `tmux display -p` with
     // no `-t` falls back to the most-recently-active pane on the server, which
@@ -338,12 +343,31 @@ fn private_session_name() -> String {
 
 /// The name of the session the tmux client of this invocation is in.
 pub(super) fn current_session() -> Result<String> {
-    let session = runner::run_checked(&["display-message", "-p", "#{session_name}"])?
-        .trim()
-        .to_owned();
+    let session = match crate::team::leader_handle() {
+        // Inside a team the calling pane is the Leader (PRD-261108-0447-01 P3.3).
+        Some(leader) => {
+            runner::run_checked(&["display-message", "-p", "-t", &leader, "#{session_name}"])?
+        }
+        None => runner::run_checked(&["display-message", "-p", "#{session_name}"])?,
+    }
+    .trim()
+    .to_owned();
     if session.is_empty() {
         return Err(anyhow!("tmux returned an empty current session name"));
     }
 
     Ok(session)
+}
+
+/// The server socket path: inside a team the Team record's, else the first comma field
+/// of `$TMUX`.
+pub(super) fn server_socket() -> Result<String> {
+    if let Some(endpoint) = crate::team::tmux_endpoint() {
+        return Ok(endpoint.socket.to_string_lossy().into_owned());
+    }
+    env::var("TMUX")
+        .ok()
+        .and_then(|tmux| tmux.split(',').next().map(str::to_owned))
+        .filter(|socket| !socket.is_empty())
+        .ok_or_else(|| anyhow!("TMUX is unset: the tmux server socket is unknown"))
 }

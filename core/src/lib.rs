@@ -7,6 +7,7 @@ pub mod names;
 pub mod registry;
 mod stream;
 pub mod target;
+pub mod team;
 #[cfg(test)]
 mod test_child_env;
 

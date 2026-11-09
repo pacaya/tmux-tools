@@ -17,6 +17,12 @@ pub(super) fn option_name(key: RegistrationKey) -> &'static str {
         RegistrationKey::Cwd => "@tt-cwd",
         RegistrationKey::Surface => "@tt-surface",
         RegistrationKey::SurfaceUnvalidated => "@tt-surface-unvalidated",
+        RegistrationKey::Parent => "@tt-parent",
+        RegistrationKey::Team => "@tt-team",
+        RegistrationKey::ShimId => "@tt-shim-id",
+        RegistrationKey::Title => "@tt-title",
+        RegistrationKey::ClaudeAgentName => "@tt-claude-agent-name",
+        RegistrationKey::ClaudeTeamName => "@tt-claude-team-name",
     }
 }
 
@@ -65,19 +71,33 @@ fn parse_pane_names(output: &str) -> Vec<(String, String)> {
 }
 
 pub(super) fn read(pane_id: &str) -> Result<Registered> {
-    const FIELD_SEP: char = '\x1f';
-    const FORMAT: &str = "#{@tt-name}\x1f#{@tt-agent}\x1f#{@tt-access}\x1f#{@tt-launched-at}\x1f\
-                          #{@tt-cwd}\x1f#{@tt-surface}\x1f#{@tt-surface-unvalidated}";
-    let raw = runner::run_checked(&["display-message", "-p", "-t", pane_id, FORMAT])?;
+    const KEYS: [RegistrationKey; 13] = [
+        RegistrationKey::Name,
+        RegistrationKey::Agent,
+        RegistrationKey::Access,
+        RegistrationKey::LaunchedAt,
+        RegistrationKey::Cwd,
+        RegistrationKey::Surface,
+        RegistrationKey::SurfaceUnvalidated,
+        RegistrationKey::Parent,
+        RegistrationKey::Team,
+        RegistrationKey::ShimId,
+        RegistrationKey::Title,
+        RegistrationKey::ClaudeAgentName,
+        RegistrationKey::ClaudeTeamName,
+    ];
+    let format = KEYS.map(option_format).join(&FIELD_SEP.to_string());
+    let raw = runner::run_checked(&["display-message", "-p", "-t", pane_id, &format])?;
     let line = raw.trim_end_matches('\n');
-    let mut parts = line.splitn(7, FIELD_SEP);
-    let name = parts.next().and_then(non_empty_owned);
-    let agent = parts.next().and_then(non_empty_owned);
-    let access = parts.next().and_then(non_empty_owned);
-    let launched_at = parts.next().and_then(non_empty_owned);
-    let cwd = parts.next().and_then(non_empty_owned);
-    let surface = parts.next().and_then(non_empty_owned);
-    let surface_unvalidated = parts.next().is_some_and(truthy);
+    let mut parts = line.splitn(KEYS.len(), FIELD_SEP);
+    let mut next = || parts.next().and_then(non_empty_owned);
+    let name = next();
+    let agent = next();
+    let access = next();
+    let launched_at = next();
+    let cwd = next();
+    let surface = next();
+    let surface_unvalidated = next().is_some_and(|value| truthy(&value));
     Ok(Registered {
         name,
         agent,
@@ -86,6 +106,12 @@ pub(super) fn read(pane_id: &str) -> Result<Registered> {
         cwd,
         surface,
         surface_unvalidated,
+        parent: next(),
+        team: next(),
+        shim_id: next(),
+        title: next(),
+        claude_agent_name: next(),
+        claude_team_name: next(),
     })
 }
 
@@ -136,6 +162,7 @@ fn parse_ownership_snapshot(output: &str) -> Result<Vec<Registered>> {
                 cwd: non_empty(cwd.trim()),
                 surface: None,
                 surface_unvalidated: false,
+                ..Default::default()
             })
         })
         .collect()
@@ -208,6 +235,18 @@ mod tests {
         assert_eq!(
             option_name(RegistrationKey::SurfaceUnvalidated),
             "@tt-surface-unvalidated"
+        );
+        assert_eq!(option_name(RegistrationKey::Parent), "@tt-parent");
+        assert_eq!(option_name(RegistrationKey::Team), "@tt-team");
+        assert_eq!(option_name(RegistrationKey::ShimId), "@tt-shim-id");
+        assert_eq!(option_name(RegistrationKey::Title), "@tt-title");
+        assert_eq!(
+            option_name(RegistrationKey::ClaudeAgentName),
+            "@tt-claude-agent-name"
+        );
+        assert_eq!(
+            option_name(RegistrationKey::ClaudeTeamName),
+            "@tt-claude-team-name"
         );
     }
 

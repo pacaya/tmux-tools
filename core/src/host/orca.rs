@@ -327,6 +327,10 @@ impl OrcaHost {
     }
 
     fn calling_handle(&self) -> Result<String> {
+        // PRD-261108-0447-01 P3.3: inside a team the calling pane is the Leader.
+        if let Some(leader) = crate::team::leader_handle() {
+            return Ok(leader);
+        }
         env_value(ORCA_TERMINAL_HANDLE).ok_or_else(|| {
             anyhow!(
                 "{ORCA_TERMINAL_HANDLE} is unset: this verb needs it to name the calling Orca pane"
@@ -381,18 +385,28 @@ impl OrcaHost {
 
     fn new_record(&self, name: &str, registration: &Registration<'_>) -> Result<PaneRecord> {
         let agent = registration.agent.as_ref();
+        let team = registration.team.as_ref();
+        let owned = |value: Option<&str>| value.map(str::to_owned);
         Ok(PaneRecord {
             schema: registry::PANE_RECORD_SCHEMA.to_owned(),
             name: name.to_owned(),
             host: Host::Orca,
             server_id: self.server_id()?,
             handle: None,
-            agent: agent.map(|agent| agent.agent.to_owned()),
+            agent: agent
+                .map(|agent| agent.agent.to_owned())
+                .or_else(|| owned(team.and_then(|team| team.agent))),
             access: agent.and_then(|agent| agent.access).map(str::to_owned),
             surface: agent.map(|agent| agent.surface.to_owned()),
             surface_unvalidated: agent.is_some_and(|agent| agent.surface_unvalidated),
             cwd: registration.cwd.unwrap_or_default().into(),
             launched_at: registration.launched_at.to_owned(),
+            parent: owned(registration.parent),
+            team: team.map(|team| team.team.to_owned()),
+            shim_id: team.map(|team| team.shim_id.to_owned()),
+            title: owned(team.and_then(|team| team.title)),
+            claude_agent_name: owned(team.and_then(|team| team.claude_agent_name)),
+            claude_team_name: owned(team.and_then(|team| team.claude_team_name)),
         })
     }
 
@@ -667,12 +681,17 @@ impl HostPort for OrcaHost {
         self.calling_handle()
     }
 
+    fn server_identity(&self) -> Result<String> {
+        self.server_id()
+    }
+
     fn create_split(
         &self,
         _target: &str,
         _direction: SplitDirection,
         _percent: Option<u32>,
         _command: &str,
+        _detached: bool,
     ) -> Result<String> {
         bail!("orca creates panes only with a Pane record")
     }
@@ -725,6 +744,9 @@ impl HostPort for OrcaHost {
                 last_activity: None,
                 label: Some(handle),
                 unknown,
+                parent: record.parent.clone(),
+                team: record.team.clone(),
+                shim_id: record.shim_id.clone(),
             });
         }
         if !list.complete {
@@ -872,6 +894,7 @@ impl HostPort for OrcaHost {
                 cwd: None,
                 surface: None,
                 surface_unvalidated: false,
+                ..Default::default()
             },
         })
     }
@@ -888,20 +911,26 @@ impl HostPort for OrcaHost {
             RegistrationKey::SurfaceUnvalidated => {
                 registered.surface_unvalidated.then(|| "1".to_owned())
             }
+            RegistrationKey::Parent => registered.parent,
+            RegistrationKey::Team => registered.team,
+            RegistrationKey::ShimId => registered.shim_id,
+            RegistrationKey::Title => registered.title,
+            RegistrationKey::ClaudeAgentName => registered.claude_agent_name,
+            RegistrationKey::ClaudeTeamName => registered.claude_team_name,
         })
     }
 
     fn write_registration_value(
         &self,
-        _pane: &str,
-        _key: RegistrationKey,
-        _value: &str,
+        pane: &str,
+        key: RegistrationKey,
+        value: &str,
     ) -> Result<()> {
-        bail!("orca writes the Pane registration as a whole Pane record at spawn")
+        self.update_record(pane, key, Some(value))
     }
 
-    fn clear_registration_value(&self, _pane: &str, _key: RegistrationKey) -> Result<()> {
-        bail!("orca writes the Pane registration as a whole Pane record at spawn")
+    fn clear_registration_value(&self, pane: &str, key: RegistrationKey) -> Result<()> {
+        self.update_record(pane, key, None)
     }
 
     fn pane_names(&self) -> Result<Vec<(String, String)>> {
@@ -1276,6 +1305,44 @@ enum Placement {
 }
 
 impl OrcaHost {
+    /// Rewrite one field of the Pane record of `pane` by write-to-temp and atomic
+    /// rename. A new `Name` moves the record to that name's file.
+    fn update_record(&self, pane: &str, key: RegistrationKey, value: Option<&str>) -> Result<()> {
+        let mut record = self
+            .record_for_handle(pane)?
+            .ok_or_else(|| anyhow!("pane {pane} has no Pane record"))?;
+        let owned = value.map(str::to_owned);
+        let old_name = record.name.clone();
+        match key {
+            RegistrationKey::Name => {
+                record.name = owned.ok_or_else(|| anyhow!("a Pane record needs a name"))?
+            }
+            RegistrationKey::Agent => record.agent = owned,
+            RegistrationKey::Access => record.access = owned,
+            RegistrationKey::LaunchedAt => record.launched_at = owned.unwrap_or_default(),
+            RegistrationKey::Cwd => record.cwd = owned.unwrap_or_default().into(),
+            RegistrationKey::Surface => record.surface = owned,
+            RegistrationKey::SurfaceUnvalidated => {
+                record.surface_unvalidated =
+                    owned.is_some_and(|value| value == "1" || value == "true")
+            }
+            RegistrationKey::Parent => record.parent = owned,
+            RegistrationKey::Team => record.team = owned,
+            RegistrationKey::ShimId => record.shim_id = owned,
+            RegistrationKey::Title => record.title = owned,
+            RegistrationKey::ClaudeAgentName => record.claude_agent_name = owned,
+            RegistrationKey::ClaudeTeamName => record.claude_team_name = owned,
+        }
+        if record.name != old_name {
+            // The new name is reserved exclusively first, so it never replaces another
+            // pane's record.
+            registry::reserve(&record)?;
+            registry::write(&record)?;
+            return registry::delete(Host::Orca, &record.server_id, &old_name);
+        }
+        registry::write(&record)
+    }
+
     /// P9.2: an ambiguous create or split. The reservation stays until it becomes an
     /// orphan reservation, so the name is not reused meanwhile.
     fn outcome_unknown(

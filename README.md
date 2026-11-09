@@ -48,11 +48,12 @@ Every verb runs on the selected host, tmux or Orca (see "Hosts"). Every `--forma
 | `interrupt` | `[--target name\|id]` | Sends the resolved surface's declared `interrupt_key` (`C-c` when the pane has no surface). Refuses when that key quits the agent while idle and the pane is not positively busy, and refuses any surface-unvalidated pane on such a surface; a surface declaring no quit hazard always sends. Same `--force`/`--any` guards as `kill`. |
 | `escape` | `[--target name\|id]` | Sends `Escape`. |
 | `send-enter` | `[--target name\|id]` | Sends `Enter`. Same `--force`/`--any` guards as `kill`. Useful when an agent didn't process the Enter from `send --enter`/`prompt`. |
-| `list` | `[--session NAME] [--all]` | Lists panes in the managed/current scope by default. On Orca it lists the Pane records of the current runtime: `session` is the pane's worktree id, `pane` its `term_…` handle, and `status` is `running`, `dead` (shown once, then the record is deleted) or `unknown` (the pane list was incomplete; stderr says `list incomplete: orca`). |
+| `list` | `[--session NAME] [--all]` | Lists panes in the managed/current scope by default. JSON rows carry `parent`, `team`, `shim_id` (each `null` when absent) and `orphan`; the table has a `PARENT` column after `AGENT`, which shows `orphan:<parent>` (or `orphan`) for an Orphan: a pane whose parent is not live, or is a newer pane of the same name, or a Teammate pane whose Team has no running Launcher. `orphan` is reported only; no verb closes a pane for it. On Orca it lists the Pane records of the current runtime: `session` is the pane's worktree id, `pane` its `term_…` handle, and `status` is `running`, `dead` (shown once, then the record is deleted) or `unknown` (the pane list was incomplete; stderr says `list incomplete: orca`). |
 | `status` | `[--target name\|id]` | Shows session, window, pane, name, and agent metadata; `concise` and `json` add the pane's window geometry (`min_pane_cols`, `min_pane_rows`) and floor verdict (`below_floor`, see "Floors"). `raw` is unchanged. |
 | `rebalance` | `[--target name\|id]` | Retiles the target pane's window with tmux's `tiled` layout, the arrangement tile placement applies, and reports it: `concise` and `json` carry `window_id`, `min_pane_cols`, `min_pane_rows` and `below_floor` with the meanings `launch` gives them (see "Floors"); `raw` prints the window id. Use it to repair a window left ragged, for example by a raw `tmux split-window`, instead of a raw `tmux select-layout tiled`. Inside tmux with no selector it acts on the calling pane's window; outside tmux it needs `--target`, `--session` or `--window` and otherwise fails, so it never creates the managed session. It refuses with a non-zero exit, leaving the window untouched, unless the window carries `@tt-tiled` (layout intent) and holds a pane tmux-tools owns (`@tt-name` or `@tt-agent`, from the same cwd) — the window guard `kill` applies before it retiles; the error names the guard that failed, and there is no override. It moves no pane, so it cannot repair an over-full window: exit 0 with `below_floor` true means the window is still below its effective floor. Like `status`, it uses the registry only for floors: an `agents.toml` that cannot be read or parsed gives a warning and the built-in floors. |
 | `notify` | `--title T --body B [--target name\|id]` | Shows a desktop notification for the target pane, or for the calling pane (`TMUX_PANE`) when `--target` is absent; without `--target` and with `TMUX_PANE` unset it exits 1. On tmux it writes the tmux-wrapped OSC 777 sequence to the pane's tty, and tmux passes `ESC ]777;notify;T;B BEL` to the client's terminal; control bytes are removed from the title and body and `;` becomes `,`. Under tmux, delivery needs the tmux option `allow-passthrough` set to `on` (only a pane that is visible in an attached client) or `all` (any pane), and the outer terminal must support OSC 777. When the pane's session has no attached client, or the host cannot notify, it exits 0 and prints `notify: not delivered on <host>` on stderr. Orca has no notification command (its own agent hooks notify), so on Orca `notify` always reports `notify: not delivered on orca`. |
-| `self` | `[--format concise\|json\|raw]` | Reports whether the calling pane is driven by tmux-tools: `json` is `{"host":"tmux","driven":bool,"name":string\|null,"agent":string\|null}`. `driven` is true when the pane has `@tt-name` or `@tt-agent`; `name` and `agent` are null when unknown. Outside tmux it reports `host: tmux, driven: false`. On Orca the calling pane is `ORCA_TERMINAL_HANDLE` (required), and it is driven when a live Pane record holds that handle. |
+| `self` | `[--format concise\|json\|raw]` | Reports whether the calling pane is driven by tmux-tools: `json` is `{"host":"tmux","driven":bool,"name":string\|null,"agent":string\|null}`. `driven` is true when the pane has `@tt-name` or `@tt-agent`; `name` and `agent` are null when unknown. Outside tmux it reports `host: tmux, driven: false`. On Orca the calling pane is `ORCA_TERMINAL_HANDLE` (required), and it is driven when a live Pane record holds that handle. `json` also carries `team` (team id or `null`), `role` (`leader` inside a team, `teammate` in a Teammate pane, else `null`) and `parent`. |
+| `claude-teams` | `[-- CLAUDE_ARGS...]` | Runs Claude in a Team in the calling pane: every teammate Claude starts is a tmux-tools pane. See "Claude teams". |
 
 ## Configuration
 
@@ -337,6 +338,19 @@ Limits on Orca:
 - **Cursor and keypad keys always send their normal-mode bytes.** `send` classifies each argument by tmux's own key grammar and writes the bytes tmux's xterm key output produces (`M-x` → `ESC x`, `F1` → `ESC O P`, `Up` → `ESC [ A`, `^c` → `0x03`); Orca does not expose a pane's application cursor or keypad mode, so an application that enabled it receives the normal-mode bytes. `interrupt` sends the surface's `interrupt_key` the same way, never Orca's `--interrupt`.
 - **One-submission delivery is a proxy, with a remaining risk.** `prompt` refuses before sending anything when the runtime lacks the capability `terminal.prompt-delivery.v1`. Otherwise delivery is guaranteed only when `terminal show` reports the pane's registered agent, `worktree ps` reports that agent live, and the capability is present; a multi-line prompt to a bracketed-paste surface is refused when delivery is not guaranteed. Orca decides on its server whether to bracket the text, and nothing it reports before sending reproduces that check: it can still write the raw text, and a shell in the pane then runs each line.
 
+## Claude teams
+
+`tmux-tools claude-teams [-- <claude args>]` runs in the calling pane and starts the real `claude` (the `command -v claude` of your `PATH`) as its child, in a Team, with `--teammate-mode tmux` added unless you pass `--teammate-mode`. Your settings must enable agent teams; the verb sets neither `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS` nor `--agent-teams`. Every teammate Claude starts is a tmux-tools pane named `<leader name>.tm<k>` (`team-<team id>.tm<k>` when the calling pane has no tmux-tools name) with `team`, `parent` and `shim_id`, on tmux and on Orca. A clean Claude exit (status 0) closes every teammate pane and deletes the team directory; any other exit keeps them, and `list` then reports them with `orphan: true` so you can read their output and `kill --target <name>` them. The verb exits with Claude's status.
+
+**The Leader's child processes see a fake tmux.** In Claude and every process it starts, `TMUX` is `<team dir>/tmux-fake,<pid>,0` (not a socket), `TMUX_PANE` is `%1`, and `<team dir>/bin` — whose only file is the Shim, a `tmux` link to `tmux-tools` — is first on `PATH`; `TT_TEAM` and `TT_HOST` name the Team and its host. So a `tmux` command run by the Leader or its tools reaches the Shim, not tmux. The Shim serves only the tmux subset Claude uses for teammates (`display-message`, `list-panes`, `split-window`, `respawn-pane -k`, `kill-pane`, `send-keys`, `capture-pane -p`, `has-session`, `select-pane -T`; `set-option`, `select-layout` and `resize-pane` are ignored), only for the panes of its own Team, and refuses everything else with exit 1 and `tmux: <reason>`. It has no compatibility path for `#{@tt-*}` formats: they expand to the empty string. Inside a team, `tmux-tools` verbs act on the Leader as the calling pane and ignore `TMUX_PANE`.
+
+**Release order.** Do not use `claude-teams` before the harness rollout steps 2 (hooks) and 3 (text and scripts) of PRD-261108-0235-01 are released: inside a Leader, `$TMUX` and `tmux` reach the Shim, so the harness hooks must call `tmux-tools self` instead of `tmux display-message`.
+
+- **Fail-open start.** When no Team can be set up — no supported host (for example a plain terminal, where `TMUX_PANE` is unset), an invalid `TMUX_TOOLS_HOST`, an unreachable host, or a team directory that cannot be created — the verb prints `claude-teams: no team: <reason>; starting claude without teammate panes` and starts Claude with `--teammate-mode in-process` and your environment unchanged. Inside a team it refuses with `claude-teams: already inside team <id>`, and without a `claude` with `claude-teams: claude not found` (exit 1 for both).
+- **Claude-version warning.** A Claude version without a trace fixture in this build (`tests/fixtures/claude-teams/<version>.jsonl`) prints `claude-teams: claude <version> not contract-tested` once on stderr; the verb continues.
+- **`shim-debug/` stays.** With `TT_SHIM_DEBUG=1`, the Shim logs every call with its exit and stdout to `${XDG_STATE_HOME:-$HOME/.local/state}/tmux-tools/shim-debug/<team id>/shim.log`, next to a copy of `team.json`. tmux-tools never deletes these directories; delete them yourself. Without it, only refusals are logged, in the team directory.
+- **No space for a teammate on tmux.** On tmux, when the window has no space for a new pane, a teammate start fails with `tmux: no space for a new pane`; the Shim requests no size.
+
 ## Pane history and `prompt` results
 
 `launch` and `spawn-agent` raise the `history-limit` of **every session they create** to 50000 before the launched command's window can emit output. `history-limit` is a tmux **session** option (it cannot be set per pane); new windows inherit it. tmux-tools never changes the option on a session it did not create, and never sets it globally. `tmux show-options -t <session> history-limit` reports it. This is what lets `prompt` return a completed turn whose response scrolled past the visible screen: tmux defaults the limit to 2000, so a deep turn can silently drop its own beginning.
@@ -360,13 +374,14 @@ Raw and concise carry both dimensions on stderr; JSON carries them as the `turn_
 
 ## Library: the Host port
 
-`tmux-tools-core` is the library behind the CLI. Its public modules are `host`, `registry`, `agents`, `format`, `idle`, `layout`, `names` and `target`; the modules other than `host` reach a host only through the Host port. The former tmux paths (`tmux`, `stream`, `TmuxInvocation`, `with_invocation`, `set_global_invocation`) are gone.
+`tmux-tools-core` is the library behind the CLI. Its public modules are `host`, `registry`, `team`, `agents`, `format`, `idle`, `layout`, `names` and `target`; the modules other than `host` reach a host only through the Host port. The former tmux paths (`tmux`, `stream`, `TmuxInvocation`, `with_invocation`, `set_global_invocation`) are gone.
 
 - `host::HostPort` — the pane-level port: create, list, capture, send text and keys, close, the Pane registration, Host state, notify, capabilities, and the layout operations gated by `tile`. `host::TmuxHost` and `host::OrcaHost` implement it.
 - `host::HostSelection` — `{ host: Host, source: SelectionSource }`, made by `HostSelection::from_env()` (or `from_lookup` over any variable source) with the rules of "Host selection". `host::selection()` returns the invocation's selection and `host::current()` its backend.
 - `host::HostCapabilities` — `native_state`, `submit_confirmation`, `notify`, `tile`, `rebalance`, `size`. An optional feature a host lacks is the error `host::Unsupported`.
 - `host::Host`, `host::HostState`, `host::Submission` — the host, its reported agent state, and what `prompt` knows of its submission.
 - `registry::PaneRecord` and `registry::PaneLiveness` — the Pane records of a host without pane data (Orca) and their `live` / `dead` / `orphan-reservation` states.
+- `team::TeamRecord` (with `TeamLeader`, `ClaudeBinary`, `TmuxEndpoint`) and `team::TeamRole` — the Team record of `claude-teams` and a pane's role in a Team. Inside a team (`TT_TEAM` set) `TT_HOST` selects the host first (`SelectionSource::Team`).
 
 ```rust
 use tmux_tools_core::host::{self, Host, HostSelection};
@@ -387,6 +402,18 @@ full suite with that fixture enabled:
 
 ```sh
 cargo test --workspace --features test-fixtures
+```
+
+`tests/claude_teams.rs` replays each Claude trace fixture through the Shim inside a Team on the
+isolated tmux server, with a fake `claude`. A new Claude version gets its fixture from a
+`TT_SHIM_DEBUG=1` `shim.log` (from the opt-in live run below, or any other run). The live run
+starts Claude with `disableAllHooks: true` and `--disallowedTools Bash`, and fails when the version
+has no fixture or when `shim.log` has a refused call that is not one of the fixture's `exit` 1 lines
+(for Claude 2.1.319 the startup probes `show -Av mouse`, `show -gv focus-events`, `show-environment -g`):
+
+```sh
+TMUX_TOOLS_LIVE_CLAUDE=1 cargo test --features test-fixtures --test claude_teams live_claude -- --nocapture
+cargo run --features test-fixtures --bin tt-fixture -- <shim-debug dir>/shim.log > tests/fixtures/claude-teams/<version>.jsonl
 ```
 
 A bare `cargo test` still passes; it compiles the fixture-gated tests out and simply runs that many

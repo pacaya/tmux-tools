@@ -174,6 +174,28 @@ pub struct Registration<'a> {
     pub cwd: Option<&'a str>,
     /// The agent fields; `None` for `launch`.
     pub agent: Option<AgentRegistration<'a>>,
+    /// `@tt-parent`: the name of the calling tmux-tools pane (PRD-261108-0447-01 P7),
+    /// `None` when the calling pane is not one.
+    pub parent: Option<&'a str>,
+    /// The Teammate pane fields; `None` outside the Shim.
+    pub team: Option<TeammateRegistration<'a>>,
+}
+
+/// The Teammate pane part of a pane's registration (PRD-261108-0447-01 P6.4).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TeammateRegistration<'a> {
+    /// `@tt-team`: the team id.
+    pub team: &'a str,
+    /// `@tt-shim-id`.
+    pub shim_id: &'a str,
+    /// `@tt-title`.
+    pub title: Option<&'a str>,
+    /// `@tt-claude-agent-name`.
+    pub claude_agent_name: Option<&'a str>,
+    /// `@tt-claude-team-name`.
+    pub claude_team_name: Option<&'a str>,
+    /// `@tt-agent` of a Teammate pane: `claude` when it runs the Team's Claude.
+    pub agent: Option<&'a str>,
 }
 
 /// The `spawn-agent` part of a pane's registration.
@@ -419,7 +441,7 @@ pub fn place(
                     (SplitDirection::Horizontal, Some(FIRST_PANE_PERCENT))
                 }
             };
-            host::current().create_split(target, direction, size, command)?
+            host::current().create_split(target, direction, size, command, false)?
         }
         Creation::NewWindow(session_id) => host::current().create_window(session_id, command)?,
     };
@@ -749,6 +771,9 @@ fn register(pane_id: &str, name: &str, registration: &Registration<'_>) -> Resul
     names::set(pane_id, names::KEY_LAUNCHED_AT, registration.launched_at)?;
     if let Some(cwd) = registration.cwd {
         names::set(pane_id, names::KEY_CWD, cwd)?;
+    }
+    if let Some(parent) = registration.parent {
+        names::set(pane_id, names::KEY_PARENT, parent)?;
     }
     Ok(())
 }
@@ -1131,6 +1156,7 @@ mod tests {
             cwd: cwd.map(str::to_owned),
             surface: None,
             surface_unvalidated: false,
+            ..Default::default()
         }
     }
 
