@@ -131,7 +131,7 @@ Review: `issue-261108-2323-02-code-review-20261109-142222.md` — Outcome: ACCEP
 - Lead decision included: bounded retry of read-only `orca` calls that exit 0 without a JSON answer (3 attempts, 250 ms + 500 ms); acting calls are never retried.
 - Live Orca contract run (Orca 1.4.253, Claude 2.1.319, `disableAllHooks`): full suite pass (`final2`) and the corrected Claude-teams scenario pass (`fix1-live3`); evidence `/tmp/orca-run/live-2323-02/`.
 - Suite: `cargo test --workspace --features test-fixtures` and `cargo test --workspace` — 837 passed, 0 failed.
-- Release (0.6.0) not installed: waits for harness `claude:ISSUE-261109-0201-04` per P11.2.
+- Release: 0.6.0 installed 2026-11-09 after harness `claude:ISSUE-261109-0201-04` was released (P11.2 conditions hold); backup `~/.cargo/bin/tmux-tools.prev-0.5.0`; smoke `tmux-tools --version` = 0.6.0, `tmux-tools list` exit 0.
 - Date: 2026-11-09
 
 ## Triage Notes
