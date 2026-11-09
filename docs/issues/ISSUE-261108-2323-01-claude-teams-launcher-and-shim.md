@@ -2,7 +2,7 @@
 id: ISSUE-261108-2323-01
 kind: issue
 category: enhancement
-status: needs-triage
+status: ready-for-agent
 brief_contract: agent-brief.v3
 context: tmux-tools
 summary: tmux-tools claude-teams starts Claude with a tmux Shim so that every teammate is a tmux-tools pane with team, parent, and shim_id, on tmux and on Orca by hand
@@ -139,4 +139,4 @@ contract:
 **Out of scope:** `spawn-agent claude` through the Launcher on any host (`PRD-261108-0447-01` P9); the Orca contract run additions of P10.6 and the live Orca checks of P6.5 (the P6.5 fake-`orca` test is in scope) and P8.5; harness hook, skill, and `cl` alias changes (repository `claude`); Rex and Herdr; Pane identity across an Orca restart (`ISSUE-261107-1229-01`).
 
 ## Triage Notes
-- Unresolved: `PRD-261108-0447-01` `orca-close-on-clean-exit` (P6.3) is resolved at this issue's dispatch triage.
+- 2026-11-09: `needs-triage → ready-for-agent` (dispatch readiness passed; `orca-close-on-clean-exit` decided in `PRD-261108-0447-01` P6.3).
