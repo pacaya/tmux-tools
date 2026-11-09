@@ -2,7 +2,7 @@
 id: ISSUE-261108-2323-03
 kind: issue
 category: enhancement
-status: in-progress
+status: done
 claimed_by: implement-issue@agentmac
 claimed_at: 2026-11-09T16:06:30Z
 brief_contract: agent-brief.v3
@@ -94,6 +94,22 @@ contract:
 **Bundle manifest:** `.planning-contracts/bundles/ISSUE-261108-2323-03/manifest.json`
 
 **Test seam:** `tmux-tools spawn-agent` on the isolated tmux server with a fake `claude` and the Shim (`pane_start_command`, `list --format json`, `prompt`, `wait-idle`, `kill`).
+
+## Code Review
+
+Review: `issue-261108-2323-03-code-review-20261109-163247.md` — Outcome: ACCEPTED
+
+Scope proposal (unfixed, OWNER: maintainer):
+- CODEX-1 — Leader registration race. On tmux, placement starts the pane command before `register()` writes `@tt-name` (`core/src/layout.rs`); on Orca the record handle is written after create (`core/src/host/orca.rs`). A Shim `split-window` inside that window registers the teammate as `team-<id>.tm<k>` with `parent: null`. Pre-existing on both hosts; this diff adds no new ordering. CHANGE: write the tmux registration in the same tmux command list as the split, and give the Shim a bounded re-read of the Leader registration while the Team is young (needed on Orca). OWNER: maintainer.
+
+## Resolution
+
+- Commit: `feat: on tmux, spawn-agent claude starts Claude through tmux-tools claude-teams, so a driven Leader's teammates are tmux-tools panes (ISSUE-261108-2323-03)`
+- Route: `claude — deepseek-suspended` (code-primary; Opus, effort medium) for the implementation and the one correction batch.
+- TDD: red-green at `spawn-agent` on the isolated tmux server with a fake `claude` and the Shim.
+- Review: Claude + Codex; 1 finding (L1 weak no-leak assertion) fixed in one correction batch and verified by both reviewers; CODEX-1 recorded as a maintainer scope proposal. Outcome ACCEPTED.
+- Suite: `cargo test --workspace --features test-fixtures` 488 passed, `cargo test --workspace` 355 passed, 0 failed.
+- Date: 2026-11-09
 
 ## Triage Notes
 

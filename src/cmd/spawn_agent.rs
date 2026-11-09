@@ -133,16 +133,16 @@ fn launch_argv(binary: String, profile_args: Vec<String>, extra_args: &[String])
         .collect()
 }
 
-/// The argv the pane runs. On Orca, an agent whose binary basename is `claude` starts
-/// through the Launcher, so its teammates are tmux-tools panes (PRD-261108-0447-01
-/// P9.1): `<tmux-tools path> claude-teams --claude <binary> -- <claude args>`. Every
-/// other agent, and every agent on tmux, runs its own argv.
+/// The argv the pane runs. On tmux and on Orca, an agent whose binary basename is
+/// `claude` starts through the Launcher, so its teammates are tmux-tools panes
+/// (PRD-261108-0447-01 P9.1, P9.2): `<tmux-tools path> claude-teams --claude <binary>
+/// -- <claude args>`. Every other agent runs its own argv.
 fn pane_argv(argv: &[String]) -> Result<Vec<String>> {
     let (binary, claude_args) = argv.split_first().expect("argv starts with the binary");
     let is_claude = std::path::Path::new(binary)
         .file_name()
         .is_some_and(|name| name == "claude");
-    if host::current().host() != host::Host::Orca || !is_claude {
+    if !is_claude {
         return Ok(argv.to_vec());
     }
     let tmux_tools = std::env::current_exe()

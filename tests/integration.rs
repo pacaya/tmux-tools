@@ -13341,11 +13341,11 @@ fn list_on_orca_retries_an_empty_terminal_list_answer() {
     assert_eq!(lists, 5, "at most 5 attempts: {:?}", fake.log());
 }
 
-/// PRD-261108-0447-01 P9.2 (out of scope until P11 step 3): on tmux, `spawn-agent` of
-/// an agent whose binary basename is `claude` still runs that binary directly.
+/// PRD-261108-0447-01 P9.1/P9.2: the trigger is the binary basename, not the agent
+/// name; on tmux an agent whose binary basename is not `claude` runs its own argv.
 #[cfg(feature = "test-fixtures")]
 #[test]
-fn spawn_agent_claude_on_tmux_runs_the_binary_directly() {
+fn spawn_agent_on_tmux_keeps_the_pane_command_of_a_binary_not_named_claude() {
     let _serial = serial_guard();
 
     if Command::new("tmux").arg("-V").output().is_err() {
@@ -13358,7 +13358,7 @@ fn spawn_agent_claude_on_tmux_runs_the_binary_directly() {
     std::fs::create_dir_all(config.xdg().join("bin")).unwrap();
     let argv_file = config.xdg().join("argv.txt");
     let claude = config.write_executable(
-        "bin/claude",
+        "bin/claude-wrapper",
         &format!(
             "#!/bin/sh\nprintf '%s\\n' \"$0\" \"$@\" > '{}'\nexec sleep 30\n",
             argv_file.display()
@@ -13372,11 +13372,14 @@ fn spawn_agent_claude_on_tmux_runs_the_binary_directly() {
             &["spawn-agent", "claude", "--split", "v", "--name", &name],
             config.xdg(),
         )
-        .assert_success("spawn-agent claude on tmux");
+        .assert_success("spawn-agent claude with a wrapper binary on tmux");
 
     let deadline = Instant::now() + Duration::from_secs(10);
     while !argv_file.exists() {
-        assert!(Instant::now() < deadline, "the claude binary never started");
+        assert!(
+            Instant::now() < deadline,
+            "the wrapper binary never started"
+        );
         thread::sleep(Duration::from_millis(50));
     }
     thread::sleep(Duration::from_millis(100));
@@ -13385,7 +13388,13 @@ fn spawn_agent_claude_on_tmux_runs_the_binary_directly() {
         format!("{}\n--permission-mode\nplan\n", claude.display()),
     );
     let start = pane_option(&server, &name, "pane_start_command");
-    assert!(!start.contains("claude-teams"), "{start}");
+    assert!(
+        start.starts_with(&format!(
+            "\"('{}' '--permission-mode' 'plan'); exec ",
+            claude.display()
+        )),
+        "{start}"
+    );
     server
         .cli(&["kill", "--target", &name])
         .assert_success("kill the pane");

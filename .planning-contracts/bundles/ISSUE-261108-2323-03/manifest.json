@@ -1,19 +1,19 @@
 {
-  "approval_id": "claim-20261109T160636Z",
+  "approval_id": "review-20261109T161809Z",
   "approval_object": "approval.json",
-  "approval_sha256": "480b38efb29eb14674a86eda930e94d068763fce8f98bc53f5f702bc3d7773e2",
+  "approval_sha256": "82b3c3dfd5101cae27b72ea6b2b2b3c32690ab5f419d1857f47f361cfc75fe5f",
   "entries": [
     {
-      "approved_revision": "c4d6713fb2a2807d827d4943720b83a7d7795aa5",
-      "bytes": 7614,
-      "object": "objects/573adbd5b3306acff083e23fc3f966f5587409dd7fef54ff1a4c2b2a73b8a5e2.md",
+      "approved_revision": "40eb774d967e12faf84e311bf90705d531196f48",
+      "bytes": 7612,
+      "object": "objects/e3a3698e9339ea839dfbcdb6333d5894885bd8be7a13ab7d4273d574a155ddb8.md",
       "origin": {
         "path": "docs/issues/ISSUE-261108-2323-03-tmux-spawn-agent-claude-launcher.md",
         "repository": "tmux-tools",
-        "revision": "9cdfa15652ce8f911831e1e8e71b2151505d46da"
+        "revision": "afd78933e04dc790a1cdda07b3961c7b69efe910"
       },
       "role": "issue",
-      "sha256": "573adbd5b3306acff083e23fc3f966f5587409dd7fef54ff1a4c2b2a73b8a5e2",
+      "sha256": "e3a3698e9339ea839dfbcdb6333d5894885bd8be7a13ab7d4273d574a155ddb8",
       "target": "tmux-tools:ISSUE-261108-2323-03"
     },
     {
@@ -36,7 +36,7 @@
       "origin": {
         "path": "docs/prd/PRD-261107-0825-01-host-backends-and-orca.md",
         "repository": "tmux-tools",
-        "revision": "9cdfa15652ce8f911831e1e8e71b2151505d46da"
+        "revision": "afd78933e04dc790a1cdda07b3961c7b69efe910"
       },
       "role": "source",
       "sha256": "a28eb660fd94942cad51db5869d5ba74757bff5b2ac3317f6e44699676aa3fcb",
@@ -49,7 +49,7 @@
       "origin": {
         "path": "docs/prd/PRD-261108-0447-01-claude-teams-tmux-shim.md",
         "repository": "tmux-tools",
-        "revision": "9cdfa15652ce8f911831e1e8e71b2151505d46da"
+        "revision": "afd78933e04dc790a1cdda07b3961c7b69efe910"
       },
       "role": "source",
       "sha256": "241363a4efd4189d9f149e8f5d0f3844771647554109b145a8554dc26e37d12c",
@@ -62,7 +62,7 @@
       "origin": {
         "path": "docs/prd/PRD-261108-0447-01-claude-teams-tmux-shim.md",
         "repository": "tmux-tools",
-        "revision": "9cdfa15652ce8f911831e1e8e71b2151505d46da"
+        "revision": "afd78933e04dc790a1cdda07b3961c7b69efe910"
       },
       "role": "source",
       "sha256": "0b02e86d01691d885cc6a2bc74fb665fb56bb225bfef79e30a8fbf136bfa416f",
@@ -75,7 +75,7 @@
       "origin": {
         "path": "docs/prd/PRD-261108-0447-01-claude-teams-tmux-shim.md",
         "repository": "tmux-tools",
-        "revision": "9cdfa15652ce8f911831e1e8e71b2151505d46da"
+        "revision": "afd78933e04dc790a1cdda07b3961c7b69efe910"
       },
       "role": "source",
       "sha256": "02f668ee1a94c80c0a7b4728ebffec6a91308e700cdb1e50fe0857d4397eb97c",
@@ -88,7 +88,7 @@
       "origin": {
         "path": "docs/prd/PRD-261108-0447-01-claude-teams-tmux-shim.md",
         "repository": "tmux-tools",
-        "revision": "9cdfa15652ce8f911831e1e8e71b2151505d46da"
+        "revision": "afd78933e04dc790a1cdda07b3961c7b69efe910"
       },
       "role": "source",
       "sha256": "491e059f74bb88b21be83ba2fcb07852f44d8dbb401da1357567f7e582075fc4",
@@ -101,7 +101,7 @@
       "origin": {
         "path": "docs/prd/PRD-261108-0447-01-claude-teams-tmux-shim.md",
         "repository": "tmux-tools",
-        "revision": "9cdfa15652ce8f911831e1e8e71b2151505d46da"
+        "revision": "afd78933e04dc790a1cdda07b3961c7b69efe910"
       },
       "role": "source",
       "sha256": "cdd232cbaf94d96badc6fd16204581849e9c8ba39c37ad685d7b70a573a032fa",

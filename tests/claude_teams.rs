@@ -27,7 +27,10 @@ const FAKE_ORCA: &str = include_str!("contract/fake_orca.py");
 /// The fake `claude`. Modes (environment):
 /// - `--version` prints `FAKE_CLAUDE_VERSION` (default `2.1.319 (Claude Code)`).
 /// - With `--agent-id` or `--agent-name` it is a teammate: it sleeps.
-/// - Else it is the Leader: it writes `<report>.args`/`.env`, runs `TT_BIN self`
+/// - Started without the Launcher (no `TT_TEAM`) with `FAKE_CLAUDE_NO_TEAM_SLEEP=1`,
+///   it sleeps.
+/// - Else it is the Leader: it waits until the file `FAKE_CLAUDE_WAIT_FOR` exists
+///   (when set), writes `<report>.args`/`.env`, runs `TT_BIN self`
 ///   into `<report>.self` when `FAKE_CLAUDE_SELF=1`, replays `FAKE_CLAUDE_FIXTURE`
 ///   (skipping `kill-pane` with `FAKE_CLAUDE_SKIP_KILL=1`, or pausing before the first
 ///   `kill-pane` with `FAKE_CLAUDE_PAUSE_BEFORE_KILL=1`) or runs
@@ -42,6 +45,14 @@ if args[:1] == ["--version"]:
 if "--agent-id" in args or "--agent-name" in args:
     time.sleep(3600)
     sys.exit(0)
+if "TT_TEAM" not in os.environ and os.environ.get("FAKE_CLAUDE_NO_TEAM_SLEEP") == "1":
+    time.sleep(3600)
+    sys.exit(0)
+wait_for = os.environ.get("FAKE_CLAUDE_WAIT_FOR")
+if wait_for:
+    deadline = time.time() + 300
+    while not os.path.exists(wait_for) and time.time() < deadline:
+        time.sleep(0.05)
 report = os.environ["FAKE_CLAUDE_REPORT"]
 json.dump(args, open(report + ".args", "w"))
 json.dump({k: os.environ.get(k) for k in
@@ -1542,6 +1553,255 @@ fn live_claude_spawns_a_teammate_with_no_refusal_outside_the_fixture() {
         unexpected.is_empty(),
         "refused lines outside the fixture: {unexpected:#?}"
     );
+}
+
+// --- P9.2: `spawn-agent claude` on tmux starts the Launcher ------------------------
+
+/// Run the CLI on `server` with the scene's state and config directories.
+fn cli_configured(server: &IsolatedTmuxServer, scene: &Scene, args: &[&str]) -> CmdOutput {
+    let state = scene.state().display().to_string();
+    let config = scene.dir.join("config").display().to_string();
+    server.run_cli(
+        args,
+        CliOptions {
+            env: &[("XDG_STATE_HOME", &state), ("XDG_CONFIG_HOME", &config)],
+            timeout: Some(Duration::from_secs(120)),
+            ..CliOptions::default()
+        },
+    )
+}
+
+/// The fields of a `prompt` or `wait-idle` JSON result that do not name the pane; text
+/// loses its trailing blank lines, which depend on the pane height.
+fn pane_independent_result(out: &CmdOutput, keys: &[&str]) -> (i32, Vec<Value>) {
+    let fields = match serde_json::from_str::<Value>(&out.stdout) {
+        Ok(value) => keys
+            .iter()
+            .map(|key| match &value[*key] {
+                Value::String(text) => Value::String(text.trim_end().to_owned()),
+                other => other.clone(),
+            })
+            .collect(),
+        Err(_) => vec![Value::String(out.stderr.clone())],
+    };
+    (out.status, fields)
+}
+
+/// Acceptance (ISSUE-261108-2323-03, PRD-261108-0447-01 P9.1/P9.2): on tmux,
+/// `spawn-agent claude --name lead` runs `<tmux-tools> claude-teams --claude <binary> --
+/// <claude args>` inside the Keep-alive wrap; `lead` keeps `agent` and Surface, its
+/// teammate is `lead.tm1` with `team` and `parent: "lead"`; `prompt` and `wait-idle`
+/// on `lead` give the result they give for the same fake `claude` started without the
+/// Launcher; `kill --target lead` closes the Leader, and no pane is left.
+#[test]
+fn spawn_agent_claude_on_tmux_starts_claude_through_the_launcher() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    let harness_pane = server.pane().to_owned();
+    let scene = Scene::new("spawn-lead");
+    std::os::unix::fs::symlink(
+        scene.bin().join("claude"),
+        scene.bin().join("claude-direct"),
+    )
+    .unwrap();
+    std::fs::create_dir_all(scene.dir.join("config/tmux-tools")).unwrap();
+    let agents_toml = scene.dir.join("config/tmux-tools/agents.toml");
+    let start = scene.dir.join("start");
+    let fixture_path = fixture("2.1.319").display().to_string();
+    // A pane started by tmux gets the server's global environment.
+    for (key, value) in scene.base_env().into_iter().chain([
+        ("FAKE_CLAUDE_FIXTURE".to_owned(), fixture_path),
+        ("FAKE_CLAUDE_PAUSE_BEFORE_KILL".to_owned(), "1".to_owned()),
+        ("FAKE_CLAUDE_NO_TEAM_SLEEP".to_owned(), "1".to_owned()),
+        (
+            "FAKE_CLAUDE_WAIT_FOR".to_owned(),
+            start.display().to_string(),
+        ),
+    ]) {
+        server
+            .tmux(&["set-environment", "-g", &key, &value])
+            .assert_success("set-environment");
+    }
+
+    // The same fake claude, started without the Launcher (binary basename not `claude`).
+    std::fs::write(
+        &agents_toml,
+        format!(
+            "[claude]\nbinary = \"{}\"\n",
+            scene.bin().join("claude-direct").display()
+        ),
+    )
+    .unwrap();
+    cli_configured(
+        &server,
+        &scene,
+        &["spawn-agent", "claude", "--split", "v", "--name", "direct"],
+    )
+    .assert_success("spawn-agent claude --name direct");
+
+    let claude = scene.bin().join("claude");
+    std::fs::write(
+        &agents_toml,
+        format!("[claude]\nbinary = \"{}\"\n", claude.display()),
+    )
+    .unwrap();
+    cli_configured(
+        &server,
+        &scene,
+        &["spawn-agent", "claude", "--split", "v", "--name", "lead"],
+    )
+    .assert_success("spawn-agent claude --name lead");
+    std::fs::write(&start, "1").unwrap();
+
+    let paused = PathBuf::from(format!("{}.paused", scene.report().display()));
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while !paused.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "the fake Leader never paused; lead shows:\n{}",
+            server
+                .tmux(&[
+                    "capture-pane",
+                    "-p",
+                    "-t",
+                    &pane_id_by_name(&server, "lead").unwrap()
+                ])
+                .stdout
+        );
+        thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(
+        scene.read_report(".partial")["mismatches"],
+        serde_json::json!([])
+    );
+
+    let tmux_tools = std::fs::canonicalize(BIN).unwrap();
+    let shell = std::env::var("SHELL")
+        .ok()
+        .filter(|shell| !shell.is_empty())
+        .unwrap_or_else(|| "/bin/sh".to_owned());
+    let lead_pane = pane_id_by_name(&server, "lead").unwrap();
+    let start_command = |pane: &str| {
+        let out = server.tmux(&["display-message", "-p", "-t", pane, "#{pane_start_command}"]);
+        out.assert_success("pane_start_command");
+        out.stdout.trim_end_matches('\n').to_owned()
+    };
+    assert_eq!(
+        start_command(&lead_pane),
+        format!(
+            // tmux shows the start command as one double-quoted word.
+            "\"('{}' 'claude-teams' '--claude' '{}' '--' '--permission-mode' 'plan'); exec {shell}\"",
+            tmux_tools.display(),
+            claude.display()
+        )
+    );
+
+    let teams = scene.team_dirs();
+    assert_eq!(teams.len(), 1, "one team directory: {teams:?}");
+    let team_id = teams[0].file_name().unwrap().to_str().unwrap().to_owned();
+    let rows = list_json(&server, &scene);
+    let lead = row(&rows, "lead").unwrap_or_else(|| panic!("lead listed: {rows:#?}"));
+    assert_eq!(lead["agent"], "claude", "{lead}");
+    let tm1 = row(&rows, "lead.tm1").unwrap_or_else(|| panic!("lead.tm1 listed: {rows:#?}"));
+    assert_eq!(tm1["team"], team_id.as_str(), "{tm1}");
+    assert_eq!(tm1["parent"], "lead", "{tm1}");
+    let surface = |pane: &str| {
+        server
+            .tmux(&["display-message", "-p", "-t", pane, "#{@tt-surface}"])
+            .stdout
+            .trim()
+            .to_owned()
+    };
+    assert_eq!(surface(&lead_pane), "rich");
+
+    // The Leader answers `prompt` and `wait-idle` as the same fake claude without the
+    // Launcher does.
+    let prompt_keys = [
+        "prompt_sent",
+        "output_since_prompt",
+        "reason",
+        "one_submission_delivery",
+        "turn_observed",
+        "complete",
+    ];
+    let wait_keys = ["reason", "final_capture"];
+    let mut results = Vec::new();
+    for name in ["direct", "lead"] {
+        let prompt = cli_configured(
+            &server,
+            &scene,
+            &[
+                "prompt",
+                "--target",
+                name,
+                "--timeout",
+                "30",
+                "--format",
+                "json",
+                "hello",
+            ],
+        );
+        let wait = cli_configured(
+            &server,
+            &scene,
+            &[
+                "wait-idle",
+                "--target",
+                name,
+                "--timeout",
+                "30",
+                "--format",
+                "json",
+            ],
+        );
+        results.push((
+            pane_independent_result(&prompt, &prompt_keys),
+            pane_independent_result(&wait, &wait_keys),
+        ));
+    }
+    assert_eq!(results[1], results[0], "lead (right) and direct (left)");
+    assert_eq!((results[1].0).0, 0, "prompt on lead: {:?}", results[1].0);
+    assert_eq!((results[1].1).0, 0, "wait-idle on lead: {:?}", results[1].1);
+
+    // The fake Leader closes lead.tm1 itself and exits 0.
+    scene.go();
+    let deadline = Instant::now() + Duration::from_secs(120);
+    while !scene.report().exists() || pane_id_by_name(&server, "lead.tm1").is_some() {
+        assert!(Instant::now() < deadline, "the fake Leader never finished");
+        thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(scene.read_report("")["mismatches"], serde_json::json!([]));
+
+    assert_eq!(
+        pane_id_by_name(&server, "lead").as_deref(),
+        Some(lead_pane.as_str())
+    );
+    cli(&server, &scene, &["kill", "--target", "lead"]).assert_success("kill lead");
+    let tmux_panes = || -> std::collections::BTreeSet<String> {
+        let out = server.tmux(&["list-panes", "-a", "-F", "#{pane_id}"]);
+        out.assert_success("tmux list-panes -a");
+        out.stdout.lines().map(str::to_owned).collect()
+    };
+    assert!(
+        !tmux_panes().contains(&lead_pane),
+        "lead's pane {lead_pane} is closed"
+    );
+    let rows = list_json(&server, &scene);
+    assert!(row(&rows, "lead").is_none(), "{rows:#?}");
+    cli(&server, &scene, &["kill", "--target", "direct"]).assert_success("kill direct");
+
+    // No leaked pane: tmux-tools and tmux itself both see only the harness pane.
+    let only_harness = std::collections::BTreeSet::from([harness_pane.clone()]);
+    let rows = list_json(&server, &scene);
+    let listed: std::collections::BTreeSet<String> = rows
+        .iter()
+        .map(|row| {
+            let pane = row["pane"].as_str().unwrap();
+            pane[pane.rfind('%').expect("a pane id in the pane column")..].to_owned()
+        })
+        .collect();
+    assert_eq!(listed, only_harness, "list --all: {rows:#?}");
+    assert_eq!(tmux_panes(), only_harness, "tmux list-panes -a");
 }
 
 fn argv_of(entry: &Value) -> Vec<String> {
