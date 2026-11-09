@@ -24,6 +24,12 @@ use super::{original_environment, wait_for_child, CmdOutput, BIN, FAKE_TUI_BIN};
 /// The opt-in switch of the live Orca run.
 const LIVE_SWITCH: &str = "TMUX_TOOLS_LIVE_ORCA";
 
+/// Optional: run only the live scenarios whose label contains this text.
+const ONLY_SWITCH: &str = "TMUX_TOOLS_LIVE_ORCA_ONLY";
+
+/// Optional: a directory where the Claude-teams scenario saves its raw observations.
+const EVIDENCE_SWITCH: &str = "TMUX_TOOLS_LIVE_ORCA_EVIDENCE";
+
 const SHIM: &str = include_str!("orca_shim.py");
 
 const HEXECHO: &str = r#"
@@ -196,6 +202,17 @@ args = []
             hexecho = self.file("hexecho.py").display(),
             self_script = self_script.display(),
         );
+        // The Claude-teams scenario starts the `claude` of the caller's `PATH` by its
+        // absolute path, so the Orca pane's own `PATH` does not decide which one runs.
+        let claude = original("PATH")
+            .unwrap_or_default()
+            .split(':')
+            .map(|entry| Path::new(entry).join("claude"))
+            .find(|candidate| candidate.is_file());
+        let toml = match claude {
+            Some(claude) => format!("{toml}\n[claude]\nbinary = \"{}\"\n", claude.display()),
+            None => toml,
+        };
         std::fs::write(self.dir.join("xdg-config/tmux-tools/agents.toml"), toml).unwrap();
     }
 
@@ -612,6 +629,11 @@ const TMUX_LIST_ROW_KEYS: &[&str] = &[
     "status",
     "last_activity",
     "host_state",
+    // PRD-261108-0447-01 P8.2.
+    "parent",
+    "team",
+    "shim_id",
+    "orphan",
 ];
 const TMUX_LAUNCH_KEYS: &[&str] = &[
     "host",
@@ -701,10 +723,22 @@ fn orca_contract_suite() {
             runtime_without_prompt_delivery,
         ),
         ("TMUX_TOOLS_HOST=orca over $TMUX", override_wins_over_tmux),
+        (
+            "claude teams: spawn-agent claude through the Launcher (PRD-261108-0447-01 P10.6)",
+            claude_teams_through_spawn_agent,
+        ),
     ];
+    // Development aid: run only the scenarios whose label contains this text.
+    let only = original(ONLY_SWITCH);
 
     let mut failures = Vec::new();
     for (label, scenario) in scenarios {
+        if only
+            .as_ref()
+            .is_some_and(|only| !label.contains(only.as_str()))
+        {
+            continue;
+        }
         eprintln!("orca contract: {label}");
         if let Err(panic) =
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| scenario(&run)))
@@ -1990,6 +2024,728 @@ fn override_wins_over_tmux(run: &Run) {
     assert_eq!(out["host"], "orca");
 }
 
+// --- Claude teams through spawn-agent (PRD-261108-0447-01 P10.6) ---------------------
+
+/// The call options of the Claude-teams scenario. The Launcher in an Orca pane runs
+/// with Orca's environment, not the run's, so its Team and the teammates' Pane records
+/// live in the default state directory; the scenario's CLI calls use the same one.
+fn real_state<'a>() -> Call<'a> {
+    match original("XDG_STATE_HOME") {
+        Some(dir) => Call {
+            env: vec![("XDG_STATE_HOME", dir)],
+            ..Call::default()
+        },
+        None => Call {
+            remove: vec!["XDG_STATE_HOME"],
+            ..Call::default()
+        },
+    }
+}
+
+/// Save one raw observation when [`EVIDENCE_SWITCH`] names a directory.
+fn evidence(file: &str, body: &str) {
+    if let Some(dir) = original(EVIDENCE_SWITCH) {
+        let dir = PathBuf::from(dir);
+        let _ = std::fs::create_dir_all(&dir);
+        let _ = std::fs::write(dir.join(file), body);
+    }
+}
+
+fn evidence_json(file: &str, value: &Value) {
+    evidence(file, &serde_json::to_string_pretty(value).unwrap());
+}
+
+/// The `orca terminal list --json` row of `handle`.
+fn terminal_row(run: &Run, handle: &str) -> Option<Value> {
+    run.terminals()
+        .into_iter()
+        .find(|terminal| terminal["handle"] == handle)
+}
+
+/// `<tabId>:<leafId>` of `handle` (PRD-261107-0825-01 P9.10).
+fn pane_key(terminal: &Value) -> String {
+    format!(
+        "{}:{}",
+        terminal["tabId"].as_str().unwrap(),
+        terminal["leafId"].as_str().unwrap()
+    )
+}
+
+/// The `orca worktree ps --json` agent row whose `paneKey` is `key`.
+fn agent_row(ps: &Value, key: &str) -> Option<Value> {
+    ps["worktrees"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|worktree| worktree["agents"].as_array())
+        .flatten()
+        .find(|row| row["paneKey"] == key)
+        .cloned()
+}
+
+/// The main-agent state of a row: `mainAgent.state`, else the row's `state`.
+fn main_state(row: &Value) -> Option<&str> {
+    let main = &row["mainAgent"];
+    if main.is_object() {
+        main["state"].as_str().or_else(|| row["state"].as_str())
+    } else {
+        row["state"].as_str()
+    }
+}
+
+/// The Host state PRD-261107-0825-01 P9.10 gives for an agent row.
+fn expected_host_state(row: Option<&Value>) -> Value {
+    let Some(row) = row else {
+        return Value::Null;
+    };
+    if row["hasLivePty"] == json!(false) {
+        return Value::Null;
+    }
+    let Some(state) = main_state(row) else {
+        return Value::Null;
+    };
+    let subagent_working = row["subagents"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .any(|subagent| subagent["state"] == "working");
+    if subagent_working {
+        return json!("working");
+    }
+    match state {
+        "working" => json!("working"),
+        "blocked" | "waiting" => json!("blocked"),
+        "done" => json!("done"),
+        _ => Value::Null,
+    }
+}
+
+/// Whether PRD-261107-0825-01 P9.6 guarantees delivery to a pane registered with agent
+/// `claude`, from `terminal show` and its agent row (the capability is checked once).
+fn expected_guaranteed(show: &Value, row: Option<&Value>) -> bool {
+    show["agentIdentity"] == "claude"
+        && row.is_some_and(|row| {
+            row["hasLivePty"] == json!(true) && !expected_host_state(Some(row)).is_null()
+        })
+}
+
+/// The `mainAgent` of the agent row whose `paneKey` is `key` (`null` without a row or
+/// a `mainAgent`). A row's `subagents[]` is not its main agent's status.
+fn main_agent(ps: &Value, key: &str) -> Value {
+    agent_row(ps, key).map_or(Value::Null, |row| row["mainAgent"].clone())
+}
+
+/// P10.6: a transition of the teammate's own main agent shows on the teammate row and
+/// not on the Leader row. `before` is a settled `orca worktree ps` answer, `after` the
+/// first answer in which the teammate row's `mainAgent` changed.
+fn judge_teammate_transition(
+    before: &Value,
+    after: &Value,
+    lead_key: &str,
+    tm_key: &str,
+) -> Result<(), String> {
+    let (tm_before, tm_after) = (main_agent(before, tm_key), main_agent(after, tm_key));
+    let (lead_before, lead_after) = (main_agent(before, lead_key), main_agent(after, lead_key));
+    let started = |main: &Value| main["stateStartedAt"].as_u64();
+    let tm_moved = tm_after.is_object()
+        && (started(&tm_after) > started(&tm_before) || tm_after["state"] != tm_before["state"]);
+    if !tm_moved {
+        return Err(format!(
+            "the teammate row's mainAgent did not take the transition: {tm_before} -> {tm_after}"
+        ));
+    }
+    if started(&lead_after) != started(&lead_before) || lead_after["state"] != lead_before["state"]
+    {
+        return Err(format!(
+            "the Leader row's mainAgent took the teammate's transition: {lead_before} -> \
+             {lead_after} (teammate {tm_before} -> {tm_after})"
+        ));
+    }
+    Ok(())
+}
+
+/// `orca worktree ps --json` through `real_orca`, reading `result` (usable off the
+/// test thread, where a [`Run`] is not).
+fn worktree_ps(real_orca: &Path, extra_env: &[(String, String)]) -> Option<Value> {
+    let out = Command::new(real_orca)
+        .args(["worktree", "ps", "--json"])
+        .envs(extra_env.iter().map(|(key, value)| (key, value)))
+        .output()
+        .ok()?;
+    let parsed: Value = serde_json::from_slice(&out.stdout).ok()?;
+    Some(parsed["result"].clone())
+}
+
+/// The Orca observation of `handle` that P8.5 compares with: `terminal show` and the
+/// pane's agent row.
+fn observe(run: &Run, handle: &str) -> (Value, Option<Value>) {
+    let show = run.orca(&["terminal", "show", "--terminal", handle])["terminal"].clone();
+    let key = pane_key(&show);
+    let row = agent_row(&run.orca(&["worktree", "ps"]), &key);
+    (show, row)
+}
+
+/// Run `check` between two Orca observations of `handle` until both observations give
+/// the same expected value, then return that value with the check's result.
+fn settled<T>(
+    run: &Run,
+    handle: &str,
+    expected: impl Fn(&Value, Option<&Value>) -> Value,
+    mut check: impl FnMut() -> T,
+) -> (Value, T, Value) {
+    for _ in 0..8 {
+        let (show, row) = observe(run, handle);
+        let before = expected(&show, row.as_ref());
+        let result = check();
+        let (show, row) = observe(run, handle);
+        let after = expected(&show, row.as_ref());
+        if before == after {
+            return (before, result, json!({"show": show, "row": row}));
+        }
+        std::thread::sleep(Duration::from_secs(1));
+    }
+    panic!("{handle}: the Orca observation never held still across a check");
+}
+
+fn real_rows(run: &Run) -> Vec<Value> {
+    run.json(&["list", "--format", "json"], real_state())
+        .as_array()
+        .unwrap()
+        .clone()
+}
+
+fn real_row(run: &Run, name: &str) -> Option<Value> {
+    real_rows(run).into_iter().find(|row| row["name"] == name)
+}
+
+fn poll<T>(what: &str, timeout: Duration, mut probe: impl FnMut() -> Option<T>) -> T {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Some(value) = probe() {
+            return value;
+        }
+        assert!(Instant::now() < deadline, "{what}: not within {timeout:?}");
+        std::thread::sleep(Duration::from_secs(1));
+    }
+}
+
+fn real_screen(run: &Run, target: &str) -> String {
+    let out = run.cli(&["capture", "--target", target], real_state());
+    out.assert_success(&format!("capture {target}"));
+    out.stdout
+}
+
+/// Spawn `claude` as Leader `name` through `spawn-agent` with hooks off (harness
+/// P9.6), and wait until its TUI is up. Every pane later opened in the Leader's tab is
+/// recorded as the run's (a teammate is a split of the Leader).
+fn spawn_leader(run: &Run, name: &str) -> String {
+    let args = [
+        "spawn-agent",
+        "claude",
+        "--access",
+        "full-access",
+        "--name",
+        name,
+        "--format",
+        "json",
+        "--",
+        "--settings",
+        r#"{"disableAllHooks":true}"#,
+    ];
+    let out = run.cli_creating(&args, real_state());
+    out.assert_success(&format!("{args:?}"));
+    let spawned: Value = serde_json::from_str(out.stdout.trim()).unwrap();
+    evidence_json(&format!("{name}-spawn.json"), &spawned);
+    let handle = spawned["pane_id"].as_str().unwrap().to_owned();
+    run.track(&handle);
+    let terminals = run.terminals();
+    let tab = terminals
+        .iter()
+        .find(|terminal| terminal["handle"] == handle.as_str())
+        .and_then(|terminal| terminal["tabId"].as_str().map(str::to_owned))
+        .expect("the Leader pane is listed");
+    let before = terminals
+        .iter()
+        .filter(|terminal| terminal["tabId"] == tab.as_str())
+        .filter_map(|terminal| terminal["handle"].as_str().map(str::to_owned))
+        .collect();
+    run.split_tabs.borrow_mut().push((tab, before));
+    poll(
+        &format!("{name}: Claude's TUI"),
+        Duration::from_secs(120),
+        || {
+            let screen = real_screen(run, name);
+            screen.contains("bypass permissions").then_some(())
+        },
+    );
+    std::thread::sleep(Duration::from_secs(3));
+    handle
+}
+
+/// Prompt Leader `name` to start one teammate that runs `task` with its Bash tool,
+/// and wait for teammate `<name>.tm1`; returns its `list --format json` row.
+fn start_teammate(run: &Run, name: &str, task: &str) -> Value {
+    let text = format!(
+        "Create an agent team now with exactly one teammate. Give the teammate this task: \
+         run the shell command `{task}` with your Bash tool, then reply DONE and wait for \
+         further messages. Do not run that command yourself and do nothing else."
+    );
+    let out = run.cli(
+        &[
+            "prompt",
+            "--target",
+            name,
+            "--timeout",
+            "30",
+            "--format",
+            "json",
+            &text,
+        ],
+        real_state(),
+    );
+    evidence(&format!("{name}-spawn-prompt.txt"), &format!("{out:?}"));
+    assert!(
+        !out.stdout.contains("\"refused\""),
+        "a single-line prompt is never refused: {out:?}"
+    );
+    let teammate = format!("{name}.tm1");
+    let row = poll(
+        &format!("{teammate} in tmux-tools list"),
+        Duration::from_secs(240),
+        || real_row(run, &teammate),
+    );
+    if let Some(handle) = row["pane"].as_str() {
+        run.track(handle);
+    }
+    row
+}
+
+/// Send `/exit` to Leader `name` only when its input box is empty.
+fn clean_exit(run: &Run, name: &str) {
+    let screen = poll(
+        &format!("{name}: an empty input box"),
+        Duration::from_secs(180),
+        || {
+            let screen = real_screen(run, name);
+            let input = screen
+                .lines()
+                .rev()
+                .find(|line| line.trim_start().starts_with('❯'))?;
+            (input.trim_start().trim_start_matches('❯').trim().is_empty()).then_some(screen)
+        },
+    );
+    evidence(&format!("{name}-before-exit.txt"), &screen);
+    run.cli(
+        &["send", "--target", name, "--literal", "/exit"],
+        real_state(),
+    )
+    .assert_success("type /exit");
+    std::thread::sleep(Duration::from_millis(700));
+    run.cli(&["send-enter", "--target", name], real_state())
+        .assert_success("submit /exit");
+}
+
+/// The `team.json` of the Team whose Leader is the pane `handle`, from the default
+/// state directory the Launcher uses.
+fn leader_team(handle: &str) -> Value {
+    let state = original("XDG_STATE_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(original("HOME").unwrap()).join(".local/state"));
+    std::fs::read_dir(state.join("tmux-tools/teams"))
+        .expect("the teams directory")
+        .flatten()
+        .filter_map(|entry| std::fs::read(entry.path().join("team.json")).ok())
+        .filter_map(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+        .find(|team| team["leader"]["handle"] == handle)
+        .unwrap_or_else(|| panic!("no team has Leader {handle}"))
+}
+
+fn claude_teams_through_spawn_agent(run: &Run) {
+    let capabilities = run.orca(&["status"])["runtime"]["capabilities"].clone();
+    assert!(
+        capabilities
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|capability| capability == "terminal.prompt-delivery.v1"),
+        "this run needs terminal.prompt-delivery.v1"
+    );
+    let lead = run.n("lead");
+    let lead_handle = spawn_leader(run, &lead);
+    let lead_row = real_row(run, &lead).expect("lead is listed");
+    assert_eq!(lead_row["agent"], "claude", "{lead_row}");
+
+    // Teammate pane environment (P6.5).
+    let env_file = run.file("teammate-env.txt");
+    let task = format!(
+        "printf '%s\\n' \"$ORCA_PANE_KEY\" \"$ORCA_TERMINAL_HANDLE\" \"$ORCA_TAB_ID\" > {}",
+        env_file.display()
+    );
+    let teammate = format!("{lead}.tm1");
+    let tm_row = start_teammate(run, &lead, &task);
+    evidence_json("teammate-list-row.json", &tm_row);
+    assert!(tm_row["team"].is_string(), "{tm_row}");
+    assert_eq!(tm_row["parent"], lead.as_str(), "{tm_row}");
+    assert_eq!(tm_row["orphan"], false, "{tm_row}");
+    let tm_handle = tm_row["pane"].as_str().unwrap().to_owned();
+    assert_ne!(tm_handle, lead_handle);
+
+    let tm_terminal = poll(
+        &format!("{teammate}: agentIdentity claude in orca terminal list"),
+        Duration::from_secs(120),
+        || terminal_row(run, &tm_handle).filter(|terminal| terminal["agentIdentity"] == "claude"),
+    );
+    evidence_json("teammate-terminal-row.json", &tm_terminal);
+    let lead_terminal = terminal_row(run, &lead_handle).expect("lead is listed by orca");
+    evidence_json("lead-terminal-row.json", &lead_terminal);
+
+    let values: Vec<String> = poll(
+        &format!("{teammate}: its printed environment"),
+        Duration::from_secs(240),
+        || {
+            let text = std::fs::read_to_string(&env_file).ok()?;
+            let lines: Vec<String> = text.lines().map(str::to_owned).collect();
+            (lines.len() == 3).then_some(lines)
+        },
+    );
+    evidence("teammate-env.txt", &values.join("\n"));
+    assert_eq!(values[0], pane_key(&tm_terminal), "ORCA_PANE_KEY");
+    assert_eq!(values[1], tm_handle, "ORCA_TERMINAL_HANDLE");
+    assert_eq!(
+        values[2],
+        tm_terminal["tabId"].as_str().unwrap(),
+        "ORCA_TAB_ID"
+    );
+    assert_ne!(
+        values[0],
+        pane_key(&lead_terminal),
+        "ORCA_PANE_KEY is not the Leader's"
+    );
+    assert_ne!(
+        values[1], lead_handle,
+        "ORCA_TERMINAL_HANDLE is not the Leader's"
+    );
+
+    // Orca shows the teammate's status on the teammate's own pane (P6.5).
+    let tm_key = pane_key(&tm_terminal);
+    let lead_key = pane_key(&lead_terminal);
+    let ps = poll(
+        &format!("{teammate}: its own agent row"),
+        Duration::from_secs(120),
+        || {
+            let ps = run.orca(&["worktree", "ps"]);
+            agent_row(&ps, &tm_key)
+                .filter(|row| !expected_host_state(Some(row)).is_null())
+                .map(|_| ps)
+        },
+    );
+    evidence_json("worktree-ps-with-teammate.json", &ps);
+    let rows_with_tm_key = ps["worktrees"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|worktree| worktree["agents"].as_array())
+        .flatten()
+        .filter(|row| row["paneKey"] == tm_key.as_str())
+        .count();
+    assert_eq!(
+        rows_with_tm_key, 1,
+        "one agent row carries the teammate's pane key"
+    );
+    // A transition of the teammate's own main agent, driven by a prompt into the
+    // teammate pane (P8.4) once both main agents have settled, shows on the teammate
+    // row and not on the Leader row (P10.6). The Leader row's `subagents[]` entry for
+    // the teammate is not the teammate's status and is not compared.
+    let mut stable = 0;
+    let mut last: Option<(Value, Value)> = None;
+    let mut seen = Vec::new();
+    let settled_ps = poll(
+        &format!("{lead} and {teammate}: settled main agents"),
+        Duration::from_secs(240),
+        || {
+            let ps = run.orca(&["worktree", "ps"]);
+            let mains = (main_agent(&ps, &lead_key), main_agent(&ps, &tm_key));
+            seen.push(json!({"at": now_ms(), "lead": mains.0, "teammate": mains.1}));
+            evidence_json("teammate-transition-settle.json", &json!(seen));
+            // While a teammate lives, Orca can keep the Leader's main agent `working`
+            // with an unchanged `stateStartedAt` (live run): settled means unchanged.
+            let idle = mains.1["state"].is_string() && mains.1["state"] != "working";
+            stable = if idle && last.as_ref() == Some(&mains) {
+                stable + 1
+            } else {
+                0
+            };
+            last = Some(mains);
+            std::thread::sleep(Duration::from_secs(1));
+            (stable >= 3).then_some(ps)
+        },
+    );
+    evidence_json("teammate-transition-before.json", &settled_ps);
+    let tm_before = main_agent(&settled_ps, &tm_key);
+    let watcher = {
+        let (real_orca, extra_env, tm_key) =
+            (run.real_orca.clone(), run.extra_env.clone(), tm_key.clone());
+        std::thread::spawn(move || {
+            // The first answer with a changed teammate main agent, and the first one
+            // after it with the teammate's turn over (a Leader that stays `working`
+            // could hide a `working` taken from the teammate, never its `done`).
+            let mut first = None;
+            let deadline = Instant::now() + Duration::from_secs(120);
+            while Instant::now() < deadline {
+                if let Some(ps) = worktree_ps(&real_orca, &extra_env) {
+                    let main = main_agent(&ps, &tm_key);
+                    if main != tm_before {
+                        if main["state"] != "working" {
+                            return (first.or_else(|| Some(ps.clone())), Some(ps));
+                        }
+                        first.get_or_insert(ps);
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(300));
+            }
+            (first, None)
+        })
+    };
+    let tm_prompt = run.cli(
+        &[
+            "prompt",
+            "--target",
+            &teammate,
+            "--timeout",
+            "60",
+            "--format",
+            "json",
+            "Reply with the single word PING. Do nothing else.",
+        ],
+        real_state(),
+    );
+    evidence("teammate-transition-prompt.txt", &format!("{tm_prompt:?}"));
+    let (first_ps, over_ps) = watcher.join().unwrap();
+    let first_ps = first_ps.expect("the teammate row's mainAgent changed after the prompt");
+    evidence_json("teammate-transition-after.json", &first_ps);
+    let over_ps = over_ps.expect("the teammate row's mainAgent left `working` after the prompt");
+    evidence_json("teammate-transition-over.json", &over_ps);
+    for ps in [&first_ps, &over_ps] {
+        if let Err(problem) = judge_teammate_transition(&settled_ps, ps, &lead_key, &tm_key) {
+            panic!("{problem}");
+        }
+    }
+
+    // P8.5: host_state of the Leader in list and wait-idle, and a multi-line prompt.
+    let (expected, listed, observed) = settled(
+        run,
+        &lead_handle,
+        |_, row| expected_host_state(row),
+        || real_row(run, &lead).expect("lead is listed")["host_state"].clone(),
+    );
+    evidence_json(
+        "lead-host-state-list.json",
+        &json!({"expected": expected, "list": listed, "orca": observed}),
+    );
+    assert_eq!(listed, expected, "list host_state of {lead}");
+    let (expected, waited, observed) = settled(
+        run,
+        &lead_handle,
+        |_, row| expected_host_state(row),
+        || {
+            let out = run.cli(
+                &[
+                    "wait-idle",
+                    "--target",
+                    &lead,
+                    "--timeout",
+                    "5",
+                    "--format",
+                    "json",
+                ],
+                real_state(),
+            );
+            serde_json::from_str::<Value>(out.stdout.trim())
+                .unwrap_or_else(|_| panic!("wait-idle --format json: {out:?}"))
+        },
+    );
+    evidence_json(
+        "lead-host-state-wait-idle.json",
+        &json!({"expected": expected, "wait_idle": waited, "orca": observed}),
+    );
+    assert_eq!(
+        waited["host_state"], expected,
+        "wait-idle host_state of {lead}"
+    );
+
+    // wait-idle on the Leader ends by --until whatever its Host state is (P8.5).
+    let until = run.cli(
+        &[
+            "wait-idle",
+            "--target",
+            &lead,
+            "--until",
+            "bypass permissions",
+            "--timeout",
+            "60",
+            "--format",
+            "json",
+        ],
+        real_state(),
+    );
+    evidence("lead-wait-idle-until.txt", &format!("{until:?}"));
+    until.assert_success("wait-idle --until on the Leader");
+
+    // Exactly one multi-line prompt, judged by the P9.6 determination from the Orca
+    // observation before it; when the observation after it differs, a result that
+    // matches either determination is accepted. Never resent.
+    let (show, row) = observe(run, &lead_handle);
+    let guaranteed_before = expected_guaranteed(&show, row.as_ref());
+    let observed_before = json!({"show": show, "row": row});
+    let prompted = run.cli(
+        &[
+            "prompt",
+            "--target",
+            &lead,
+            "--timeout",
+            "20",
+            "--format",
+            "json",
+            "Reply with the single word PONG.\nDo nothing else.",
+        ],
+        real_state(),
+    );
+    let (show, row) = observe(run, &lead_handle);
+    let guaranteed_after = expected_guaranteed(&show, row.as_ref());
+    let observed_after = json!({"show": show, "row": row});
+    evidence(
+        "lead-multi-line-prompt.txt",
+        &format!(
+            "guaranteed_before={guaranteed_before}\nguaranteed_after={guaranteed_after}\n\
+             orca_before={observed_before}\norca_after={observed_after}\n{prompted:?}"
+        ),
+    );
+    let result: Value = serde_json::from_str(prompted.stdout.trim())
+        .unwrap_or_else(|_| panic!("prompt --format json: {prompted:?}"));
+    // Guaranteed: sent as one submission. Not guaranteed: the Surface `rich` declares
+    // bracketed paste, so it is refused before any transmission.
+    let matches = |guaranteed: bool| {
+        if guaranteed {
+            result["one_submission_delivery"] == "guaranteed"
+        } else {
+            prompted.status == 1 && result["one_submission_delivery"] == "refused"
+        }
+    };
+    if guaranteed_before == guaranteed_after {
+        assert!(
+            matches(guaranteed_before),
+            "guaranteed={guaranteed_before}: {prompted:?}"
+        );
+    } else {
+        assert!(
+            matches(guaranteed_before) || matches(guaranteed_after),
+            "guaranteed before={guaranteed_before} after={guaranteed_after}: {prompted:?}"
+        );
+    }
+
+    // A clean Leader exit closes the teammate (P10.6, Verification item 3).
+    clean_exit(run, &lead);
+    let mut confirmed = false;
+    poll(
+        &format!("{teammate}: closed by the clean exit"),
+        Duration::from_secs(60),
+        || {
+            let screen = run.cli(&["capture", "--target", &lead], real_state());
+            evidence(&format!("{lead}-after-exit.txt"), &screen.stdout);
+            // Claude 2.1.319 asks before it exits with a live teammate; its first
+            // choice, selected by default, is "Exit and stop tasks".
+            if !confirmed && screen.stdout.contains("1. Exit and stop tasks") {
+                evidence(&format!("{lead}-exit-dialog.txt"), &screen.stdout);
+                run.cli(&["send-enter", "--target", &lead], real_state())
+                    .assert_success("confirm the exit");
+                confirmed = true;
+            }
+            (!run.orca_handles().contains(&tm_handle)).then_some(())
+        },
+    );
+    poll(
+        &format!("{teammate}: gone from tmux-tools list"),
+        Duration::from_secs(30),
+        || real_row(run, &teammate).is_none().then_some(()),
+    );
+    run.cli(&["kill", "--target", &lead], real_state())
+        .assert_success("kill the Leader");
+    assert!(!run.orca_handles().contains(&lead_handle));
+
+    // A killed Leader leaves an Orphan that list reports, and kill closes it.
+    let crash = run.n("crash");
+    let crash_handle = spawn_leader(run, &crash);
+    let orphan = format!("{crash}.tm1");
+    let orphan_row = start_teammate(run, &crash, "true");
+    let orphan_handle = orphan_row["pane"].as_str().unwrap().to_owned();
+    // The crash: the Leader's Claude dies by SIGKILL, so it closes nothing, and the
+    // Launcher ends with a failed exit.
+    let team = leader_team(&crash_handle);
+    evidence_json("crash-team.json", &team);
+    let launcher = team["launcher_pid"].as_u64().unwrap().to_string();
+    let children = Command::new("pgrep")
+        .args(["-P", &launcher])
+        .output()
+        .expect("pgrep");
+    let claude_pid = String::from_utf8_lossy(&children.stdout)
+        .split_whitespace()
+        .next()
+        .unwrap_or_else(|| panic!("the Launcher {launcher} has no child"))
+        .to_owned();
+    let killed = Command::new("kill")
+        .args(["-KILL", &claude_pid])
+        .status()
+        .expect("kill");
+    assert!(killed.success(), "kill -KILL {claude_pid}");
+    let row = poll(
+        &format!("{orphan}: orphan true"),
+        Duration::from_secs(30),
+        || {
+            let rows = real_rows(run);
+            evidence_json("orphan-poll-list.json", &json!(rows));
+            rows.into_iter()
+                .find(|row| row["name"] == orphan.as_str())
+                .filter(|row| row["orphan"] == true)
+        },
+    );
+    evidence_json("orphan-list-row.json", &row);
+    let table = run.cli(&["list"], real_state());
+    evidence("orphan-list-table.txt", &table.stdout);
+    assert!(
+        table.stdout.contains(&format!("orphan:{crash}")),
+        "{}",
+        table.stdout
+    );
+    assert!(
+        run.orca_handles().contains(&orphan_handle),
+        "the Orphan pane stays"
+    );
+    run.cli(&["kill", "--target", &orphan], real_state())
+        .assert_success("kill the Orphan");
+    assert!(!run.orca_handles().contains(&orphan_handle));
+    run.cli(&["kill", "--target", &crash], real_state())
+        .assert_success("kill the crashed Leader's pane");
+    assert!(!run.orca_handles().contains(&crash_handle));
+
+    // No pane the scenario created is left in either list.
+    let left: Vec<Value> = real_rows(run)
+        .into_iter()
+        .filter(|row| {
+            row["name"]
+                .as_str()
+                .is_some_and(|name| name.contains(&run.tag))
+        })
+        .collect();
+    assert!(left.is_empty(), "tmux-tools list shows: {left:?}");
+    let listed = run.orca_handles();
+    for handle in [&lead_handle, &tm_handle, &crash_handle, &orphan_handle] {
+        assert!(
+            !listed.contains(handle),
+            "orca terminal list shows {handle}"
+        );
+    }
+}
+
 // --- The live run's own cleanup, against the fake `orca` CLI (default run) ----------
 
 /// A [`Run`] whose `orca` is `fake_orca.py`, and the fake's pane state.
@@ -2225,4 +2981,38 @@ fn concurrent_runs_never_share_their_private_state() {
 
     drop(b);
     assert!(fake.open().is_empty(), "{:?}", fake.open());
+}
+
+/// P10.6: the live check of the teammate's own status fails when the Leader row's
+/// main agent takes the teammate's transition (rows shaped as live `worktree ps`).
+#[test]
+fn teammate_transition_check_fails_when_the_leader_row_takes_it() {
+    let (lead, tm) = ("tab:lead-leaf", "tab:tm-leaf");
+    let row = |key: &str, state: &str, at: u64| {
+        json!({
+            "agentType": "claude",
+            "hasLivePty": true,
+            "paneKey": key,
+            "mainAgent": {"state": state, "stateStartedAt": at},
+            "state": state,
+            "subagents": if key == lead {
+                json!([{"agentType": "claude", "state": "working", "startedAt": 50}])
+            } else {
+                json!(null)
+            },
+        })
+    };
+    let ps = |rows: Vec<Value>| json!({"worktrees": [{"agents": rows}]});
+    let before = ps(vec![row(lead, "done", 100), row(tm, "done", 200)]);
+    let on_teammate = ps(vec![row(lead, "done", 100), row(tm, "working", 300)]);
+    assert_eq!(
+        judge_teammate_transition(&before, &on_teammate, lead, tm),
+        Ok(())
+    );
+    // The transition attributed to the Leader: its keys swapped with the teammate's.
+    assert!(judge_teammate_transition(&before, &on_teammate, tm, lead).is_err());
+    let on_both = ps(vec![row(lead, "working", 300), row(tm, "working", 300)]);
+    assert!(judge_teammate_transition(&before, &on_both, lead, tm).is_err());
+    let on_leader = ps(vec![row(lead, "working", 300), row(tm, "done", 200)]);
+    assert!(judge_teammate_transition(&before, &on_leader, lead, tm).is_err());
 }

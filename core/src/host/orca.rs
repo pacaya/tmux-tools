@@ -39,6 +39,22 @@ const READ_PAGE_LINES: u32 = 1000;
 /// How long one `orca` call may run beyond any wait it asks Orca to perform.
 const CALL_TIMEOUT: Duration = Duration::from_secs(120);
 
+/// The commands with no side effect, which are retried when they exit 0 without a JSON
+/// answer: Orca 1.4.253 answered so for a few seconds after a pane was created. A
+/// command that acts (`terminal create`, `split`, `send`, `close`) is never retried, as
+/// its exit 0 can mean the action already happened.
+const READ_ONLY_COMMANDS: &[&str] = &[
+    "status",
+    "terminal list",
+    "terminal show",
+    "terminal read",
+    "worktree ps",
+];
+
+/// The pauses between the attempts of a retried read-only call: at most 3 attempts
+/// over about 1 s.
+const EMPTY_ANSWER_PAUSES: [Duration; 2] = [Duration::from_millis(250), Duration::from_millis(500)];
+
 /// How many fresh derivations a spawn tries when a derived name is already reserved.
 const DERIVED_NAME_ATTEMPTS: usize = 16;
 
@@ -131,6 +147,16 @@ impl TerminalList {
     }
 }
 
+/// What one `orca` run printed on stdout.
+enum Answer {
+    Json(Value),
+    /// Empty or non-JSON stdout, with the exit code and stderr.
+    NotJson {
+        code: Option<i32>,
+        stderr: String,
+    },
+}
+
 /// One record after the P4.5 check.
 struct Checked {
     record: PaneRecord,
@@ -163,6 +189,29 @@ impl OrcaHost {
             .copied()
             .collect::<Vec<_>>()
             .join(" ");
+        let pauses: &[Duration] = if READ_ONLY_COMMANDS.contains(&command_name.as_str()) {
+            &EMPTY_ANSWER_PAUSES
+        } else {
+            &[]
+        };
+        let mut pauses = pauses.iter();
+        loop {
+            match self.call_once(args, &command_name, timeout)? {
+                Answer::Json(parsed) => return self.result(parsed, command_name),
+                Answer::NotJson { code, stderr } => match pauses.next() {
+                    Some(pause) if code == Some(0) => std::thread::sleep(*pause),
+                    _ => bail!(
+                        "orca {command_name} exited {} without a JSON answer: {}",
+                        code.unwrap_or(-1),
+                        stderr
+                    ),
+                },
+            }
+        }
+    }
+
+    /// One run of `orca <args> --json`.
+    fn call_once(&self, args: &[&str], command_name: &str, timeout: Duration) -> Result<Answer> {
         let mut child = Command::new("orca")
             .args(args)
             .arg("--json")
@@ -200,13 +249,17 @@ impl OrcaHost {
         };
         let stdout = out_reader.join().unwrap_or_default();
         let stderr = err_reader.join().unwrap_or_default();
-        let parsed: Value = serde_json::from_slice(&stdout).map_err(|_| {
-            anyhow!(
-                "orca {command_name} exited {} without a JSON answer: {}",
-                status.code().unwrap_or(-1),
-                String::from_utf8_lossy(&stderr).trim()
-            )
-        })?;
+        Ok(match serde_json::from_slice(&stdout) {
+            Ok(parsed) => Answer::Json(parsed),
+            Err(_) => Answer::NotJson {
+                code: status.code(),
+                stderr: String::from_utf8_lossy(&stderr).trim().to_owned(),
+            },
+        })
+    }
+
+    /// The `result` of a JSON answer, or its error.
+    fn result(&self, parsed: Value, command_name: String) -> Result<Value> {
         if parsed.get("ok").and_then(Value::as_bool) == Some(true) {
             return Ok(parsed.get("result").cloned().unwrap_or(Value::Null));
         }

@@ -86,7 +86,7 @@ pub fn run(args: &SpawnAgentArgs) -> Result<()> {
     )?;
     let binary = resolved.binary;
     let argv = launch_argv(binary.clone(), resolved.args, &args.extra_args);
-    let cmd = launch_command(&argv, args.cwd.as_ref(), args.bare)?;
+    let cmd = launch_command(&pane_argv(&argv)?, args.cwd.as_ref(), args.bare)?;
     let launched_at = rfc3339_utc_now()?;
     let cwd = invoking_cwd();
     let parent = crate::cmd::self_::calling_pane_name()?;
@@ -130,6 +130,42 @@ fn launch_argv(binary: String, profile_args: Vec<String>, extra_args: &[String])
         .chain(profile_args)
         .chain(extra_args.iter().cloned())
         .collect()
+}
+
+/// The argv the pane runs. On Orca, an agent whose binary basename is `claude` starts
+/// through the Launcher, so its teammates are tmux-tools panes (PRD-261108-0447-01
+/// P9.1): `<tmux-tools path> claude-teams --claude <binary> -- <claude args>`. Every
+/// other agent, and every agent on tmux, runs its own argv.
+fn pane_argv(argv: &[String]) -> Result<Vec<String>> {
+    let (binary, claude_args) = argv.split_first().expect("argv starts with the binary");
+    let is_claude = std::path::Path::new(binary)
+        .file_name()
+        .is_some_and(|name| name == "claude");
+    if host::current().host() != host::Host::Orca || !is_claude {
+        return Ok(argv.to_vec());
+    }
+    let tmux_tools = std::env::current_exe()
+        .and_then(std::fs::canonicalize)
+        .map_err(|error| anyhow!("cannot locate tmux-tools: {error}"))?;
+    let tmux_tools = tmux_tools
+        .to_str()
+        .ok_or_else(|| {
+            anyhow!(
+                "tmux-tools path is not valid UTF-8: {}",
+                tmux_tools.display()
+            )
+        })?
+        .to_owned();
+    Ok([
+        tmux_tools,
+        "claude-teams".to_owned(),
+        "--claude".to_owned(),
+        binary.clone(),
+        "--".to_owned(),
+    ]
+    .into_iter()
+    .chain(claude_args.iter().cloned())
+    .collect())
 }
 
 fn launch_command(argv: &[String], cwd: Option<&PathBuf>, bare: bool) -> Result<String> {

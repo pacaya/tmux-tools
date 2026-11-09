@@ -2,7 +2,7 @@
 id: ISSUE-261108-2323-02
 kind: issue
 category: enhancement
-status: in-progress
+status: done
 brief_contract: agent-brief.v3
 claimed_by: implement-issue@agentmac
 claimed_at: 2026-11-09T13:21:43Z
@@ -117,6 +117,22 @@ contract:
 **Bundle manifest:** `.planning-contracts/bundles/ISSUE-261108-2323-02/manifest.json`
 
 **Test seam:** `tmux-tools spawn-agent` with the fake `orca` CLI on `PATH` (recorded pane-create `--command`, `list --format json`); `spawn-agent` on the isolated tmux server; the opt-in live Orca contract run.
+
+## Code Review
+
+Review: `issue-261108-2323-02-code-review-20261109-142222.md` — Outcome: ACCEPTED
+
+## Resolution
+
+- Commit: `feat: on Orca, spawn-agent claude starts Claude through tmux-tools claude-teams, so a driven Leader's teammates are tmux-tools panes, proved by the live Orca contract run (ISSUE-261108-2323-02)`
+- Route: `claude — deepseek-suspended` (code-primary; Opus, effort medium) for the implementation and the one correction batch.
+- TDD: red-green at `spawn-agent`/`list` with the fake `orca` CLI and `spawn-agent` on the isolated tmux server.
+- Review: Claude + Codex; 2 findings (H1 tautological Leader-row check, L1 repeated Leader prompt), both fixed in one correction batch and verified by both reviewers. Outcome ACCEPTED.
+- Lead decision included: bounded retry of read-only `orca` calls that exit 0 without a JSON answer (3 attempts, 250 ms + 500 ms); acting calls are never retried.
+- Live Orca contract run (Orca 1.4.253, Claude 2.1.319, `disableAllHooks`): full suite pass (`final2`) and the corrected Claude-teams scenario pass (`fix1-live3`); evidence `/tmp/orca-run/live-2323-02/`.
+- Suite: `cargo test --workspace --features test-fixtures` and `cargo test --workspace` — 837 passed, 0 failed.
+- Release (0.6.0) not installed: waits for harness `claude:ISSUE-261109-0201-04` per P11.2.
+- Date: 2026-11-09
 
 ## Triage Notes
 - Supersedes `ISSUE-261107-2103-01`.

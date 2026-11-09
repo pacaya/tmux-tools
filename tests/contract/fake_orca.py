@@ -23,6 +23,10 @@ It never reaches a real Orca runtime. Its panes live in the JSON file FAKE_ORCA_
   leafId; its untitled pane opens in the target's tab only on the <n>-th
   `terminal list` after it.
 
+- FAKE_ORCA_EMPTY_LISTS=<n>: the first <n> `terminal list` calls (counted in the
+  state as `empty_lists`) exit 0 with empty stdout, as Orca 1.4.253 did for a few
+  seconds after a pane was created.
+
 A split pane opens in the tab of the pane it splits, without a title.
 """
 import json
@@ -98,6 +102,12 @@ state = load()
 if path == ["status"]:
     answer({"runtime": {"reachable": True, "runtimeId": RUNTIME,
                         "capabilities": ["terminal.prompt-delivery.v1"]}})
+
+if path == ["terminal", "list"] and os.environ.get("FAKE_ORCA_EMPTY_LISTS"):
+    if state.get("empty_lists", 0) < int(os.environ["FAKE_ORCA_EMPTY_LISTS"]):
+        state["empty_lists"] = state.get("empty_lists", 0) + 1
+        save(state)
+        sys.exit(0)
 
 if path == ["terminal", "list"]:
     late = state.get("late")

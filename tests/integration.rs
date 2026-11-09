@@ -13088,3 +13088,181 @@ fn list_json_on_orca_reads_worktree_ps_once() {
     assert_eq!(count(&["worktree", "ps"]), 1, "{log:?}");
     assert_eq!(count(&["terminal", "show"]), 0, "{log:?}");
 }
+
+impl FakeOrca {
+    fn write_agents_toml(&self, contents: &str) {
+        std::fs::create_dir_all(self.dir.join("config/tmux-tools")).unwrap();
+        std::fs::write(self.dir.join("config/tmux-tools/agents.toml"), contents).unwrap();
+    }
+
+    /// The `--command` of every `terminal create` and `terminal split` call.
+    fn pane_commands(&self) -> Vec<String> {
+        self.log()
+            .iter()
+            .filter(|call| {
+                call.len() >= 2
+                    && call[0] == "terminal"
+                    && (call[1] == "create" || call[1] == "split")
+            })
+            .filter_map(|call| {
+                let at = call.iter().position(|arg| arg == "--command")?;
+                call.get(at + 1).cloned()
+            })
+            .collect()
+    }
+}
+
+/// PRD-261108-0447-01 P9.1: on Orca, an agent whose binary basename is `claude` starts
+/// through the Launcher; `orca claude-teams` is never used (P9.3), and the Pane
+/// registration, `agent`, and Surface stay as before.
+#[test]
+fn spawn_agent_claude_on_orca_starts_claude_through_the_launcher() {
+    let fake = FakeOrca::start("orca-spawn-claude");
+    fake.cli(&["spawn-agent", "claude", "--name", "lead"], &[])
+        .assert_success("spawn-agent claude --name lead");
+
+    let tmux_tools = std::fs::canonicalize(BIN).unwrap();
+    assert_eq!(
+        fake.pane_commands(),
+        vec![format!(
+            "'{}' 'claude-teams' '--claude' 'claude' '--' '--permission-mode' 'plan'",
+            tmux_tools.display()
+        )],
+        "{:?}",
+        fake.log()
+    );
+    assert!(
+        !fake
+            .log()
+            .iter()
+            .any(|call| call.iter().any(|arg| arg == "claude-teams")),
+        "no orca claude-teams call: {:?}",
+        fake.log()
+    );
+
+    let rows = json_payload(&fake.cli(&["list", "--format", "json"], &[]), "list");
+    let rows = rows.as_array().unwrap();
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0]["name"], "lead", "{rows:?}");
+    assert_eq!(rows[0]["agent"], "claude", "{rows:?}");
+    let record = fake.record("lead").expect("the record of lead");
+    assert_eq!(record["surface"], "rich", "{record}");
+    assert_eq!(record["agent"], "claude", "{record}");
+}
+
+/// P9.1: the trigger is the binary basename, not the agent name; any other binary
+/// runs its own argv on Orca.
+#[test]
+fn spawn_agent_on_orca_keeps_the_pane_command_of_a_binary_not_named_claude() {
+    let fake = FakeOrca::start("orca-spawn-other");
+    fake.write_agents_toml(
+        r#"
+[claude]
+binary = "/opt/tools/claude-wrapper"
+
+[claude.access.default]
+args = ["--x"]
+"#,
+    );
+    fake.cli(&["spawn-agent", "claude", "--name", "lead"], &[])
+        .assert_success("spawn-agent claude with a wrapper binary");
+    assert_eq!(
+        fake.pane_commands(),
+        vec!["'/opt/tools/claude-wrapper' '--x'".to_owned()],
+        "{:?}",
+        fake.log()
+    );
+}
+
+/// Lead decision of ISSUE-261108-2323-02: an `orca` call that exits 0 without a JSON
+/// answer is retried, at most 3 attempts in total, before the existing error.
+#[test]
+fn list_on_orca_retries_an_empty_terminal_list_answer() {
+    let fake = FakeOrca::start("orca-empty-answer");
+    fake.cli(&["launch", "--name", "c-one", "--cmd", "sleep 30"], &[])
+        .assert_success("launch c-one");
+
+    let _ = std::fs::remove_file(fake.dir.join("log.jsonl"));
+    let rows = json_payload(
+        &fake.cli(
+            &["list", "--format", "json"],
+            &[("FAKE_ORCA_EMPTY_LISTS", "2")],
+        ),
+        "list after two empty answers",
+    );
+    assert_eq!(rows[0]["name"], "c-one", "{rows}");
+
+    let state = fake.dir.join("state.json");
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&state).unwrap()).unwrap();
+    value["empty_lists"] = serde_json::json!(0);
+    std::fs::write(&state, serde_json::to_vec(&value).unwrap()).unwrap();
+    let _ = std::fs::remove_file(fake.dir.join("log.jsonl"));
+    let out = fake.cli(
+        &["list", "--format", "json"],
+        &[("FAKE_ORCA_EMPTY_LISTS", "1000")],
+    );
+    assert_eq!(out.status, 1, "{out:?}");
+    assert!(
+        out.stderr
+            .contains("orca terminal list exited 0 without a JSON answer"),
+        "{}",
+        out.stderr
+    );
+    let lists = fake
+        .log()
+        .iter()
+        .filter(|call| call.len() >= 2 && call[0] == "terminal" && call[1] == "list")
+        .count();
+    assert_eq!(lists, 3, "at most 3 attempts: {:?}", fake.log());
+}
+
+/// PRD-261108-0447-01 P9.2 (out of scope until P11 step 3): on tmux, `spawn-agent` of
+/// an agent whose binary basename is `claude` still runs that binary directly.
+#[cfg(feature = "test-fixtures")]
+#[test]
+fn spawn_agent_claude_on_tmux_runs_the_binary_directly() {
+    let _serial = serial_guard();
+
+    if Command::new("tmux").arg("-V").output().is_err() {
+        eprintln!("SKIP: tmux not on PATH");
+        return;
+    }
+
+    let server = IsolatedTmuxServer::start_inside();
+    let config = AgentsConfig::new();
+    std::fs::create_dir_all(config.xdg().join("bin")).unwrap();
+    let argv_file = config.xdg().join("argv.txt");
+    let claude = config.write_executable(
+        "bin/claude",
+        &format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$0\" \"$@\" > '{}'\nexec sleep 30\n",
+            argv_file.display()
+        ),
+    );
+    config.write_agents_toml(&format!("[claude]\nbinary = \"{}\"\n", claude.display()));
+
+    let name = format!("tmux-lead-{}", std::process::id());
+    server
+        .cli_env(
+            &["spawn-agent", "claude", "--split", "v", "--name", &name],
+            config.xdg(),
+        )
+        .assert_success("spawn-agent claude on tmux");
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !argv_file.exists() {
+        assert!(Instant::now() < deadline, "the claude binary never started");
+        thread::sleep(Duration::from_millis(50));
+    }
+    thread::sleep(Duration::from_millis(100));
+    assert_eq!(
+        std::fs::read_to_string(&argv_file).unwrap(),
+        format!("{}\n--permission-mode\nplan\n", claude.display()),
+    );
+    let start = pane_option(&server, &name, "pane_start_command");
+    assert!(!start.contains("claude-teams"), "{start}");
+    server
+        .cli(&["kill", "--target", &name])
+        .assert_success("kill the pane");
+}
