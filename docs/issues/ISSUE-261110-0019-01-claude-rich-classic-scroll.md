@@ -2,7 +2,9 @@
 id: ISSUE-261110-0019-01
 kind: issue
 category: enhancement
-status: ready-for-agent
+status: in-progress
+claimed_by: implement-issue@agentmac
+claimed_at: 2026-11-10T09:43:56Z
 brief_contract: agent-brief.v3
 context: tmux-tools
 summary: panes that spawn-agent claude starts on the rich surface run in classic scroll mode, not full screen, on every host
@@ -60,17 +62,17 @@ contract:
 
 **Out of scope:** the `flat` surface; Claude sessions that tmux-tools does not start with a surface (clause item 6); the P5.1 `how: stitched`/`how: screen` rule (ISSUE-261109-2336-02).
 
-## Context Pack — canonical at claim (2026-11-10T09:03:47Z)
+## Context Pack — canonical at claim (2026-11-10T09:43:56Z)
 
-**Contract approval:** `review-20261110T090257Z` · canonical · revision check complete
+**Contract approval:** `review-20261110T094310Z` · canonical · revision check complete
 
-**Issue binding:** `tmux-tools:ISSUE-261110-0019-01` · revision `d6004b759616d0d6d580f567d62cdcd9a345d84e` · sha256 `79a189d7fb6849ca06c9e72d2e18395693efea526e9679e363149b4f65ac7a7d`
+**Issue binding:** `tmux-tools:ISSUE-261110-0019-01` · revision `04b9a45e539824f0ea203998bc36e59af64396cd` · sha256 `490c2cb33f19aca3e9a4d8a982252760616252b4146c258685c5b164d3c2f13b`
 
 **Required source objects:**
-- `tmux-tools:ADR-260919-0146-01#claude-rich-launch` · revision `d6004b759616d0d6d580f567d62cdcd9a345d84e` · sha256 `3a975c52416451effe1e72d26d03992af00f4e9d32677dfde5847d3508784ccc` · `objects/3a975c52416451effe1e72d26d03992af00f4e9d32677dfde5847d3508784ccc.md`
-- `tmux-tools:PRD-260918-0323-01#p8-smoke` · revision `d6004b759616d0d6d580f567d62cdcd9a345d84e` · sha256 `e073a2a24ce3b5d9f9a1da38858e4f693c2f3ed2ce9a45c7698f024c39ca8bb2` · `objects/e073a2a24ce3b5d9f9a1da38858e4f693c2f3ed2ce9a45c7698f024c39ca8bb2.md`
-- `tmux-tools:PRD-261107-0825-01#p10-tests` · revision `d6004b759616d0d6d580f567d62cdcd9a345d84e` · sha256 `a28eb660fd94942cad51db5869d5ba74757bff5b2ac3317f6e44699676aa3fcb` · `objects/a28eb660fd94942cad51db5869d5ba74757bff5b2ac3317f6e44699676aa3fcb.md`
-- `tmux-tools:PRD-261109-2223-01#p5-io` · revision `d6004b759616d0d6d580f567d62cdcd9a345d84e` · sha256 `7519a4a029eb8d4cfead1eb4b4821b45e3d491b22454a75c8804331e3eb3262b` · `objects/7519a4a029eb8d4cfead1eb4b4821b45e3d491b22454a75c8804331e3eb3262b.md`
+- `tmux-tools:ADR-260919-0146-01#claude-rich-launch` · revision `04b9a45e539824f0ea203998bc36e59af64396cd` · sha256 `3a975c52416451effe1e72d26d03992af00f4e9d32677dfde5847d3508784ccc` · `objects/3a975c52416451effe1e72d26d03992af00f4e9d32677dfde5847d3508784ccc.md`
+- `tmux-tools:PRD-260918-0323-01#p8-smoke` · revision `04b9a45e539824f0ea203998bc36e59af64396cd` · sha256 `e073a2a24ce3b5d9f9a1da38858e4f693c2f3ed2ce9a45c7698f024c39ca8bb2` · `objects/e073a2a24ce3b5d9f9a1da38858e4f693c2f3ed2ce9a45c7698f024c39ca8bb2.md`
+- `tmux-tools:PRD-261107-0825-01#p10-tests` · revision `04b9a45e539824f0ea203998bc36e59af64396cd` · sha256 `a28eb660fd94942cad51db5869d5ba74757bff5b2ac3317f6e44699676aa3fcb` · `objects/a28eb660fd94942cad51db5869d5ba74757bff5b2ac3317f6e44699676aa3fcb.md`
+- `tmux-tools:PRD-261109-2223-01#p5-io` · revision `04b9a45e539824f0ea203998bc36e59af64396cd` · sha256 `16c605a4a5c69459aa491661c76fc4bea358946393d5482093ab186588d012d3` · `objects/16c605a4a5c69459aa491661c76fc4bea358946393d5482093ab186588d012d3.md`
 
 **Bundle manifest:** `.planning-contracts/bundles/ISSUE-261110-0019-01/manifest.json`
 
