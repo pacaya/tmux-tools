@@ -2,7 +2,7 @@
 id: ISSUE-261109-2336-01
 kind: issue
 category: enhancement
-status: needs-triage
+status: ready-for-agent
 brief_contract: agent-brief.v3
 context: tmux-tools
 summary: tmux-tools runs every required verb on Herdr through a herdr Host backend over the hc CLI, tested against a fake hc and a private hc core
@@ -132,8 +132,6 @@ contract:
 - Update `CONTEXT.md` as P1 lists.
 - Approved contracts: PRD-261109-2223-01 `## Contracts`, all items except `TMUX_TOOLS_LIVE_HERDR=1` (ISSUE-261109-2336-02).
 
-**Triage step (before readiness):** run private-core live checks for the PRD's during-triage items `herdr-history-mark`, `herdr-bracketed-paste`, and `herdr-keys-charset`, and put each result to the maintainer. Write each approved result into P5.1, P5.2, P6.6, and P8.4 of PRD-261109-2223-01. An item the maintainer does not approve keeps its PRD default: the P5.1 default, printable ASCII, and the P6.6 refusal. The implementation works to the clauses as recorded at readiness.
-
 **Acceptance:**
 - [ ] Given a fake `hc` and `HC_TERMINAL_ID` set with no `$TMUX`, when `tmux-tools self --format json` runs, then it reports `host: "herdr"`, observable at the CLI's stdout.
 - [ ] Given a fake `hc` and a calling terminal with `herdr.space=S` and `herdr.tab=T`, when `launch --split v --name A.b` runs, then the fake `hc` receives one `run` with `--outlive-parent --no-notify`, `--name tt-<16 hex of SHA-256("A.b")>`, the labels `herdr.space=S`, `herdr.tab=T`, `where=A.b`, and `tt.name=A.b`, and no `--rm`. With no `--split`, the `run` has `herdr.space=S` and no `herdr.tab`. Observable at the fake `hc` call log.
@@ -143,7 +141,7 @@ contract:
 - [ ] Given a multi-line prompt on Herdr to a pane that P6.6, as recorded at readiness, refuses, when `prompt` runs, then it exits 1 and the fake `hc` receives no `send`, observable at the exit status and call log.
 - [ ] Given a Claude pane in a private core, when `prompt --format json` and `capture --all` run, then Completeness, the `capture --all` read, and the no-scrollback notice match P5.1 as recorded at readiness, observable at the CLI output.
 - [ ] Given `send` with an argument containing a character outside the typeable set, when it runs, then it exits 1 with `cannot type on herdr: U+<XXXX>` and the fake `hc` receives no `keys`, observable at stderr and the call log.
-- [ ] Given a fake `hc` and a binary named `claude`, when `spawn-agent claude` runs on Herdr, then stderr carries `claude-teams: no team: no teammate shim on herdr; starting claude without teammate panes` and no team directory exists, observable at stderr and the state directory.
+- [ ] Given a fake `hc`, `HC_TERMINAL_ID` set, and a fake `claude`, when `claude-teams` runs with host `herdr` selected, then its stderr carries `claude-teams: no team: no teammate shim on herdr; starting claude without teammate panes`, the fake `claude` starts with `--teammate-mode in-process`, and no team directory exists, observable at stderr, the fake `claude` argv, and the state directory. When `spawn-agent claude` runs on Herdr, the fake `hc` receives one `run` whose command is that `claude-teams` Launcher command, observable at the call log.
 - [ ] Given the tmux and Orca contract tests, when the default suite runs, then they pass, and their only output change is the added `host_word: null` in `status`, observable at `cargo test --workspace --features test-fixtures`.
 - [ ] Given `TT_TEST_HERDR=1` with a real `hc` on `PATH`, when the contract suite runs, then every required verb passes against `HC_SESSION=tt-tests-<pid>`. Afterwards `~/.local/state/herdr-core/` holds no `tt-tests-*` directory, and the default core's `hc ls --all --json` is unchanged. Observable at the test run and those two checks.
 
@@ -154,3 +152,4 @@ contract:
 ## Triage Notes
 
 - 2026-11-09: triage step done. Private-core live checks for `herdr-bracketed-paste`, `herdr-keys-charset`, `herdr-history-mark` ran; the maintainer approved each result (Q178–Q180); they are recorded in PRD-261109-2223-01 P5.1, P5.2, P6.6, P8.4.
+- 2026-11-09: dispatch readiness passed; brief repaired (finished triage-step paragraph deleted; P7.7 acceptance moved to the claude-teams Launcher stderr and the spawn-agent call log); ready-for-agent.
