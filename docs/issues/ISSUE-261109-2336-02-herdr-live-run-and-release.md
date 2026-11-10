@@ -57,19 +57,25 @@ contract:
       repository: tmux-tools
       record: PRD-261107-0825-01
       clause: p10-tests
+    - relation: requires
+      repository: tmux-tools
+      record: PRD-261108-0447-01
+      clause: p10-tests
     - relation: implementation_after
       repository: tmux-tools
       record: ISSUE-261109-2336-01
 ---
 ## Agent Brief
 
-**Outcome and scope:** The `TMUX_TOOLS_LIVE_HERDR=1` run (PRD-261109-2223-01 P8.4) exists and passes in the maintainer's Herdr window, the maintainer confirms the window result, and the Herdr backend ships as the P9.1 release. This issue owns P8.4, P9.1, P9.2, and Verification items 3–4.
+**Outcome and scope:** The `TMUX_TOOLS_LIVE_HERDR=1` run (PRD-261109-2223-01 P8.4) exists and passes in the maintainer's Herdr window, the maintainer confirms the window result, and the Herdr backend ships as the P9.1 release. This issue owns P8.4, P9.1, P9.2, Verification items 3–4, the P5.1 rule for `how: stitched` and `how: screen` reads (added after ISSUE-261109-2336-01 closed), and the Claude 2.1.322 shim fixture.
 
-**Required sources:** `tmux-tools:PRD-261109-2223-01` clauses `p8-tests` (items 4–5), `p9-rollout`, `contracts` (the `TMUX_TOOLS_LIVE_HERDR` switch), and `verification`; `p2-selection`, `p3-placement`, `p4-registration`, `p5-io`, `p6-state`, `p7-other-verbs` for the README content; `tmux-tools:PRD-261107-0825-01#p10-tests` for the contract suite.
+**Required sources:** `tmux-tools:PRD-261109-2223-01` clauses `p8-tests` (items 4–5), `p9-rollout`, `contracts` (the `TMUX_TOOLS_LIVE_HERDR` switch), and `verification`; `p2-selection`, `p3-placement`, `p4-registration`, `p5-io`, `p6-state`, `p7-other-verbs` for the README content; `tmux-tools:PRD-261107-0825-01#p10-tests` for the contract suite; `tmux-tools:PRD-261108-0447-01#p10-tests` for the per-version Claude fixture.
 
-**Current observable:** `TMUX_TOOLS_LIVE_HERDR=1` selects no test run. README names no Herdr host. The installed `tmux-tools` cannot select `herdr`.
+**Current observable:** `prompt` to a Claude pane on Herdr returns an empty result, because hc reads it as a `how: stitched` screen. `cl` with Claude 2.1.322 prints `claude-teams: claude 2.1.322 not contract-tested`. `TMUX_TOOLS_LIVE_HERDR=1` selects no test run. README names no Herdr host. The installed `tmux-tools` cannot select `herdr`.
 
 **Required change:**
+- First, implement the PRD-261109-2223-01 P5.1 rule: when the read after settle reports `how: stitched` or `how: screen`, the `prompt` result is that whole read, and Completeness is false.
+- Capture `tests/fixtures/claude-teams/2.1.322.jsonl` per PRD-261108-0447-01 P10.3 (live test from a tmux pane without Team environment, then `tt-fixture`), so the release build contract-tests Claude 2.1.322.
 - Add the opt-in live run of P8.4, with the P8.5 teardown and leak assertion.
 - Run it in a plain Herdr terminal (no `$TMUX`, `HC_TERMINAL_ID` set) that the agent starts with `hc run` and the maintainer's current `herdr.space` and `herdr.tab` labels. The agent kills and removes that terminal after the run.
 - Write the README Herdr section and the `TMUX_TOOLS_HOST` entry (P9.1).
@@ -77,6 +83,8 @@ contract:
 - Approved contracts: PRD-261109-2223-01 `## Contracts` item "Test switches" (`TMUX_TOOLS_LIVE_HERDR=1`).
 
 **Acceptance:**
+- [ ] Given a Claude pane in a private core (`TT_TEST_HERDR=1`), when `prompt --format json` sends a prompt that makes Claude print a unique token, then the result contains that token and Completeness is false, observable at `prompt --format json`.
+- [ ] Given the release build and Claude 2.1.322, when `tmux-tools claude-teams` starts, then stderr has no `not contract-tested` line, and the default suite replays `2.1.322.jsonl`, observable at stderr and `cargo test`.
 - [ ] Given a plain Herdr terminal in the maintainer's space and tab, when `TMUX_TOOLS_LIVE_HERDR=1` runs the contract suite, then it passes the P8.4 cases, observable at the test run output read with `hc read`.
 - [ ] Given that run, when the maintainer looks at the Herdr window on the control Mac, then the `--split v` terminal is in the caller's tab, the no-split terminal is a new tab, and the Claude pane shows Herdr's agent state. Owner: maintainer; timing: during the run; evidence: the maintainer's reply recorded in `## Triage Notes`; closure needs it.
 - [ ] Given the finished runs, when `tmux-tools list` and `hc ls --all --json` run against the default core, then neither shows a terminal the runs created, observable at their output.
