@@ -70,7 +70,7 @@ suppresses it.
 
 ## Claude rich surface launch
 
-1. The built-in `claude` `rich` surface has the launch arguments `--settings` `{"env":{"CLAUDE_CODE_NO_FLICKER":"0"}}` (two argv items). A pane started on it shows Claude's own interface in classic scroll mode on every host: `#{alternate_on}` is `0` on tmux and Orca, and `hc read --json` reports `how: history` on Herdr.
+1. The built-in `claude` `rich` surface has the launch arguments `--settings` `{"env":{"CLAUDE_CODE_NO_FLICKER":"0"}}` (two argv items). A pane started on it shows Claude's own interface in classic scroll mode on every host. The proof is `#{alternate_on}` `0` on tmux, `how: history` from `hc read --json` on Herdr, and on Orca (which reports no alternate-screen state) both argv items in the `claude` process command line of the pane.
 2. `rich` stays the name, the `default_surface`, and the `pre_surface_rendering` of `claude`. The `flat` surface and the default-surface promotion rule do not change.
 3. `CONTEXT.md` **Rich surface** and **Flat surface** are reworded so that full screen does not separate them: a rich surface shows the agent's own interface (prompt, status line, footer) and can be full screen (`dsh --profile tui`) or not (`claude` `rich`); a flat surface is a reduced rendering without that interface and is never full screen.
 4. The P8 smoke (`tt-vendor-smoke`) launches the `claude` `rich` surface, fails when the pane is on the alternate screen, measures the `rich` declarations (bracketed paste, quit hazard, resume) against the current `claude`, and re-stamps its `validated_version`.
