@@ -147,8 +147,8 @@ Under Herdr, panes that `tmux-tools` creates are invisible in the Herdr window a
 
 ### P5 — Capture, send, and keys
 
-1. `capture` uses `hc read --lines <n>`; `--lines 0` gives the visible screen. A read with `complete: false` is never reported as complete. The History mark, the Completeness conditions, the `hc read` call that serves `capture --all`, and whether the PRD-260918-0323-01 P4 no-scrollback notice fires on Herdr follow `[OPEN: herdr-history-mark]`.
-2. `send` keeps its PRD-261107-0825-01 P9.4 meaning. Each argument that tmux's key grammar parses as a key is sent as the matching `hc keys` key name. Literal text without Enter is sent through `hc keys`, one key per character. Every argument is checked before anything is sent: a key name with no `hc keys` name ends the verb with exit 1 and stderr `cannot type on herdr: <argument as written>`; a character outside the typeable set ends it with exit 1 and stderr `cannot type on herdr: U+<XXXX>` (uppercase hex, at least four digits). The typeable set is printable ASCII (0x20–0x7E) until `[OPEN: herdr-keys-charset]` is resolved. Nothing is sent when either check fails. When `hc keys` still rejects a key during the send, the verb exits 1 with the same message; only then can part of the input be sent. `--enter` adds the key `enter`.
+1. `capture` uses `hc read --lines <n>`; `--lines 0` gives the visible screen; `capture --all` uses `hc read --lines 1000000`. The History mark is taken before submission by one `hc read --lines 1000000`: it records the number of lines and the last line as an anchor. The `prompt` result is every line after that point in the read after settle. Completeness is true only when both reads report `complete: true` and `how: history` and the anchor is still at the recorded line; otherwise it is false (this includes `how: stitched` full-screen reads). The PRD-260918-0323-01 P4 no-scrollback notice fires when the `capture --all` read reports `how: screen`.
+2. `send` keeps its PRD-261107-0825-01 P9.4 meaning. Each argument that tmux's key grammar parses as a key is sent as the matching `hc keys` key name. Literal text without Enter is sent through `hc keys`, one key per character. Every argument is checked before anything is sent: a key name with no `hc keys` name ends the verb with exit 1 and stderr `cannot type on herdr: <argument as written>`; a character outside the typeable set ends it with exit 1 and stderr `cannot type on herdr: U+<XXXX>` (uppercase hex, at least four digits). The typeable set is: space (sent as the key `space`), `a`–`z`, `A`–`Z` (sent as `shift+<lowercase letter>`), `0`–`9`, and `` ' , - . / ; = [ \ ] ` `` (sent as themselves). `hc keys` cannot type any other character, including `! " # $ % & ( ) * + : < > ? @ ^ _ { | } ~`. Nothing is sent when either check fails. When `hc keys` still rejects a key during the send, the verb exits 1 with the same message; only then can part of the input be sent. `--enter` adds the key `enter`.
 3. `send-enter` sends the key `enter`; `escape` sends the key `esc`.
 4. `interrupt` sends the resolved Surface's `interrupt_key` through P5.2 and keeps every current refusal rule. It never uses `hc interrupt`.
 
@@ -159,7 +159,7 @@ Under Herdr, panes that `tmux-tools` creates are invisible in the Herdr window a
 3. `status --format json` reports `host_word`: the exact hc status word, or `null`. On tmux and Orca, `host_word` is always `null`.
 4. In the settle step of `prompt`, a Host state ends the settle only when `status_ms` is after the submission.
 5. `prompt` submits with `hc send <terminal> <text>` and never `--force`. When hc refuses because the program is blocked, `prompt` exits 1 with stderr `prompt target blocked: <reason>` and no retry. `submit` is `confirmed` when, against a baseline read before the send, `turn` goes up or the status word changes to `working` with `status_ms` after the send; an unchanged pre-send `working` never confirms. It is `accepted` when `hc send` succeeds and neither is seen within the settle timeout.
-6. Delivery (PRD-260918-0323-01 P1): delivery is guaranteed only when the `[OPEN: herdr-bracketed-paste]` check passes. Until then, every multi-line prompt on Herdr is refused before any transmission, and single-line prompts are sent as unavailable delivery.
+6. Delivery (PRD-260918-0323-01 P1): `hc send` wraps the text in bracketed paste when the program has mode 2004 on, and writes it raw otherwise; hc does not report the mode. Delivery is guaranteed for a pane whose Host state is not `null` (the program reports OSC 7501). A multi-line prompt to any other pane is refused before any transmission; other prompts are sent as unavailable delivery.
 
 ### P7 — notify, self, list, kill, launch
 
@@ -176,12 +176,12 @@ Under Herdr, panes that `tmux-tools` creates are invisible in the Herdr window a
 1. The seam is the CLI binary, driven by `tests/integration.rs` (PRD-261107-0825-01 P10.1). One in-crate unit test covers the hc name function.
 2. The default `cargo test --workspace --features test-fixtures` run tests the binary against a fake `hc` (`tests/contract/fake_hc.py`). It covers P2 (including P2.6 with a stale `TMUX_PANE`), P3, P4.1–P4.4 (including a duplicate name, and a finished `--bare` terminal followed by a respawn of its name), P5.2, P6.2, P6.3, P6.5 (including a send while the previous turn stays `working`), P7 (including P7.7 with a binary named `claude`), and the exit-3 cases.
 3. `TT_TEST_HERDR=1` runs the full P10 contract suite against a private core (`HC_SESSION=tt-tests-<pid>`). At the end, also on failure, the run stops that core and deletes its state directory `~/.local/state/herdr-core/tt-tests-<pid>`. It never reaches the default core.
-4. `TMUX_TOOLS_LIVE_HERDR=1` runs the contract suite in the default core from a plain Herdr terminal (no `$TMUX`, `HC_TERMINAL_ID` set). It covers a Claude agent pane with Host state, a key-name and a literal send, a refused multi-line prompt while `[OPEN: herdr-bracketed-paste]` is open, and a `--split v` pane in the caller's tab.
+4. `TMUX_TOOLS_LIVE_HERDR=1` runs the contract suite in the default core from a plain Herdr terminal (no `$TMUX`, `HC_TERMINAL_ID` set). It covers a Claude agent pane with Host state, a key-name and a literal send, a multi-line prompt to the Claude pane (guaranteed delivery, P6.6), and a `--split v` pane in the caller's tab.
 5. Every terminal a run creates is killed and removed by that run, also on failure. A run ends by asserting that neither `tmux-tools list` nor `hc ls --all --json` shows a terminal it created.
 
 ### P9 — Rollout and release
 
-1. The release bumps the minor version. README gains a Herdr host section (selection, P3 placement, labels, P5.2 and P6.6 limits, `notify`) and lists `herdr` under `TMUX_TOOLS_HOST`.
+1. The release bumps the minor version. README gains a Herdr host section (selection, P3 placement, labels, P5.2 typeable set and P6.6 delivery rule, `notify`) and lists `herdr` under `TMUX_TOOLS_HOST`.
 2. A release requires a passing `TT_TEST_HERDR=1` run and a passing `TMUX_TOOLS_LIVE_HERDR=1` run.
 3. The tmux and Orca results change only by the added `host_word` key (P6.3).
 
@@ -232,17 +232,6 @@ Rollback is reverting the release: the previous version cannot select `herdr`, a
 - `herdr-app` window control (split direction, focus) and `hc connect` / `attach`.
 - The Rex backend.
 
-## Open Questions
-
-### herdr-history-mark
-How is the History mark taken on Herdr, when is Completeness true, which `hc read` call serves `capture --all`, and does the PRD-260918-0323-01 P4 no-scrollback notice fire? `hc read` has no read cursor; it reports `complete` and `how` (`screen` | `history` | `stitched`) and `cols`. Default if not resolved: Completeness is false for every Herdr `prompt` result, as on Orca; `capture --all` reads the largest history `hc read` returns; no notice fires. · dimension: contracts/integrations · resolve-by: during-triage · owner: agent (live check), maintainer approves the resolution
-
-### herdr-bracketed-paste
-Does `hc send` wrap the text in bracketed paste when the program has mode 2004 on? A live check in a private core decides; a pass makes delivery guaranteed for an agent pane whose Host state is not `null`, and lifts the P6.6 refusal for it. · dimension: contracts/integrations · resolve-by: during-triage · owner: agent (live check), maintainer approves the resolution
-
-### herdr-keys-charset
-Which characters does `hc keys` type as single keys? A live check in a private core decides the typeable set of P5.2. Default if not resolved: printable ASCII (0x20–0x7E). · dimension: contracts/integrations · resolve-by: during-triage · owner: agent (live check), maintainer approves the resolution
-
 ## Dimension Scan
 
 | Dimension | Verdict | Citation |
@@ -253,7 +242,7 @@ Which characters does `hc keys` type as single keys? A live check in a private c
 | architecture shape | n/a | ratifies the PRD-261107-0825-01 Host port; no new boundary |
 | stack | n/a | no new stack; `hc` CLI only (P2.4) |
 | data/schema | decided | P4.1; Contracts |
-| contracts/integrations | decided | P2–P7; Contracts; deferred items `herdr-history-mark`, `herdr-bracketed-paste`, `herdr-keys-charset` |
+| contracts/integrations | decided | P2–P7; Contracts |
 | UX (if UI) | decided | P3 (window placement); Verification item 3 |
 | testing/seams | decided | P8 |
 

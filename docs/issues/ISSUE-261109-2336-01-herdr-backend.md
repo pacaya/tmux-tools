@@ -150,3 +150,7 @@ contract:
 **Verification and release:** `cargo test --workspace --features test-fixtures` passes. `TT_TEST_HERDR=1 cargo test --workspace --features test-fixtures` passes on the agent Mac with `hc` 0.1.19 or later. No release from this issue.
 
 **Out of scope:** the `TMUX_TOOLS_LIVE_HERDR=1` live run, README, version bump, and install (ISSUE-261109-2336-02); the Herdr teammate shim; harness rows for `hc`; `herdr-app`.
+
+## Triage Notes
+
+- 2026-11-09: triage step done. Private-core live checks for `herdr-bracketed-paste`, `herdr-keys-charset`, `herdr-history-mark` ran; the maintainer approved each result (Q178–Q180); they are recorded in PRD-261109-2223-01 P5.1, P5.2, P6.6, P8.4.
