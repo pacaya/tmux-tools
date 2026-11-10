@@ -1875,7 +1875,11 @@ default_surface = "flat"
         assert_eq!(launch.surface, "default");
         assert_eq!(
             launch.args,
-            vec!["--sandbox".to_owned(), "read-only".to_owned()]
+            vec![
+                "--no-alt-screen".to_owned(),
+                "--sandbox".to_owned(),
+                "read-only".to_owned()
+            ]
         );
 
         // The surface's own arguments come before the access profile's.
@@ -1935,6 +1939,7 @@ default_surface = "flat"
         assert_eq!(
             launch.args,
             vec![
+                "--no-alt-screen".to_owned(),
                 "--sandbox".to_owned(),
                 "read-only".to_owned(),
                 "resume".to_owned(),

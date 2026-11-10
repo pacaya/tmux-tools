@@ -6,8 +6,9 @@
 //!
 //! - compares the live `--version` with the surface's `validated_version` stamp by
 //!   exact version-token equality;
-//! - launches the agent on that surface and checks that a flat surface, and the
-//!   classic-scroll `claude` `rich` surface, is not on the alternate screen;
+//! - launches the agent on that surface and checks that a flat surface (including
+//!   `codex` `default`, launched with `--no-alt-screen`), and the classic-scroll
+//!   `claude` `rich` surface, is not on the alternate screen;
 //! - checks the declared `bracketed_paste` against the pane's live
 //!   `bracket_paste_flag`;
 //! - establishes idleness independently of the declared `ready_regex` (the pane
@@ -73,7 +74,8 @@ enum PasteEvidence {
 
 /// Every `claude`, `codex` and README-documented `dsh` surface this smoke validates.
 /// `never_alternate` marks a rendering that must not be on the alternate screen: every
-/// flat surface, and `claude` `rich`, which runs in classic scroll mode
+/// flat surface (including `codex` `default`, which launches with `--no-alt-screen`),
+/// and `claude` `rich`, which runs in classic scroll mode
 /// (ADR-260919-0146-01#claude-rich-launch). `measure_resume` marks a surface whose
 /// declared resume syntax is measured live. `boot_evidence` is the surface's native startup
 /// chrome: the smoke waits for it and then for a content-stable window, so idleness is

@@ -41,8 +41,9 @@ fn build_all() -> BTreeMap<String, AgentSpec> {
                 // glyph `▌`/`›` is on screen idle *and* generating, so it cannot
                 // discriminate. Its reliable idle/busy signal is the status line —
                 // `· Ready · Context …` vs `· Working ·` — which the P8 smoke
-                // (src/bin/tt-vendor-smoke.rs) measured against codex-cli 0.155.1
-                // and stamped below. The status line sits above the composer, so
+                // (src/bin/tt-vendor-smoke.rs) measured against codex-cli 0.167.0
+                // and stamped below. The status line is one of the bottom two non-blank
+                // lines (on 0.167.0 it sits directly below the composer), so
                 // ready_lines = 2. Re-run the smoke and re-stamp the version when codex
                 // changes.
                 surfaces: BTreeMap::from([(
@@ -56,10 +57,10 @@ fn build_all() -> BTreeMap<String, AgentSpec> {
                         // fire while generating.
                         bracketed_paste: true,
                         quit_when_idle: true,
-                        validated_version: Some("codex-cli 0.155.1".to_owned()),
+                        validated_version: Some("codex-cli 0.167.0".to_owned()),
                         // Resume is a subcommand: `codex resume <session-id>`, where the
                         // session id is a UUID. With no id codex opens an interactive
-                        // session picker, which P6 refuses. Read from codex-cli 0.155.1.
+                        // session picker, which P6 refuses. Measured live on codex-cli 0.167.0.
                         resume: resume("resume {id}", UUID_SHAPE),
                         // Floor: one step above the 2026-08-01 cliff (the status line
                         // wraps at 56 columns), measured against this surface's
@@ -67,7 +68,10 @@ fn build_all() -> BTreeMap<String, AgentSpec> {
                         // measurement recorded no codex version.
                         min_cols: Some(58),
                         min_rows: Some(9),
-                        ..surface(&[])
+                        // Q187: codex's TUI uses the alternate screen by default;
+                        // `--no-alt-screen` runs it inline, so the pane keeps tmux
+                        // scrollback (`#{alternate_on}` = 0, checked by the P8 smoke).
+                        ..surface(&["--no-alt-screen"])
                     },
                 )]),
                 pre_surface_rendering: Some("default".to_owned()),
@@ -500,13 +504,36 @@ mod tests {
     }
 
     #[test]
+    fn codex_default_launches_off_the_alternate_screen() {
+        // Q187: the codex default surface carries `--no-alt-screen`, so the pane keeps
+        // tmux scrollback; surface arguments come before the access-profile arguments.
+        let codex = &all()["codex"];
+        assert_eq!(
+            codex.surfaces["default"].args,
+            vec!["--no-alt-screen".to_owned()]
+        );
+        let launch = super::super::Registry::builtin()
+            .resolve_launch("codex", None, None, None)
+            .expect("codex resolves with no surface named");
+        assert_eq!(launch.surface, "default");
+        assert_eq!(
+            launch.args,
+            vec![
+                "--no-alt-screen".to_owned(),
+                "--sandbox".to_owned(),
+                "read-only".to_owned(),
+            ]
+        );
+    }
+
+    #[test]
     fn in_scope_builtin_surfaces_ship_measured_declarations() {
         let agents = all();
 
         let expected = [
             ("claude", "rich", true, false, "claude 2.1.322"),
             ("claude", "flat", true, false, "claude 2.1.278"),
-            ("codex", "default", true, true, "codex-cli 0.155.1"),
+            ("codex", "default", true, true, "codex-cli 0.167.0"),
         ];
         for (name, surface_name, bracketed_paste, quit_when_idle, version) in expected {
             let surface = &agents[name].surfaces[surface_name];
