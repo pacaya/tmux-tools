@@ -93,4 +93,4 @@ contract:
 
 **Verification and release:** `TT_TEST_HERDR=1` and `TMUX_TOOLS_LIVE_HERDR=1` both pass on the release revision (P9.2). Rollback: copy the backed-up previous binary over `~/.cargo/bin/tmux-tools`.
 
-**Out of scope:** backend behaviour (ISSUE-261109-2336-01); the Herdr teammate shim; harness rows for `hc`.
+**Out of scope:** backend behaviour other than the P5.1 `how: stitched`/`how: screen` result rule (ISSUE-261109-2336-01); the Herdr teammate shim; harness rows for `hc`.
