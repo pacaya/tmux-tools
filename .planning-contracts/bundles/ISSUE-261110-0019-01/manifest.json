@@ -1,71 +1,71 @@
 {
-  "approval_id": "handoff-20261110T091954Z",
+  "approval_id": "review-20261110T094310Z",
   "approval_object": "approval.json",
-  "approval_sha256": "390c56432f5b0c569c1c69873f855c2ed2ffd96f1320880f676a19481b45d566",
+  "approval_sha256": "70ff6b2e5dda64ec4c17bfde7619ac441807c0440bdc48612a970e449769399f",
   "entries": [
     {
-      "approved_revision": "b6e6f54370fdfaa51c40498d36c2a87b762b7493",
-      "bytes": 10557,
-      "object": "objects/0af19ac9e92107f813094faccd8155576e01bac2dd22c03af71c1da4519082ed.md",
+      "approved_revision": "c80443ac3eb8f0810b63f043bee51f92c515acc9",
+      "bytes": 10904,
+      "object": "objects/490c2cb33f19aca3e9a4d8a982252760616252b4146c258685c5b164d3c2f13b.md",
       "origin": {
         "path": "docs/issues/ISSUE-261110-0019-01-claude-rich-classic-scroll.md",
         "repository": "tmux-tools",
-        "revision": "ae6133aaabdde4649e41e7a0b412bada060b591c"
+        "revision": "04b9a45e539824f0ea203998bc36e59af64396cd"
       },
       "role": "issue",
-      "sha256": "0af19ac9e92107f813094faccd8155576e01bac2dd22c03af71c1da4519082ed",
+      "sha256": "490c2cb33f19aca3e9a4d8a982252760616252b4146c258685c5b164d3c2f13b",
       "target": "tmux-tools:ISSUE-261110-0019-01"
     },
     {
-      "approved_revision": "d6004b759616d0d6d580f567d62cdcd9a345d84e",
+      "approved_revision": "04b9a45e539824f0ea203998bc36e59af64396cd",
       "bytes": 2047,
       "object": "objects/3a975c52416451effe1e72d26d03992af00f4e9d32677dfde5847d3508784ccc.md",
       "origin": {
         "path": "docs/adr/260919-0146-01-agent-surfaces.md",
         "repository": "tmux-tools",
-        "revision": "ae6133aaabdde4649e41e7a0b412bada060b591c"
+        "revision": "04b9a45e539824f0ea203998bc36e59af64396cd"
       },
       "role": "source",
       "sha256": "3a975c52416451effe1e72d26d03992af00f4e9d32677dfde5847d3508784ccc",
       "target": "tmux-tools:ADR-260919-0146-01#claude-rich-launch"
     },
     {
-      "approved_revision": "d6004b759616d0d6d580f567d62cdcd9a345d84e",
+      "approved_revision": "04b9a45e539824f0ea203998bc36e59af64396cd",
       "bytes": 661,
       "object": "objects/e073a2a24ce3b5d9f9a1da38858e4f693c2f3ed2ce9a45c7698f024c39ca8bb2.md",
       "origin": {
         "path": "docs/prd/PRD-260918-0323-01-agent-surfaces-and-pane-io.md",
         "repository": "tmux-tools",
-        "revision": "ae6133aaabdde4649e41e7a0b412bada060b591c"
+        "revision": "04b9a45e539824f0ea203998bc36e59af64396cd"
       },
       "role": "source",
       "sha256": "e073a2a24ce3b5d9f9a1da38858e4f693c2f3ed2ce9a45c7698f024c39ca8bb2",
       "target": "tmux-tools:PRD-260918-0323-01#p8-smoke"
     },
     {
-      "approved_revision": "d6004b759616d0d6d580f567d62cdcd9a345d84e",
+      "approved_revision": "04b9a45e539824f0ea203998bc36e59af64396cd",
       "bytes": 1135,
       "object": "objects/a28eb660fd94942cad51db5869d5ba74757bff5b2ac3317f6e44699676aa3fcb.md",
       "origin": {
         "path": "docs/prd/PRD-261107-0825-01-host-backends-and-orca.md",
         "repository": "tmux-tools",
-        "revision": "ae6133aaabdde4649e41e7a0b412bada060b591c"
+        "revision": "04b9a45e539824f0ea203998bc36e59af64396cd"
       },
       "role": "source",
       "sha256": "a28eb660fd94942cad51db5869d5ba74757bff5b2ac3317f6e44699676aa3fcb",
       "target": "tmux-tools:PRD-261107-0825-01#p10-tests"
     },
     {
-      "approved_revision": "d6004b759616d0d6d580f567d62cdcd9a345d84e",
-      "bytes": 2457,
-      "object": "objects/7519a4a029eb8d4cfead1eb4b4821b45e3d491b22454a75c8804331e3eb3262b.md",
+      "approved_revision": "04b9a45e539824f0ea203998bc36e59af64396cd",
+      "bytes": 2510,
+      "object": "objects/16c605a4a5c69459aa491661c76fc4bea358946393d5482093ab186588d012d3.md",
       "origin": {
         "path": "docs/prd/PRD-261109-2223-01-herdr-backend.md",
         "repository": "tmux-tools",
-        "revision": "ae6133aaabdde4649e41e7a0b412bada060b591c"
+        "revision": "04b9a45e539824f0ea203998bc36e59af64396cd"
       },
       "role": "source",
-      "sha256": "7519a4a029eb8d4cfead1eb4b4821b45e3d491b22454a75c8804331e3eb3262b",
+      "sha256": "16c605a4a5c69459aa491661c76fc4bea358946393d5482093ab186588d012d3",
       "target": "tmux-tools:PRD-261109-2223-01#p5-io"
     }
   ],
