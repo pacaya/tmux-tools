@@ -2,9 +2,7 @@
 id: ISSUE-261110-0019-01
 kind: issue
 category: enhancement
-status: in-progress
-claimed_by: implement-issue@agentmac
-claimed_at: 2026-11-10T05:36:39Z
+status: ready-for-human
 brief_contract: agent-brief.v3
 context: tmux-tools
 summary: panes that spawn-agent claude starts on the rich surface run in classic scroll mode, not full screen, on every host
@@ -70,3 +68,7 @@ contract:
 **Bundle manifest:** `.planning-contracts/bundles/ISSUE-261110-0019-01/manifest.json`
 
 **Test seam:** `cargo test --workspace --features test-fixtures` (registry); `tmux display -p` + `tmux-tools capture` (tmux); `ps -o args` in the P10 Orca live run; `prompt --format json` with `TT_TEST_HERDR=1` (Herdr); `cargo run --features vendor-smoke --bin tt-vendor-smoke` (smoke)
+
+## Triage Notes
+
+- 2026-11-10 `in-progress → ready-for-human` (attempt claimed by `implement-issue@agentmac` at 2026-11-10T05:36:39Z). Blocker, maintainer decision: with `rich` in classic scroll (`hc read --json` reports `how: history`), the PRD-261109-2223-01 P5.1 History mark (line count + last line of the full read before submission) still misses the reply. Claude redraws its input box, separator and status line below new output, so the reply lands above the recorded line count and the anchor moves; `prompt --format json` returns only that bottom block with `complete: false`. Acceptance item 4 (Herdr) cannot pass without a P5.1 change (owner PRD-261109-2223-01 / ISSUE-261109-2336-02). All other runnable items passed live; the Orca item is not run (no Orca runtime). WIP: `wip/ISSUE-261110-0019-01-20261110T060742Z` @ `7676983e30bd993fb6d0a645016e528568a1337d`.
