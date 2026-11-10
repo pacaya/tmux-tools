@@ -1,47 +1,57 @@
 {
-  "approval_id": "handoff-20261110T060811Z",
+  "approval_id": "review-20261110T090257Z",
   "impact_disposition": {
     "checked_revisions": [
       {
-        "revision": "8a41937a17fe420ff6ffc8dbcf7a9cdb5e4bb9c8",
+        "revision": "d6004b759616d0d6d580f567d62cdcd9a345d84e",
         "sha256": "3a975c52416451effe1e72d26d03992af00f4e9d32677dfde5847d3508784ccc",
         "target": "tmux-tools:ADR-260919-0146-01#claude-rich-launch"
       },
       {
-        "revision": "8a41937a17fe420ff6ffc8dbcf7a9cdb5e4bb9c8",
+        "revision": "d6004b759616d0d6d580f567d62cdcd9a345d84e",
         "sha256": "e073a2a24ce3b5d9f9a1da38858e4f693c2f3ed2ce9a45c7698f024c39ca8bb2",
         "target": "tmux-tools:PRD-260918-0323-01#p8-smoke"
       },
       {
-        "revision": "8a41937a17fe420ff6ffc8dbcf7a9cdb5e4bb9c8",
+        "revision": "d6004b759616d0d6d580f567d62cdcd9a345d84e",
         "sha256": "a28eb660fd94942cad51db5869d5ba74757bff5b2ac3317f6e44699676aa3fcb",
         "target": "tmux-tools:PRD-261107-0825-01#p10-tests"
+      },
+      {
+        "revision": "d6004b759616d0d6d580f567d62cdcd9a345d84e",
+        "sha256": "7519a4a029eb8d4cfead1eb4b4821b45e3d491b22454a75c8804331e3eb3262b",
+        "target": "tmux-tools:PRD-261109-2223-01#p5-io"
       }
     ],
     "status": "accepted"
   },
   "issue": {
-    "revision": "999dc69fc780f714b525330258eff89fc2435b01",
-    "sha256": "35a23463500ec9388cca000dfc458fbdf196493bbb08fd58a45e485a1fec8ee7",
+    "revision": "5be246c4b2de209227e46703d906b4104e8f828f",
+    "sha256": "79a189d7fb6849ca06c9e72d2e18395693efea526e9679e363149b4f65ac7a7d",
     "target": "tmux-tools:ISSUE-261110-0019-01"
   },
   "resolution_mode": "canonical",
   "schema": "planning-contracts.revision.v2",
   "sources": [
     {
-      "revision": "8a41937a17fe420ff6ffc8dbcf7a9cdb5e4bb9c8",
+      "revision": "d6004b759616d0d6d580f567d62cdcd9a345d84e",
       "sha256": "3a975c52416451effe1e72d26d03992af00f4e9d32677dfde5847d3508784ccc",
       "target": "tmux-tools:ADR-260919-0146-01#claude-rich-launch"
     },
     {
-      "revision": "8a41937a17fe420ff6ffc8dbcf7a9cdb5e4bb9c8",
+      "revision": "d6004b759616d0d6d580f567d62cdcd9a345d84e",
       "sha256": "e073a2a24ce3b5d9f9a1da38858e4f693c2f3ed2ce9a45c7698f024c39ca8bb2",
       "target": "tmux-tools:PRD-260918-0323-01#p8-smoke"
     },
     {
-      "revision": "8a41937a17fe420ff6ffc8dbcf7a9cdb5e4bb9c8",
+      "revision": "d6004b759616d0d6d580f567d62cdcd9a345d84e",
       "sha256": "a28eb660fd94942cad51db5869d5ba74757bff5b2ac3317f6e44699676aa3fcb",
       "target": "tmux-tools:PRD-261107-0825-01#p10-tests"
+    },
+    {
+      "revision": "d6004b759616d0d6d580f567d62cdcd9a345d84e",
+      "sha256": "7519a4a029eb8d4cfead1eb4b4821b45e3d491b22454a75c8804331e3eb3262b",
+      "target": "tmux-tools:PRD-261109-2223-01#p5-io"
     }
   ]
 }
