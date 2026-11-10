@@ -2,9 +2,7 @@
 id: ISSUE-261110-0019-01
 kind: issue
 category: enhancement
-status: in-progress
-claimed_by: implement-issue@agentmac
-claimed_at: 2026-11-10T09:03:47Z
+status: ready-for-human
 brief_contract: agent-brief.v3
 context: tmux-tools
 summary: panes that spawn-agent claude starts on the rich surface run in classic scroll mode, not full screen, on every host
@@ -83,3 +81,4 @@ contract:
 - 2026-11-10 `in-progress → ready-for-human` (attempt claimed by `implement-issue@agentmac` at 2026-11-10T05:36:39Z). Blocker, maintainer decision: with `rich` in classic scroll (`hc read --json` reports `how: history`), the PRD-261109-2223-01 P5.1 History mark (line count + last line of the full read before submission) still misses the reply. Claude redraws its input box, separator and status line below new output, so the reply lands above the recorded line count and the anchor moves; `prompt --format json` returns only that bottom block with `complete: false`. Acceptance item 4 (Herdr) cannot pass without a P5.1 change (owner PRD-261109-2223-01 / ISSUE-261109-2336-02). All other runnable items passed live; the Orca item is not run (no Orca runtime). WIP: `wip/ISSUE-261110-0019-01-20261110T060742Z` @ `7676983e30bd993fb6d0a645016e528568a1337d`.
 - 2026-11-10 `ready-for-human → needs-triage`: maintainer Q185 replaced the P5.1 History mark with the first-changed-line rule (PRD-261109-2223-01 P5.1), owned by this issue. Implementation WIP: `agent/wip/ISSUE-261110-0019-01` @ `7676983`. Q186: the maintainer runs the Orca live case from an Orca terminal.
 - 2026-11-10 Orca acceptance evidence (Q186, maintainer-run from an Orca terminal against WIP `7676983`): `TMUX_TOOLS_LIVE_ORCA=1 TMUX_TOOLS_LIVE_ORCA_ONLY="claude rich" cargo test --features test-fixtures --test integration orca_contract_suite -- --nocapture` → `orca contract: claude rich: classic-scroll launch arguments (ADR-260919-0146-01)`, `test orca_contract::orca_contract_suite ... ok`, 1 passed.
+- 2026-11-10 `in-progress → ready-for-human` (attempt claimed by `implement-issue@agentmac` at 2026-11-10T09:03:47Z). Blocker, maintainer decision: real `hc` 0.1.19 reports `how: history` but `complete: false` for a classic-scroll Claude pane from its first turn on (verified on a private core: 12 lines `complete: true` at first idle; 16 lines `complete: false` after one turn on a 120-row screen, nothing scrolled off; only `--lines 0` reports `complete: true`). P5.1 Completeness requires `complete: true` on both reads, so the Herdr acceptance item "Completeness is true" cannot pass; every other check of that item passes live. Owner: PRD-261109-2223-01 P5.1. WIP: `wip/ISSUE-261110-0019-01-20261110T091944Z` @ `7dfacc2b0656aa6eb610e8c1f7ba99a4b0c8158b`.
