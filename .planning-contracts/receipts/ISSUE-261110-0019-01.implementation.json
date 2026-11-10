@@ -1,0 +1,32 @@
+{
+  "issue": {
+    "revision": "5a7f7cc365ec46e5448c248b317e15bd157117e9",
+    "sha256": "5c920ea64fe6b0d35c1e64763b9baa8e2351a3e3c40cf53a1226bffaf2c54b82",
+    "target": "tmux-tools:ISSUE-261110-0019-01"
+  },
+  "receipt_id": "implementation-20261110T100838Z",
+  "resolution_mode": "canonical",
+  "schema": "planning-contracts.implementation-receipt.v2",
+  "sources": [
+    {
+      "revision": "04b9a45e539824f0ea203998bc36e59af64396cd",
+      "sha256": "3a975c52416451effe1e72d26d03992af00f4e9d32677dfde5847d3508784ccc",
+      "target": "tmux-tools:ADR-260919-0146-01#claude-rich-launch"
+    },
+    {
+      "revision": "04b9a45e539824f0ea203998bc36e59af64396cd",
+      "sha256": "e073a2a24ce3b5d9f9a1da38858e4f693c2f3ed2ce9a45c7698f024c39ca8bb2",
+      "target": "tmux-tools:PRD-260918-0323-01#p8-smoke"
+    },
+    {
+      "revision": "04b9a45e539824f0ea203998bc36e59af64396cd",
+      "sha256": "a28eb660fd94942cad51db5869d5ba74757bff5b2ac3317f6e44699676aa3fcb",
+      "target": "tmux-tools:PRD-261107-0825-01#p10-tests"
+    },
+    {
+      "revision": "04b9a45e539824f0ea203998bc36e59af64396cd",
+      "sha256": "16c605a4a5c69459aa491661c76fc4bea358946393d5482093ab186588d012d3",
+      "target": "tmux-tools:PRD-261109-2223-01#p5-io"
+    }
+  ]
+}
