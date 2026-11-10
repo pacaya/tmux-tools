@@ -2,7 +2,7 @@
 id: ISSUE-261110-0019-01
 kind: issue
 category: enhancement
-status: needs-triage
+status: ready-for-agent
 brief_contract: agent-brief.v3
 context: tmux-tools
 summary: panes that spawn-agent claude starts on the rich surface run in classic scroll mode, not full screen, on every host
@@ -42,7 +42,7 @@ contract:
 **Current observable:** with `CLAUDE_CODE_NO_FLICKER=1` in `~/.claude/settings.json`, a `spawn-agent claude` pane is on the alternate screen (`#{alternate_on}` is `1`), and on Herdr `hc read --json` reports `how: stitched` for it.
 
 **Required change:**
-- Implement the PRD-261109-2223-01 P5.1 first-changed-line History mark and its Completeness rule in the Herdr backend, and cover it in the fake-`hc` contract tests.
+- Implement the PRD-261109-2223-01 P5.1 first-changed-line History mark and its Completeness rule in the Herdr backend, and cover it in the fake-`hc` contract tests. The fake `hc get --json` reports a `rows` value that the test sets. Tests in `tests/contract/herdr.rs` that encode the superseded line-count/last-line mark (`a_moved_anchor_line_makes_the_prompt_result_incomplete`, and the `anchored` expectation in `herdr_private_core_claude_completeness_and_capture_all`) are replaced by P5.1 expectations.
 - Add the clause item 1 launch arguments to the built-in `claude` `rich` surface.
 - Extend `tt-vendor-smoke` per clause item 4, then run it and re-stamp the `rich` `validated_version`.
 - Reword `CONTEXT.md` per clause item 3 and README per clause item 5.
@@ -50,7 +50,7 @@ contract:
 **Acceptance:**
 - [ ] Given the built-in registry, when the `claude` `rich` surface resolves, then its launch arguments are `--settings` and `{"env":{"CLAUDE_CODE_NO_FLICKER":"0"}}`, and `rich` is the `default_surface` and the `pre_surface_rendering`, observable at `cargo test --workspace --features test-fixtures`.
 - [ ] Given user settings with `CLAUDE_CODE_NO_FLICKER=1` and a tmux host, when `spawn-agent claude` starts a pane with no `--surface`, then `#{alternate_on}` for that pane is `0` and Claude's status line is on the screen, observable at `tmux display -p` and `tmux-tools capture`.
-- [ ] Given the same settings and an Orca host, in a new case of the PRD-261107-0825-01 P10 opt-in Orca live run (run from inside an Orca terminal), when `spawn-agent claude` starts a pane with no `--surface` and no caller-supplied trailing arguments, then the `claude` process of that pane has both launch argv items on its command line and that `--settings` is the only `--settings` on it, observable at `ps -o args` for that process.
+- [ ] Given the same settings and an Orca host, in a new case that the implementer adds to the PRD-261107-0825-01 P10 opt-in Orca live run (`tests/contract/orca.rs`) and that the maintainer runs with `TMUX_TOOLS_LIVE_ORCA=1` from inside an Orca terminal (Q186), when `spawn-agent claude` starts a pane with no `--surface` and no caller-supplied trailing arguments, then the `claude` process of that pane has both launch argv items on its command line and that `--settings` is the only `--settings` on it, observable at `ps -o args` for that process; the maintainer's result is recorded in `## Triage Notes`, and until then the item is maintainer-run, pending.
 - [ ] Given the same settings and a private hc core (`TT_TEST_HERDR=1`), when `spawn-agent claude` starts a pane and `prompt --format json` sends a prompt that makes Claude print a unique token, then `hc read --json` for that pane reports `how: history`, the result contains the token and no line before the first changed line, and Completeness is true, observable at `prompt --format json`.
 - [ ] Given the fake `hc` in the default suite, observable at `prompt --format json` in `cargo test --workspace --features test-fixtures`: when the read after settle rewrites the last lines of the mark read and adds lines (a classic-scroll agent), then the result starts at the first changed line and Completeness is true; when it only adds lines after the end of the mark read (a shell), then the result is the added lines and Completeness is true; when the first changed line is less than the number of lines of the mark read minus `rows`, then the result starts there and Completeness is false; when the two reads are equal, or the read after settle is the mark read with lines removed from its end, then the result is empty and Completeness follows the same P5.1 test.
 - [ ] Given the smoke, when `cargo run --features vendor-smoke --bin tt-vendor-smoke` runs with the current `claude`, then its output shows, for the `claude` `rich` pane in classic scroll mode, that the pane is not on the alternate screen and that each `rich` declaration of PRD-260918-0323-01 P8 and clause item 4 (bracketed paste with a large paste arriving as one submission, the interrupt-key quit hazard, resume) was measured and holds, and that `rich` declares no `ready_regex`/`busy_regex` (noted, not failed); the smoke fails when any of them does not hold; and `validated_version` of `rich` equals that `claude --version` only after all of them hold, observable at the smoke output and `core/src/agents/builtin.rs`.
