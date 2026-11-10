@@ -74,7 +74,7 @@ contract:
 
 **Required sources:** `tmux-tools:PRD-261109-2223-01` clauses `p8-tests` (items 4–5), `p9-rollout`, `contracts` (the `TMUX_TOOLS_LIVE_HERDR` switch), and `verification`; `p2-selection`, `p3-placement`, `p4-registration`, `p5-io`, `p6-state`, `p7-other-verbs` for the README content; `tmux-tools:PRD-261107-0825-01#p10-tests` for the contract suite; `tmux-tools:PRD-261108-0447-01#p10-tests` for the per-version Claude fixture.
 
-**Current observable:** `prompt` to a full-screen Claude pane on Herdr returns an empty result, because hc reads it as a `how: stitched` screen. `cl` with Claude 2.1.322 prints `claude-teams: claude 2.1.322 not contract-tested`. `TMUX_TOOLS_LIVE_HERDR=1` selects no test run. README names no Herdr host. The installed `tmux-tools` cannot select `herdr`.
+**Current observable (after ISSUE-261110-0019-01):** `prompt` to a full-screen pane on Herdr, which hc reads as `how: stitched`, returns the read after settle from its first changed line, not the whole read. `cl` with Claude 2.1.322 prints `claude-teams: claude 2.1.322 not contract-tested`. `TMUX_TOOLS_LIVE_HERDR=1` selects no test run. README names no Herdr host. The installed `tmux-tools` cannot select `herdr`.
 
 **Required change:**
 - First, implement the PRD-261109-2223-01 P5.1 rule: when the read after settle reports `how: stitched` or `how: screen`, the `prompt` result is that whole read, and Completeness is false.
@@ -86,6 +86,7 @@ contract:
 - Approved contracts: PRD-261109-2223-01 `## Contracts` item "Test switches" (`TMUX_TOOLS_LIVE_HERDR=1`).
 
 **Acceptance:**
+- [ ] Given the fake `hc` in the default suite, when the read after settle reports `how: stitched` (and, in a second case, `how: screen`) and its first lines are the same as in the mark read, then the `prompt` result is that whole read and Completeness is false, observable at `prompt --format json` in `cargo test --workspace --features test-fixtures`.
 - [ ] Given a full-screen Claude pane in a private core (`TT_TEST_HERDR=1`) that `launch --cmd claude` starts with the user setting `CLAUDE_CODE_NO_FLICKER=1`, so `hc read --json` reports `how: stitched`, when `prompt --format json` sends a prompt that makes Claude print a unique token, then the result contains that token and Completeness is false, observable at `prompt --format json`.
 - [ ] Given the release build and Claude 2.1.322, when `tmux-tools claude-teams` starts, then stderr has no `not contract-tested` line, and the default suite replays `2.1.322.jsonl`, observable at stderr and `cargo test`.
 - [ ] Given a plain Herdr terminal in the maintainer's space and tab, when `TMUX_TOOLS_LIVE_HERDR=1` runs the contract suite, then it passes the P8.4 cases, observable at the test run output read with `hc read`.
