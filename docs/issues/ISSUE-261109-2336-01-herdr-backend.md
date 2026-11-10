@@ -2,7 +2,7 @@
 id: ISSUE-261109-2336-01
 kind: issue
 category: enhancement
-status: draft
+status: needs-triage
 brief_contract: agent-brief.v3
 context: tmux-tools
 summary: tmux-tools runs every required verb on Herdr through a herdr Host backend over the hc CLI, tested against a fake hc and a private hc core

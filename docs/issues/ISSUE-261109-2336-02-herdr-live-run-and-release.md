@@ -2,7 +2,7 @@
 id: ISSUE-261109-2336-02
 kind: issue
 category: enhancement
-status: draft
+status: needs-triage
 brief_contract: agent-brief.v3
 context: tmux-tools
 summary: the Herdr backend passes a live run in the maintainer's Herdr window and ships as a minor release with a README Herdr section
