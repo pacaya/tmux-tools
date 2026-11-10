@@ -26,7 +26,7 @@ pub struct NotifyArgs {
 pub fn run(args: &NotifyArgs) -> Result<()> {
     let pane = match &args.target {
         Some(name) => target::resolve(&target::parse(name.as_str()), None, None)?,
-        None if host::current().uses_pane_records() => host::current().calling_pane()?,
+        None if host::current().creates_registered() => host::current().calling_pane()?,
         None => calling_pane()?,
     };
 

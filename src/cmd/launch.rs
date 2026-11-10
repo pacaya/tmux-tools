@@ -97,7 +97,7 @@ pub(crate) fn concise_window_fields(window: &WindowReport) -> String {
 /// Warn on stderr, once, when the pane was gone before its window was measured. A host
 /// without `tile` measures no window, so it never warns.
 pub(crate) fn warn_if_unmeasured(landing: &Landing) {
-    if landing.window.is_none() && !host::current().uses_pane_records() {
+    if landing.window.is_none() && !host::current().creates_registered() {
         eprintln!(
             "warning: pane {} no longer exists; window geometry not measured",
             landing.pane_id
@@ -209,18 +209,19 @@ pub(crate) fn cd_prefix(dir: &str) -> String {
 /// directory. When that directory is unreadable or not UTF-8, there is no prefix and
 /// the pane starts where Orca starts it.
 pub(crate) fn caller_dir_prefix() -> Option<String> {
-    if !host::current().uses_pane_records() {
+    if host::current().pane_starts_in_caller_dir() {
         return None;
     }
     let dir = caller_dir().ok()?;
     Some(cd_prefix(dir.to_str()?))
 }
 
-/// The Keep-alive wrap of `cmd` on the current host, or `cmd` bare. On a registry host
-/// (Orca) the login shell that runs `--command` stays after the command exits, which
-/// is the wrap; `--bare` runs `exec <cmd>` so the pane closes with it (P9.9).
+/// The Keep-alive wrap of `cmd` on the current host, or `cmd` bare. On Orca the login
+/// shell that runs `--command` stays after the command exits, which is the wrap;
+/// `--bare` runs `exec <cmd>` so the pane closes with it (P9.9). On tmux and Herdr the
+/// wrap keeps a shell after the command (PRD-261109-2223-01 P7.5).
 pub(crate) fn keep_alive(cmd: &str, bare: bool) -> String {
-    match (host::current().uses_pane_records(), bare) {
+    match (host::current().shell_stays_after_command(), bare) {
         (true, true) => format!("exec {cmd}"),
         (true, false) => cmd.to_owned(),
         (false, true) => cmd.to_owned(),
@@ -228,12 +229,24 @@ pub(crate) fn keep_alive(cmd: &str, bare: bool) -> String {
     }
 }
 
-/// The `--format json` object of a spawning verb. On a registry host the keys Orca has
-/// no source for are `null`, so every host gives the same keys (P9.13).
-pub(crate) fn spawn_json<T: Serialize>(output: &T) -> Result<String> {
-    if !host::current().uses_pane_records() {
+/// The `--format json` object of a spawning verb for the new pane `pane`. On a host
+/// that measures no window the keys it has no source for are `null`, so every host
+/// gives the same keys (P9.13); on Herdr `window_id` is the pane's `herdr.tab` label
+/// or `null` (PRD-261109-2223-01 P7.3).
+pub(crate) fn spawn_json<T: Serialize>(output: &T, pane: &str) -> Result<String> {
+    let host = host::current();
+    if !host.creates_registered() {
         return Ok(serde_json::to_string(&hosted(output))?);
     }
+    let window_id = if host.host() == host::Host::Herdr {
+        host.describe_pane(Some(pane))?
+            .summary
+            .ok()
+            .map(|summary| summary.window_name)
+            .filter(|tab| !tab.is_empty())
+    } else {
+        None
+    };
     let mut value = serde_json::to_value(hosted(output))?;
     {
         if let Some(object) = value.as_object_mut() {
@@ -245,6 +258,9 @@ pub(crate) fn spawn_json<T: Serialize>(output: &T) -> Result<String> {
                 "below_floor",
             ] {
                 object.insert(key.to_owned(), serde_json::Value::Null);
+            }
+            if let Some(tab) = window_id {
+                object.insert("window_id".to_owned(), serde_json::Value::String(tab));
             }
         }
     }
@@ -289,7 +305,7 @@ fn render_output(args: &LaunchArgs, landing: &Landing, launched_at: &str) -> Res
                 relocated: landing.relocated,
                 window: WindowJson::of(landing),
             };
-            println!("{}", spawn_json(&output)?);
+            println!("{}", spawn_json(&output, &landing.pane_id)?);
         }
     }
 

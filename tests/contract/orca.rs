@@ -617,6 +617,8 @@ const TMUX_STATUS_KEYS: &[&str] = &[
     "min_pane_rows",
     "below_floor",
     "host_state",
+    // PRD-261109-2223-01 P6.3.
+    "host_word",
 ];
 const TMUX_LIST_ROW_KEYS: &[&str] = &[
     "host",

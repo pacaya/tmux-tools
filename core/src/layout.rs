@@ -401,7 +401,7 @@ pub fn place(
     registration: &Registration<'_>,
     registry: &Registry,
 ) -> Result<Landing> {
-    if host::current().uses_pane_records() {
+    if host::current().creates_registered() {
         return place_registered(command, destination, registration);
     }
     let in_tmux = env::var_os("TMUX").is_some();
@@ -473,10 +473,12 @@ pub fn place(
     })
 }
 
-/// Placement on a registry host (P9.2): no `--split` and `--split window` open a new
-/// tab, `--split h|v` split the target (or the calling pane). The backend reserves the
-/// name, creates the pane, and writes its Pane record (P4.4). The host controls the
-/// layout, so nothing is measured and the [`Landing`] carries no window.
+/// Placement on a host that creates panes with their registration (P9.2;
+/// PRD-261109-2223-01 P3): no `--split` and `--split window` open a new tab, `--split
+/// h|v` split the target (or the calling pane) or join its tab. The backend creates the
+/// pane with its name and registration (on Orca it reserves the name and writes its
+/// Pane record, P4.4). The host controls the layout, so nothing is measured and the
+/// [`Landing`] carries no window.
 fn place_registered(
     command: &str,
     destination: &Destination<'_>,

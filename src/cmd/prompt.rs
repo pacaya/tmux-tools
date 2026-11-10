@@ -234,10 +234,11 @@ pub fn run(args: &PromptArgs) -> Result<()> {
     Ok(())
 }
 
-/// `prompt` on a host with `submit_confirmation` (Orca, P9.6). Delivery is determined
-/// before any transmission; the prompt is one host send that observes its submission;
-/// the History mark is the host's read cursor; Host state takes part in the settle; the
-/// host reports no width or alternate-screen state, so Completeness is false (P9.3).
+/// `prompt` on a host with `submit_confirmation` (Orca P9.6, Herdr PRD-261109-2223-01
+/// P6). Delivery is determined before any transmission; the prompt is one host send
+/// that observes its submission; the History mark is the host's own; Host state takes
+/// part in the settle; the host reports the result's Completeness (on Orca always
+/// false, P9.3; on Herdr per P5.1).
 fn run_with_submission(
     args: &PromptArgs,
     pane: &str,
@@ -255,6 +256,15 @@ fn run_with_submission(
     };
     let delivery = if guaranteed {
         DeliveryOutcome::Guaranteed
+    } else if host.refuses_unguaranteed_multiline() && args.text.contains('\n') {
+        // PRD-261109-2223-01 P6.6: hc does not report whether the program brackets a
+        // paste, so a multi-line prompt to a pane with no Host state is refused.
+        DeliveryOutcome::Refused(format!(
+            "refusing to send a multi-line prompt to pane {pane}: the program reports no \
+             Host state, so {} cannot guarantee one-submission delivery and delivering \
+             could submit fragments; wait for the agent to come up and retry",
+            host.host()
+        ))
     } else if declared_bracketed_paste && args.text.contains('\n') {
         DeliveryOutcome::Refused(format!(
             "refusing to send a multi-line prompt to pane {pane}: the surface declares \
@@ -293,17 +303,22 @@ fn run_with_submission(
     cfg.host_state =
         crate::cmd::wait_idle::host_state_gate(args.until.is_some(), Some(submitted_ms));
     let outcome = wait_for_idle(pane, &cfg)?;
-    let output_since_prompt = strip_ansi(&host.read_history_since(pane, &mark)?);
+    let submit = host.settle_submission(pane, submit)?;
+    let history = host.read_history_since_complete(pane, &mark)?;
+    let output_since_prompt = strip_ansi(&history.text);
     let turn_observed = outcome.busy_seen;
-    let complete = false;
+    let complete = history.complete;
 
     if matches!(args.common.format, Format::Raw | Format::Concise) {
         emit_turn_observation(turn_observed);
-        eprintln!(
-            "tmux-tools: prompt: completeness: incomplete: {} reports no pane width or \
-             full-screen state",
-            host.host()
-        );
+        if complete {
+            eprintln!("tmux-tools: prompt: completeness: complete");
+        } else {
+            eprintln!(
+                "tmux-tools: prompt: completeness: incomplete: {}",
+                history.incomplete_reason
+            );
+        }
     }
 
     match args.common.format {

@@ -24,7 +24,9 @@ struct ListJsonRow {
     host: Host,
     name: Option<String>,
     agent: Option<String>,
-    session: String,
+    /// The pane's session; on Herdr its `herdr.space` label or `null`
+    /// (PRD-261109-2223-01 P7.3).
+    session: Option<String>,
     pane: String,
     access: Option<String>,
     launched: Option<String>,
@@ -69,7 +71,7 @@ fn orphans(rows: &[PaneRow], args: &ListArgs) -> Result<Vec<bool>> {
     let live: Vec<PaneRow>;
     let live_rows = if rows.iter().all(|row| row.parent.is_none()) {
         &[][..]
-    } else if args.all || host::current().uses_pane_records() {
+    } else if args.all || host::current().creates_registered() {
         rows
     } else {
         // A parent can live outside the listed scope.
@@ -217,7 +219,8 @@ fn render_json(rows: &[PaneRow], orphans: &[bool]) -> Result<()> {
                 host: host.host(),
                 name: row.name.clone(),
                 agent: row.agent.clone(),
-                session: row.session.clone(),
+                session: (host.host() != Host::Herdr || !row.session.is_empty())
+                    .then(|| row.session.clone()),
                 pane: pane_label(row),
                 access: row.access.clone(),
                 launched: row.launched_at.clone(),
@@ -305,7 +308,7 @@ mod tests {
             host: Host::Tmux,
             name: row.name.clone(),
             agent: row.agent.clone(),
-            session: row.session.clone(),
+            session: Some(row.session.clone()),
             pane: pane_label(&row),
             access: row.access.clone(),
             launched: row.launched_at.clone(),
@@ -331,7 +334,7 @@ mod tests {
             host: Host::Tmux,
             name: None,
             agent: None,
-            session: "s".into(),
+            session: Some("s".into()),
             pane: "0.w:0.%1".into(),
             access: None,
             launched: None,

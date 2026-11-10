@@ -31,8 +31,10 @@ pub fn parse(s: &str) -> TargetSpec {
 }
 
 pub fn resolve(spec: &TargetSpec, session: Option<&str>, window: Option<&str>) -> Result<String> {
-    if host::current().host() == Host::Orca {
-        return resolve_on_orca(spec, session, window);
+    match host::current().host() {
+        Host::Orca => return resolve_on_orca(spec, session, window),
+        Host::Herdr => return resolve_on_herdr(spec, session, window),
+        Host::Tmux => {}
     }
     match spec {
         TargetSpec::PaneId(pane_id) => Ok(pane_id.to_owned()),
@@ -69,10 +71,33 @@ fn resolve_on_orca(
     names::find_pane_by_name(name)?.ok_or_else(|| anyhow!("no pane registered with name {name:?}"))
 }
 
-/// Exit 3 for `--session` or `--window` on a host without sessions and windows (P9.1).
+/// PRD-261109-2223-01 P7.6: on Herdr a Target is a pane name or an hc address `t<n>`.
+/// A registered name wins; a value is an hc address only when no registered name
+/// matches it, and a dead name fails as an unknown one (P4.4). A verb without
+/// `--target` acts on the calling terminal. `--session` and `--window` are unsupported.
+fn resolve_on_herdr(
+    spec: &TargetSpec,
+    session: Option<&str>,
+    window: Option<&str>,
+) -> Result<String> {
+    require_no_scope(session, window)?;
+    let host = host::current();
+    let value = match spec {
+        TargetSpec::SmartDefault => return host.calling_pane(),
+        TargetSpec::PaneId(value) | TargetSpec::WindowId(value) | TargetSpec::Name(value) => value,
+    };
+    match names::find_pane_by_name(value)? {
+        Some(pane) => Ok(pane),
+        None if host.is_pane_address(value) => Ok(value.to_owned()),
+        None => Err(anyhow!("no pane registered with name {value:?}")),
+    }
+}
+
+/// Exit 3 for `--session` or `--window` on a host without sessions and windows (P9.1,
+/// PRD-261109-2223-01 P3.3).
 pub fn require_no_scope(session: Option<&str>, window: Option<&str>) -> Result<()> {
     let host = host::current().host();
-    if host == Host::Orca {
+    if host != Host::Tmux {
         if session.is_some() {
             return Err(Unsupported {
                 feature: "--session",
@@ -128,10 +153,16 @@ pub fn calling_pane_id() -> Option<String> {
     if let Some(leader) = crate::team::leader_handle() {
         return Some(leader);
     }
-    if host::current().host() == Host::Orca {
-        return env::var(host::ORCA_TERMINAL_HANDLE)
-            .ok()
-            .filter(|handle| !handle.trim().is_empty());
+    // On Orca and Herdr the calling pane is the host's own variable, read through the
+    // Host port; `TMUX_PANE` is never read there (PRD-261109-2223-01 P2.6).
+    match host::current().host() {
+        Host::Orca => {
+            return env::var(host::ORCA_TERMINAL_HANDLE)
+                .ok()
+                .filter(|handle| !handle.trim().is_empty());
+        }
+        Host::Herdr => return host::current().calling_pane().ok(),
+        Host::Tmux => {}
     }
     if let Ok(pane) = env::var("TMUX_PANE") {
         let trimmed = pane.trim();

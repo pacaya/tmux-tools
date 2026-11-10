@@ -45,6 +45,10 @@ fn calling_registration() -> Result<Option<Registered>> {
             .iter()
             .any(|(pane, _)| *pane == handle)
             .then_some(handle)
+    } else if host.creates_registered() {
+        // On Herdr the calling pane is `HC_TERMINAL_ID`, required; it is driven when it
+        // carries `tt.name` (PRD-261109-2223-01 P7.2). `TMUX_PANE` is never read (P2.6).
+        Some(host.calling_pane()?)
     } else if target::in_tmux() {
         target::calling_pane_id()
     } else {
@@ -60,8 +64,8 @@ fn calling_registration() -> Result<Option<Registered>> {
 /// a pane that `spawn-agent` or `launch` creates.
 pub(crate) fn calling_pane_name() -> Result<Option<String>> {
     let host = host::current();
-    if host.uses_pane_records() && host.calling_pane().is_err() {
-        // No calling Orca pane is known, so it is no tmux-tools pane.
+    if host.creates_registered() && host.calling_pane().is_err() {
+        // No calling Orca pane or Herdr terminal is known, so it is no tmux-tools pane.
         return Ok(None);
     }
     match calling_registration() {

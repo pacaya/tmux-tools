@@ -2,7 +2,8 @@
 //! panes of a Host.
 //!
 //! A [`Host`] is the terminal program whose panes the tool drives. A Host backend is the
-//! implementation of [`HostPort`] for one host: [`TmuxHost`] and [`OrcaHost`]. The
+//! implementation of [`HostPort`] for one host: [`TmuxHost`], [`OrcaHost`] and
+//! [`HerdrHost`]. The
 //! [`HostSelection`] of an invocation picks one (P3); [`current`] returns it. Every
 //! module outside a backend (the verbs, [`crate::layout`], [`crate::target`],
 //! [`crate::names`] and [`crate::idle`]) reaches a host only through this port, and no
@@ -23,9 +24,13 @@ use serde::Serialize;
 use crate::layout::{Registration, WindowGeometry};
 use crate::names::Registered;
 
+mod herdr;
 mod orca;
 mod tmux;
 
+pub use self::herdr::{
+    hc_name, HerdrHost, HC_TERMINAL_ID, TMUX_TOOLS_HERDR_SPACE, TMUX_TOOLS_HERDR_TAB,
+};
 pub use self::orca::{OrcaHost, ORCA_TERMINAL_HANDLE, ORCA_WORKTREE_ID};
 pub use self::tmux::TmuxHost;
 use crate::team::{TT_HOST, TT_TEAM};
@@ -36,14 +41,16 @@ use crate::team::{TT_HOST, TT_TEAM};
 pub enum Host {
     Tmux,
     Orca,
+    Herdr,
 }
 
 impl Host {
-    /// The host's name as the CLI reports it: `tmux` or `orca`.
+    /// The host's name as the CLI reports it: `tmux`, `orca` or `herdr`.
     pub fn as_str(self) -> &'static str {
         match self {
             Host::Tmux => "tmux",
             Host::Orca => "orca",
+            Host::Herdr => "herdr",
         }
     }
 }
@@ -84,8 +91,9 @@ pub struct HostSelection {
 
 impl HostSelection {
     /// Select the host from the process environment: `TMUX_TOOLS_HOST` when set
-    /// (`tmux` or `orca`; anything else, the empty value included, is an error); otherwise `$TMUX` set selects
-    /// tmux and `ORCA_TERMINAL_HANDLE` set selects orca, in that order; otherwise tmux.
+    /// (`tmux`, `orca` or `herdr`; anything else, the empty value included, is an
+    /// error); otherwise `$TMUX` set selects tmux, `ORCA_TERMINAL_HANDLE` set selects
+    /// orca, and `HC_TERMINAL_ID` set selects herdr, in that order; otherwise tmux.
     pub fn from_env() -> Result<HostSelection> {
         Self::from_lookup(|name| std::env::var(name).ok())
     }
@@ -111,8 +119,9 @@ impl HostSelection {
             let host = match value.as_str() {
                 "tmux" => Host::Tmux,
                 "orca" => Host::Orca,
+                "herdr" => Host::Herdr,
                 other => anyhow::bail!(
-                    "{TMUX_TOOLS_HOST}={other:?} is not a host; valid values are tmux and orca"
+                    "{TMUX_TOOLS_HOST}={other:?} is not a host; valid values are tmux, orca and herdr"
                 ),
             };
             return Ok(HostSelection {
@@ -121,7 +130,11 @@ impl HostSelection {
             });
         }
         let set = |name: &str| lookup(name).is_some_and(|value| !value.is_empty());
-        for (env_var, host) in [("TMUX", Host::Tmux), (ORCA_TERMINAL_HANDLE, Host::Orca)] {
+        for (env_var, host) in [
+            ("TMUX", Host::Tmux),
+            (ORCA_TERMINAL_HANDLE, Host::Orca),
+            (HC_TERMINAL_ID, Host::Herdr),
+        ] {
             if set(env_var) {
                 return Ok(HostSelection {
                     host,
@@ -153,6 +166,11 @@ pub fn selection() -> Result<HostSelection> {
         .map_err(|message| anyhow::anyhow!(message))?;
     if let SelectionSource::Team(_) = selection.source {
         crate::team::current()?;
+    }
+    // PRD-261109-2223-01 P2.3: a selected Herdr whose `hc` is missing or whose
+    // `hc server status` fails ends the invocation before any verb runs.
+    if selection.host == Host::Herdr {
+        current().server_identity()?;
     }
     Ok(selection)
 }
@@ -249,11 +267,16 @@ pub struct HostCapabilities {
 /// any verb runs.
 pub fn current() -> &'static dyn HostPort {
     static ORCA: std::sync::OnceLock<OrcaHost> = std::sync::OnceLock::new();
+    static HERDR: std::sync::OnceLock<HerdrHost> = std::sync::OnceLock::new();
     match selection_cell() {
         Ok(HostSelection {
             host: Host::Orca,
             source,
         }) => ORCA.get_or_init(|| OrcaHost::new(source.clone())),
+        Ok(HostSelection {
+            host: Host::Herdr,
+            source,
+        }) => HERDR.get_or_init(|| HerdrHost::new(source.clone())),
         _ => &TmuxHost,
     }
 }
@@ -447,6 +470,18 @@ pub enum WindowHome<'a> {
     ManagedSession,
 }
 
+/// The `prompt` result read from a History mark, with its Completeness
+/// (PRD-260918-0323-01 P7).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HistorySince {
+    /// Every history line after the mark.
+    pub text: String,
+    /// Whether everything after the mark could be supplied.
+    pub complete: bool,
+    /// Why the result is incomplete, for the raw and concise stderr notice.
+    pub incomplete_reason: String,
+}
+
 /// The pane-level operations of one host.
 ///
 /// Targets are host-native strings: a pane id, a window id, or a scope that a backend
@@ -619,6 +654,44 @@ pub trait HostPort: Sync {
         false
     }
 
+    /// Whether this host creates every pane through [`HostPort::create_registered`],
+    /// with its registration written at creation: a host with no tmux sessions or
+    /// windows, which measures no geometry. A registry host does; Herdr does with no
+    /// Pane records (PRD-261109-2223-01 P3.4).
+    fn creates_registered(&self) -> bool {
+        self.uses_pane_records()
+    }
+
+    /// Whether the program that runs a pane command keeps a shell after the command
+    /// exits, so the command itself is the Keep-alive wrap (Orca, P9.9).
+    fn shell_stays_after_command(&self) -> bool {
+        false
+    }
+
+    /// Whether a new pane starts in the caller's directory; when it does not (Orca),
+    /// the pane command `cd`s there.
+    fn pane_starts_in_caller_dir(&self) -> bool {
+        true
+    }
+
+    /// Whether `value` has the form of this host's own pane address, which a Target
+    /// may name directly (Orca `term_…`, Herdr `t<n>`).
+    fn is_pane_address(&self, _value: &str) -> bool {
+        false
+    }
+
+    /// The host's exact status word for `pane` (`status` JSON `host_word`); `None`
+    /// when the host reports none.
+    fn host_word(&self, _pane: &str) -> Result<Option<String>> {
+        Ok(None)
+    }
+
+    /// Whether `prompt` refuses a multi-line prompt whose one-submission delivery is
+    /// not guaranteed, whatever the Surface declares (Herdr, PRD-261109-2223-01 P6.6).
+    fn refuses_unguaranteed_multiline(&self) -> bool {
+        false
+    }
+
     /// The pane registered with `name`; `None` when no pane is. An error when the name
     /// is ambiguous, or the host cannot tell whether it is live.
     fn find_registered(&self, name: &str) -> Result<Option<String>> {
@@ -662,6 +735,20 @@ pub trait HostPort: Sync {
         anyhow::bail!("{} has no history read cursor", self.host())
     }
 
+    /// [`HostPort::read_history_since`] with its Completeness. The default reports
+    /// incomplete: a host whose history is a read cursor reports no pane width and no
+    /// full-screen state (P9.3).
+    fn read_history_since_complete(&self, pane: &str, cursor: &str) -> Result<HistorySince> {
+        Ok(HistorySince {
+            text: self.read_history_since(pane, cursor)?,
+            complete: false,
+            incomplete_reason: format!(
+                "{} reports no pane width or full-screen state",
+                self.host()
+            ),
+        })
+    }
+
     /// On a host with `submit_confirmation`: whether one-submission delivery of a prompt
     /// to `pane`, registered with `agent`, is guaranteed (P9.6). An error when the host
     /// cannot deliver a prompt at all.
@@ -678,6 +765,12 @@ pub trait HostPort: Sync {
         _wait: std::time::Duration,
     ) -> Result<Submission> {
         anyhow::bail!("{} does not observe prompt submission", self.host())
+    }
+
+    /// The final `submit` of a prompt whose [`HostPort::submit_prompt`] answered
+    /// `submit`, judged after the settle step. The default keeps `submit`.
+    fn settle_submission(&self, _pane: &str, submit: Submission) -> Result<Submission> {
+        Ok(submit)
     }
 
     /// The Host state of `pane` with the time it began, in milliseconds since the Unix
@@ -777,6 +870,26 @@ mod tests {
             invalid.contains("tmux") && invalid.contains("orca"),
             "{invalid}"
         );
+
+        // PRD-261109-2223-01 P2.1–P2.2: `herdr` is a valid value, and
+        // `HC_TERMINAL_ID` selects it after `$TMUX` and `ORCA_TERMINAL_HANDLE`.
+        let herdr = select(&[(HC_TERMINAL_ID, "t1")]).unwrap();
+        assert_eq!(
+            (herdr.host, herdr.source),
+            (
+                Host::Herdr,
+                SelectionSource::Detected(HC_TERMINAL_ID.to_owned())
+            )
+        );
+        let tmux_first = select(&[("TMUX", "/s,1,0"), (HC_TERMINAL_ID, "t1")]).unwrap();
+        assert_eq!(tmux_first.host, Host::Tmux);
+        let orca_first =
+            select(&[(ORCA_TERMINAL_HANDLE, "term_x"), (HC_TERMINAL_ID, "t1")]).unwrap();
+        assert_eq!(orca_first.host, Host::Orca);
+        let override_herdr = select(&[(TMUX_TOOLS_HOST, "herdr"), ("TMUX", "/s,1,0")]).unwrap();
+        assert_eq!(override_herdr.host, Host::Herdr);
+        let error = select(&[(TMUX_TOOLS_HOST, "foo")]).unwrap_err().to_string();
+        assert!(error.contains("herdr"), "{error}");
 
         let empty = select(&[(TMUX_TOOLS_HOST, ""), ("TMUX", "/s,1,0")])
             .unwrap_err()

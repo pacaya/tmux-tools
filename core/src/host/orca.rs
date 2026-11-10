@@ -23,7 +23,8 @@ use crate::layout::{Registration, WindowGeometry};
 use crate::names::{self, Registered};
 use crate::registry::{self, NameTaken, PaneLiveness, PaneRecord, RecordCheck};
 
-mod keys;
+/// tmux's key grammar, shared with the Herdr backend (PRD-261109-2223-01 P5.2).
+pub(super) mod keys;
 
 /// The calling pane's terminal handle, set by Orca inside its terminals.
 pub const ORCA_TERMINAL_HANDLE: &str = "ORCA_TERMINAL_HANDLE";
@@ -1074,6 +1075,18 @@ impl HostPort for OrcaHost {
 
     fn uses_pane_records(&self) -> bool {
         true
+    }
+
+    fn shell_stays_after_command(&self) -> bool {
+        true
+    }
+
+    fn pane_starts_in_caller_dir(&self) -> bool {
+        false
+    }
+
+    fn is_pane_address(&self, value: &str) -> bool {
+        crate::target::is_orca_handle(value)
     }
 
     fn find_registered(&self, name: &str) -> Result<Option<String>> {

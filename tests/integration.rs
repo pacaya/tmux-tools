@@ -8857,10 +8857,11 @@ fn status_not_in_tmux_output_is_unchanged_and_loads_no_registry() {
     for (format, expected) in [
         ("concise", "not in tmux\n"),
         ("raw", "not in tmux\n"),
-        // ISSUE-261107-0921-02 adds `host` and `host_state`; nothing else changes.
+        // ISSUE-261107-0921-02 adds `host` and `host_state`, and PRD-261109-2223-01
+        // P6.3 adds `host_word`; nothing else changes.
         (
             "json",
-            "{\n  \"host\": \"tmux\",\n  \"in_tmux\": false,\n  \"host_state\": null\n}\n",
+            "{\n  \"host\": \"tmux\",\n  \"in_tmux\": false,\n  \"host_state\": null,\n  \"host_word\": null\n}\n",
         ),
     ] {
         let out = server.cli_env(&["status", "--format", format], broken.path());
@@ -12662,6 +12663,11 @@ fn list_json_rows_carry_host_and_host_state_and_an_empty_list_is_an_empty_array(
 #[cfg(feature = "test-fixtures")]
 #[path = "contract/orca.rs"]
 mod orca_contract;
+
+// --- The Herdr backend (PRD-261109-2223-01 P8): fake `hc`, and the opt-in private core
+
+#[path = "contract/herdr.rs"]
+mod herdr_contract;
 
 // --- P3 host selection and the P4.1 name check, on tmux (ISSUE-261107-0921-03) -------
 

@@ -2,7 +2,7 @@
 id: ISSUE-261109-2336-01
 kind: issue
 category: enhancement
-status: in-review
+status: done
 claimed_by: implement-issue@agentmac
 claimed_at: 2026-11-10T01:51:23Z
 brief_contract: agent-brief.v3
@@ -188,7 +188,22 @@ contract:
 
 **Test seam:** the `tmux-tools` CLI binary driven by `tests/integration.rs` against a fake `hc` (`tests/contract/fake_hc.py`, call log, state directory) and, with `TT_TEST_HERDR=1`, against a private hc core (`HC_SESSION=tt-tests-<pid>`); `tmux-tools claude-teams` stderr and the fake `claude` argv for P7.7.
 
+## Code Review
+
+Review: `issue-261109-2336-01-code-review-20261110-024758.md` — Outcome: ACCEPTED
+
+- Scope proposal Q1 (found during correction, confirmed in a private core) — CHANGE: PRD-261109-2223-01 P5.1 gives an empty `prompt` result for a Claude pane on Herdr: hc reads Claude as a 120-line `how: stitched` screen with no growing history, the reply is drawn above the History mark, so "every line after that point" is empty (`complete: false`). The implementation follows P5.1 as approved. OWNER: maintainer (Changes prior decision on P5.1).
+
 ## Triage Notes
 
 - 2026-11-09: triage step done. Private-core live checks for `herdr-bracketed-paste`, `herdr-keys-charset`, `herdr-history-mark` ran; the maintainer approved each result (Q178–Q180); they are recorded in PRD-261109-2223-01 P5.1, P5.2, P6.6, P8.4.
 - 2026-11-09: dispatch readiness passed; brief repaired (finished triage-step paragraph deleted; P7.7 acceptance moved to the claude-teams Launcher stderr and the spawn-agent call log); ready-for-agent.
+
+## Resolution
+
+- Commit: `feat: tmux-tools runs every required verb on Herdr through a herdr Host backend over the hc CLI, tested against a fake hc and a private hc core (ISSUE-261109-2336-01)`
+- Route: `claude — deepseek-suspended` (Opus, medium) for implementation and batches 1–2; batch 3 `claude — regression` (Opus, high), which found M4 a false positive and changed nothing.
+- TDD: red-green at the CLI binary seam (fake `hc` call log and state; `TT_TEST_HERDR=1` private core).
+- Review: `issue-261109-2336-01-code-review-20261110-024758.md` — ACCEPTED after 3 correction batches; M1–M3 fixed, M4 and NEW-1/CODEX-2 dismissed. Scope proposal Q1 (P5.1 empty prompt result for a Claude pane) is with the maintainer.
+- Suite: `TT_TEST_HERDR=1 cargo test --workspace --features test-fixtures` 514 passed, 0 failed; default run 339 passed, 1 failed (`wait_idle_timeout_concise_first_line_includes_idle_for`, timing flake that also fails on base 12bb8c4). Both run with this session's `TT_TEAM`/`TT_HOST`/`TMUX` unset; with them set, four Orca live-run tests fail with `team not found` on base too. Leak checks clean: no `tt-tests-*` under `~/.local/state/herdr-core/`; the default core's `hc ls --all --json` is unchanged.
+- Date: 2026-11-10

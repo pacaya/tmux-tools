@@ -184,7 +184,7 @@ fn launch_command(argv: &[String], cwd: Option<&PathBuf>, bare: bool) -> Result<
             // shell there, so on tmux the pane command keeps the path as given. Orca
             // starts it in the worktree root, so on Orca the path is made absolute
             // against the caller's directory, as tmux would see it.
-            let cwd = if cwd.is_relative() && host::current().uses_pane_records() {
+            let cwd = if cwd.is_relative() && !host::current().pane_starts_in_caller_dir() {
                 caller_dir()?.join(cwd)
             } else {
                 cwd.clone()
@@ -199,7 +199,7 @@ fn launch_command(argv: &[String], cwd: Option<&PathBuf>, bare: bool) -> Result<
         None => caller_dir_prefix(),
     };
 
-    if bare && !host::current().uses_pane_records() {
+    if bare && !host::current().shell_stays_after_command() {
         return Ok(match cwd_prefix {
             Some(prefix) => format!("{prefix} {command}"),
             None => command,
@@ -255,7 +255,7 @@ fn render_output(
                 relocated: landing.relocated,
                 window: WindowJson::of(landing),
             };
-            println!("{}", spawn_json(&output)?);
+            println!("{}", spawn_json(&output, &landing.pane_id)?);
         }
         Format::Raw => println!("{}", landing.pane_id),
     }

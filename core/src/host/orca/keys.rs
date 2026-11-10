@@ -4,9 +4,9 @@
 
 use anyhow::{bail, Result};
 
-const CTRL: u8 = 4;
-const META: u8 = 2;
-const SHIFT: u8 = 1;
+pub(in crate::host) const CTRL: u8 = 4;
+pub(in crate::host) const META: u8 = 2;
+pub(in crate::host) const SHIFT: u8 = 1;
 
 /// The bytes one `send` argument stands for: the key's bytes when tmux parses the
 /// argument as a key, else the argument as literal text.
@@ -19,13 +19,13 @@ pub(super) fn translate(argument: &str) -> Result<String> {
 
 /// A key without its modifiers.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum Key {
+pub(in crate::host) enum Key {
     Char(char),
     Named(Named),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum Named {
+pub(in crate::host) enum Named {
     F(u8),
     Insert,
     Delete,
@@ -95,7 +95,7 @@ fn named(name: &str) -> Option<Named> {
 
 /// tmux's parse of a key string: its modifiers and key, or `None` when tmux does not
 /// read the string as a key.
-fn parse(string: &str) -> Option<(u8, Key)> {
+pub(in crate::host) fn parse(string: &str) -> Option<(u8, Key)> {
     // `0x<hex>` is a key by code point.
     if let Some(hex) = string.strip_prefix("0x") {
         let code = u32::from_str_radix(hex, 16).ok()?;

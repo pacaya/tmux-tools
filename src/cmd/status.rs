@@ -20,8 +20,10 @@ pub struct StatusArgs {
 #[derive(Serialize)]
 struct StatusJson {
     host: Host,
-    session: String,
-    window: String,
+    /// The pane's session; on Herdr its `herdr.space` label or `null`.
+    session: Option<String>,
+    /// The pane's window; on Herdr its `herdr.tab` label or `null`.
+    window: Option<String>,
     window_index: Option<u64>,
     pane: Option<u64>,
     pane_id: String,
@@ -38,6 +40,9 @@ struct StatusJson {
     /// `tile`.
     below_floor: Option<bool>,
     host_state: Option<HostState>,
+    /// The host's exact status word; always `null` on tmux and Orca
+    /// (PRD-261109-2223-01 P6.3).
+    host_word: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -45,10 +50,11 @@ struct NotInTmuxJson {
     host: Host,
     in_tmux: bool,
     host_state: Option<HostState>,
+    host_word: Option<String>,
 }
 
 pub fn run(args: &StatusArgs) -> Result<()> {
-    if host::current().uses_pane_records() {
+    if host::current().creates_registered() {
         return run_on_registry_host(args);
     }
     if args.common.target.is_none() && env::var_os("TMUX").is_none() {
@@ -76,8 +82,10 @@ pub fn run(args: &StatusArgs) -> Result<()> {
     Ok(())
 }
 
-/// `status` on a registry host (Orca): the pane is `--target` or the calling pane, its
-/// `window` is its tab id, and the keys Orca has no source for are `null` (P9.13).
+/// `status` on a host without tmux sessions and windows (Orca, Herdr): the pane is
+/// `--target` or the calling pane, its `window` is its tab (Orca tab id, Herdr
+/// `herdr.tab`), and the keys the host has no source for are `null` (P9.13;
+/// PRD-261109-2223-01 P7.3).
 fn run_on_registry_host(args: &StatusArgs) -> Result<()> {
     let pane = target::resolve_from_common(&args.common)?;
     let description = host::current().describe_pane(Some(&pane))?;
@@ -98,10 +106,14 @@ fn run_on_registry_host(args: &StatusArgs) -> Result<()> {
         Format::Json => {
             let row = description.summary?;
             let host = host::current();
+            // On Herdr an absent label is `null`; Orca keeps its reported strings.
+            let label = |value: &str| {
+                (host.host() != Host::Herdr || !value.is_empty()).then(|| value.to_owned())
+            };
             let json = StatusJson {
                 host: host.host(),
-                session: row.session.clone(),
-                window: row.window_name.clone(),
+                session: label(&row.session),
+                window: label(&row.window_name),
                 window_index: None,
                 pane: None,
                 pane_id: row.pane_id.clone(),
@@ -114,6 +126,7 @@ fn run_on_registry_host(args: &StatusArgs) -> Result<()> {
                 min_pane_rows: None,
                 below_floor: None,
                 host_state: host.host_state(&row.pane_id)?,
+                host_word: host.host_word(&row.pane_id)?,
             };
             println!("{}", serde_json::to_string_pretty(&json)?);
         }
@@ -131,6 +144,7 @@ fn render_not_in_tmux(format: Format) -> Result<()> {
                     in_tmux: false,
                     // No pane, so no Host state.
                     host_state: None,
+                    host_word: None,
                 })?
             );
         }
@@ -166,8 +180,8 @@ fn render_json(row: &StatusRow, window: &WindowReport) -> Result<()> {
     let host = host::current();
     let json = StatusJson {
         host: host.host(),
-        session: row.session.clone(),
-        window: row.window_name.clone(),
+        session: Some(row.session.clone()),
+        window: Some(row.window_name.clone()),
         window_index: Some(row.window_index.parse().with_context(|| {
             format!(
                 "failed to parse tmux window index {:?} for pane {}",
@@ -190,6 +204,7 @@ fn render_json(row: &StatusRow, window: &WindowReport) -> Result<()> {
         min_pane_rows: Some(window.min_pane_rows),
         below_floor: Some(window.below_floor),
         host_state: host.host_state(&row.pane_id)?,
+        host_word: host.host_word(&row.pane_id)?,
     };
 
     println!("{}", serde_json::to_string_pretty(&json)?);
