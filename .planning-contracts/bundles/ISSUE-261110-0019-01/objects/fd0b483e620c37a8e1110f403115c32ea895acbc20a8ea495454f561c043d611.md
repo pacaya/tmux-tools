@@ -2,7 +2,9 @@
 id: ISSUE-261110-0019-01
 kind: issue
 category: enhancement
-status: ready-for-agent
+status: in-progress
+claimed_by: implement-issue@agentmac
+claimed_at: 2026-11-10T05:36:39Z
 brief_contract: agent-brief.v3
 context: tmux-tools
 summary: panes that spawn-agent claude starts on the rich surface run in classic scroll mode, not full screen, on every host
@@ -53,3 +55,18 @@ contract:
 **Verification and release:** ships in the ISSUE-261109-2336-02 release. Rollback: revert the issue commit.
 
 **Out of scope:** the `flat` surface; Claude sessions that tmux-tools does not start with a surface (clause item 6); the P5.1 `how: stitched`/`how: screen` rule (ISSUE-261109-2336-02).
+
+## Context Pack — canonical at claim (2026-11-10T05:36:39Z)
+
+**Contract approval:** `review-20261110T053552Z` · canonical · revision check complete
+
+**Issue binding:** `tmux-tools:ISSUE-261110-0019-01` · revision `8a41937a17fe420ff6ffc8dbcf7a9cdb5e4bb9c8` · sha256 `b2703f21b023d9d11b9aac0b9755442e113fb467a6c2b20a0a3ffc2e2f59a8b1`
+
+**Required source objects:**
+- `tmux-tools:ADR-260919-0146-01#claude-rich-launch` · revision `8a41937a17fe420ff6ffc8dbcf7a9cdb5e4bb9c8` · sha256 `3a975c52416451effe1e72d26d03992af00f4e9d32677dfde5847d3508784ccc` · `objects/3a975c52416451effe1e72d26d03992af00f4e9d32677dfde5847d3508784ccc.md`
+- `tmux-tools:PRD-260918-0323-01#p8-smoke` · revision `8a41937a17fe420ff6ffc8dbcf7a9cdb5e4bb9c8` · sha256 `e073a2a24ce3b5d9f9a1da38858e4f693c2f3ed2ce9a45c7698f024c39ca8bb2` · `objects/e073a2a24ce3b5d9f9a1da38858e4f693c2f3ed2ce9a45c7698f024c39ca8bb2.md`
+- `tmux-tools:PRD-261107-0825-01#p10-tests` · revision `8a41937a17fe420ff6ffc8dbcf7a9cdb5e4bb9c8` · sha256 `a28eb660fd94942cad51db5869d5ba74757bff5b2ac3317f6e44699676aa3fcb` · `objects/a28eb660fd94942cad51db5869d5ba74757bff5b2ac3317f6e44699676aa3fcb.md`
+
+**Bundle manifest:** `.planning-contracts/bundles/ISSUE-261110-0019-01/manifest.json`
+
+**Test seam:** `cargo test --workspace --features test-fixtures` (registry); `tmux display -p` + `tmux-tools capture` (tmux); `ps -o args` in the P10 Orca live run; `prompt --format json` with `TT_TEST_HERDR=1` (Herdr); `cargo run --features vendor-smoke --bin tt-vendor-smoke` (smoke)
