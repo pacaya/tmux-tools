@@ -29,6 +29,34 @@ contract:
       repository: tmux-tools
       record: PRD-261109-2223-01
       clause: verification
+    - relation: requires
+      repository: tmux-tools
+      record: PRD-261109-2223-01
+      clause: p2-selection
+    - relation: requires
+      repository: tmux-tools
+      record: PRD-261109-2223-01
+      clause: p3-placement
+    - relation: requires
+      repository: tmux-tools
+      record: PRD-261109-2223-01
+      clause: p4-registration
+    - relation: requires
+      repository: tmux-tools
+      record: PRD-261109-2223-01
+      clause: p5-io
+    - relation: requires
+      repository: tmux-tools
+      record: PRD-261109-2223-01
+      clause: p6-state
+    - relation: requires
+      repository: tmux-tools
+      record: PRD-261109-2223-01
+      clause: p7-other-verbs
+    - relation: requires
+      repository: tmux-tools
+      record: PRD-261107-0825-01
+      clause: p10-tests
     - relation: implementation_after
       repository: tmux-tools
       record: ISSUE-261109-2336-01
@@ -37,7 +65,7 @@ contract:
 
 **Outcome and scope:** The `TMUX_TOOLS_LIVE_HERDR=1` run (PRD-261109-2223-01 P8.4) exists and passes in the maintainer's Herdr window, the maintainer confirms the window result, and the Herdr backend ships as the P9.1 release. This issue owns P8.4, P9.1, P9.2, and Verification items 3–4.
 
-**Required sources:** `tmux-tools:PRD-261109-2223-01` clauses `p8-tests` (items 4–5), `p9-rollout`, `contracts` (the `TMUX_TOOLS_LIVE_HERDR` switch), and `verification`.
+**Required sources:** `tmux-tools:PRD-261109-2223-01` clauses `p8-tests` (items 4–5), `p9-rollout`, `contracts` (the `TMUX_TOOLS_LIVE_HERDR` switch), and `verification`; `p2-selection`, `p3-placement`, `p4-registration`, `p5-io`, `p6-state`, `p7-other-verbs` for the README content; `tmux-tools:PRD-261107-0825-01#p10-tests` for the contract suite.
 
 **Current observable:** `TMUX_TOOLS_LIVE_HERDR=1` selects no test run. README names no Herdr host. The installed `tmux-tools` cannot select `herdr`.
 
@@ -52,7 +80,8 @@ contract:
 - [ ] Given a plain Herdr terminal in the maintainer's space and tab, when `TMUX_TOOLS_LIVE_HERDR=1` runs the contract suite, then it passes the P8.4 cases, observable at the test run output read with `hc read`.
 - [ ] Given that run, when the maintainer looks at the Herdr window on the control Mac, then the `--split v` terminal is in the caller's tab, the no-split terminal is a new tab, and the Claude pane shows Herdr's agent state. Owner: maintainer; timing: during the run; evidence: the maintainer's reply recorded in `## Triage Notes`; closure needs it.
 - [ ] Given the finished runs, when `tmux-tools list` and `hc ls --all --json` run against the default core, then neither shows a terminal the runs created, observable at their output.
-- [ ] Given the release, when `tmux-tools --version` runs, then it shows the bumped minor version, and README has the Herdr section, observable at the CLI and README.
+- [ ] Given the release, when `tmux-tools --version` runs, then it shows the bumped minor version, observable at the CLI.
+- [ ] Given the released README, when it is read, then its Herdr section covers selection, P3 placement, the `tt.*` and `herdr.*` labels, the P5.2 and P6.6 limits as recorded at release, and `notify`, and `herdr` is listed under `TMUX_TOOLS_HOST`, observable in `README.md`.
 
 **Verification and release:** `TT_TEST_HERDR=1` and `TMUX_TOOLS_LIVE_HERDR=1` both pass on the release revision (P9.2). Rollback: copy the backed-up previous binary over `~/.cargo/bin/tmux-tools`.
 
