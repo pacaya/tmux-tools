@@ -2,7 +2,9 @@
 id: ISSUE-261110-0019-01
 kind: issue
 category: enhancement
-status: ready-for-agent
+status: in-progress
+claimed_by: implement-issue@agentmac
+claimed_at: 2026-11-10T09:03:47Z
 brief_contract: agent-brief.v3
 context: tmux-tools
 summary: panes that spawn-agent claude starts on the rich surface run in classic scroll mode, not full screen, on every host
@@ -60,6 +62,32 @@ contract:
 
 **Out of scope:** the `flat` surface; Claude sessions that tmux-tools does not start with a surface (clause item 6); the P5.1 `how: stitched`/`how: screen` rule (ISSUE-261109-2336-02).
 
+## Context Pack — canonical at claim (2026-11-10T09:03:47Z)
+
+**Contract approval:** `review-20261110T090257Z` · canonical · revision check complete
+
+**Issue binding:** `tmux-tools:ISSUE-261110-0019-01` · revision `d6004b759616d0d6d580f567d62cdcd9a345d84e` · sha256 `79a189d7fb6849ca06c9e72d2e18395693efea526e9679e363149b4f65ac7a7d`
+
+**Required source objects:**
+- `tmux-tools:ADR-260919-0146-01#claude-rich-launch` · revision `d6004b759616d0d6d580f567d62cdcd9a345d84e` · sha256 `3a975c52416451effe1e72d26d03992af00f4e9d32677dfde5847d3508784ccc` · `objects/3a975c52416451effe1e72d26d03992af00f4e9d32677dfde5847d3508784ccc.md`
+- `tmux-tools:PRD-260918-0323-01#p8-smoke` · revision `d6004b759616d0d6d580f567d62cdcd9a345d84e` · sha256 `e073a2a24ce3b5d9f9a1da38858e4f693c2f3ed2ce9a45c7698f024c39ca8bb2` · `objects/e073a2a24ce3b5d9f9a1da38858e4f693c2f3ed2ce9a45c7698f024c39ca8bb2.md`
+- `tmux-tools:PRD-261107-0825-01#p10-tests` · revision `d6004b759616d0d6d580f567d62cdcd9a345d84e` · sha256 `a28eb660fd94942cad51db5869d5ba74757bff5b2ac3317f6e44699676aa3fcb` · `objects/a28eb660fd94942cad51db5869d5ba74757bff5b2ac3317f6e44699676aa3fcb.md`
+- `tmux-tools:PRD-261109-2223-01#p5-io` · revision `d6004b759616d0d6d580f567d62cdcd9a345d84e` · sha256 `7519a4a029eb8d4cfead1eb4b4821b45e3d491b22454a75c8804331e3eb3262b` · `objects/7519a4a029eb8d4cfead1eb4b4821b45e3d491b22454a75c8804331e3eb3262b.md`
+
+**Bundle manifest:** `.planning-contracts/bundles/ISSUE-261110-0019-01/manifest.json`
+
+**Test seam:** `cargo test --workspace --features test-fixtures` (registry, fake-`hc` P5.1 cases); `tmux display -p` + `tmux-tools capture` (tmux); `ps -o args` in the P10 Orca live run; `prompt --format json` with `TT_TEST_HERDR=1` (Herdr); `cargo run --features vendor-smoke --bin tt-vendor-smoke` (smoke)
+
+## Triage Notes`, and until then the item is maintainer-run, pending.
+- [ ] Given the same settings and a private hc core (`TT_TEST_HERDR=1`), when `spawn-agent claude` starts a pane and `prompt --format json` sends a prompt that makes Claude print a unique token, then `hc read --json` for that pane reports `how: history`, the result contains the token and no line before the first changed line, and Completeness is true, observable at `prompt --format json`.
+- [ ] Given the fake `hc` in the default suite, observable at `prompt --format json` in `cargo test --workspace --features test-fixtures`: when the read after settle rewrites the last lines of the mark read and adds lines (a classic-scroll agent), then the result starts at the first changed line and Completeness is true; when it only adds lines after the end of the mark read (a shell), then the result is the added lines and Completeness is true; when the first changed line is less than the number of lines of the mark read minus `rows`, then the result starts there and Completeness is false; when the two reads are equal, or the read after settle is the mark read with lines removed from its end, then the result is empty and Completeness follows the same P5.1 test.
+- [ ] Given the smoke, when `cargo run --features vendor-smoke --bin tt-vendor-smoke` runs with the current `claude`, then its output shows, for the `claude` `rich` pane in classic scroll mode, that the pane is not on the alternate screen and that each `rich` declaration of PRD-260918-0323-01 P8 and clause item 4 (bracketed paste with a large paste arriving as one submission, the interrupt-key quit hazard, resume) was measured and holds, and that `rich` declares no `ready_regex`/`busy_regex` (noted, not failed); the smoke fails when any of them does not hold; and `validated_version` of `rich` equals that `claude --version` only after all of them hold, observable at the smoke output and `core/src/agents/builtin.rs`.
+- [ ] Given the change, when `CONTEXT.md` and `README.md` are read, then they state clause items 3 and 5, observable in those files.
+
+**Verification and release:** ships in the ISSUE-261109-2336-02 release. Rollback: revert the issue commit.
+
+**Out of scope:** the `flat` surface; Claude sessions that tmux-tools does not start with a surface (clause item 6); the P5.1 `how: stitched`/`how: screen` rule (ISSUE-261109-2336-02).
+
 ## Context Pack — canonical at claim (2026-11-10T05:36:39Z)
 
 **Contract approval:** `review-20261110T053552Z` · canonical · revision check complete
@@ -79,3 +107,4 @@ contract:
 
 - 2026-11-10 `in-progress → ready-for-human` (attempt claimed by `implement-issue@agentmac` at 2026-11-10T05:36:39Z). Blocker, maintainer decision: with `rich` in classic scroll (`hc read --json` reports `how: history`), the PRD-261109-2223-01 P5.1 History mark (line count + last line of the full read before submission) still misses the reply. Claude redraws its input box, separator and status line below new output, so the reply lands above the recorded line count and the anchor moves; `prompt --format json` returns only that bottom block with `complete: false`. Acceptance item 4 (Herdr) cannot pass without a P5.1 change (owner PRD-261109-2223-01 / ISSUE-261109-2336-02). All other runnable items passed live; the Orca item is not run (no Orca runtime). WIP: `wip/ISSUE-261110-0019-01-20261110T060742Z` @ `7676983e30bd993fb6d0a645016e528568a1337d`.
 - 2026-11-10 `ready-for-human → needs-triage`: maintainer Q185 replaced the P5.1 History mark with the first-changed-line rule (PRD-261109-2223-01 P5.1), owned by this issue. Implementation WIP: `agent/wip/ISSUE-261110-0019-01` @ `7676983`. Q186: the maintainer runs the Orca live case from an Orca terminal.
+- 2026-11-10 Orca acceptance evidence (Q186, maintainer-run from an Orca terminal against WIP `7676983`): `TMUX_TOOLS_LIVE_ORCA=1 TMUX_TOOLS_LIVE_ORCA_ONLY="claude rich" cargo test --features test-fixtures --test integration orca_contract_suite -- --nocapture` → `orca contract: claude rich: classic-scroll launch arguments (ADR-260919-0146-01)`, `test orca_contract::orca_contract_suite ... ok`, 1 passed.
