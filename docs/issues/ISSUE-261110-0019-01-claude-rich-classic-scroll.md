@@ -2,7 +2,7 @@
 id: ISSUE-261110-0019-01
 kind: issue
 category: enhancement
-status: needs-triage
+status: ready-for-agent
 brief_contract: agent-brief.v3
 context: tmux-tools
 summary: panes that spawn-agent claude starts on the rich surface run in classic scroll mode, not full screen, on every host
