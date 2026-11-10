@@ -104,8 +104,9 @@ fn build_all() -> BTreeMap<String, AgentSpec> {
                 capabilities: capabilities(
                     true, true, true, true, true, true, true, false, true, true, true, true, true,
                 ),
-                // Two renderings. `rich` is today's full-screen TUI and the pre-surface
-                // rendering; `flat` is the non-alternate-screen screen-reader rendering.
+                // Two renderings. `rich` is Claude's own interface (prompt, status line,
+                // footer) in classic scroll mode and the pre-surface rendering; `flat` is
+                // the reduced screen-reader rendering.
                 // Neither ships readiness patterns: native chrome alone can't
                 // discriminate idle from busy — Claude Code's prompt glyph `❯` is empty
                 // in both states, and the permission-mode footer's `← for agents` suffix
@@ -121,22 +122,32 @@ fn build_all() -> BTreeMap<String, AgentSpec> {
                 // (including background subagents) is truly complete.
                 //
                 // The native declarations below (bracketed paste, quit hazard, resume)
-                // are measured against claude 2.1.278 by the P8 smoke
+                // are measured by the P8 smoke
                 // (src/bin/tt-vendor-smoke.rs); re-run it and re-stamp
                 // `validated_version` when claude changes.
                 surfaces: BTreeMap::from([
                     (
                         "rich".to_owned(),
                         Surface {
-                            // The full-screen TUI enables bracketed paste; the declared
+                            // ADR-260919-0146-01#claude-rich-launch: Claude is full screen
+                            // only when CLAUDE_CODE_NO_FLICKER=1 is set, and the user
+                            // settings file overrides the process environment. `--settings`
+                            // merges with the user settings, so this pins the pane to
+                            // classic scroll mode (tmux scrollback, Herdr `how: history`).
+                            args: vec![
+                                "--settings".to_owned(),
+                                r#"{"env":{"CLAUDE_CODE_NO_FLICKER":"0"}}"#.to_owned(),
+                            ],
+                            // The interface enables bracketed paste; the declared
                             // capability is expectation only and the live flag is read before
                             // pasting. Measured live: C-c does not quit claude while idle.
                             bracketed_paste: true,
                             quit_when_idle: false,
-                            validated_version: Some("claude 2.1.278".to_owned()),
+                            validated_version: Some("claude 2.1.322".to_owned()),
                             // Resume: `claude --resume <session-id>` (also `-r`), where the
                             // session id is a UUID. With no id claude opens an interactive
-                            // session picker, which P6 refuses. Read from claude 2.1.278.
+                            // session picker, which P6 refuses. Measured live by the P8
+                            // smoke against claude 2.1.322.
                             resume: resume("--resume {id}", UUID_SHAPE),
                             // Floor: one step above the 2026-08-01 cliff (at 14 rows a
                             // `ready_lines = 0` scan no longer finds the sentinel), measured
@@ -464,11 +475,36 @@ mod tests {
     }
 
     #[test]
+    fn claude_rich_launches_in_classic_scroll_mode() {
+        // ADR-260919-0146-01#claude-rich-launch item 1: two argv items that turn off
+        // a user-level CLAUDE_CODE_NO_FLICKER=1 through Claude's own settings merge.
+        let registry = super::super::Registry::builtin();
+        let launch = registry
+            .resolve_launch("claude", None, None, None)
+            .expect("claude resolves with no surface named");
+        assert_eq!(launch.surface, "rich");
+        assert_eq!(
+            launch.args,
+            vec![
+                "--settings".to_owned(),
+                r#"{"env":{"CLAUDE_CODE_NO_FLICKER":"0"}}"#.to_owned(),
+                "--permission-mode".to_owned(),
+                "plan".to_owned(),
+            ]
+        );
+
+        // Item 2: `rich` stays the default surface and the pre-surface rendering.
+        let claude = &all()["claude"];
+        assert_eq!(claude.default_surface.as_deref(), Some("rich"));
+        assert_eq!(claude.pre_surface_rendering.as_deref(), Some("rich"));
+    }
+
+    #[test]
     fn in_scope_builtin_surfaces_ship_measured_declarations() {
         let agents = all();
 
         let expected = [
-            ("claude", "rich", true, false, "claude 2.1.278"),
+            ("claude", "rich", true, false, "claude 2.1.322"),
             ("claude", "flat", true, false, "claude 2.1.278"),
             ("codex", "default", true, true, "codex-cli 0.155.1"),
         ];

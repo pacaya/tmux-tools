@@ -1742,7 +1742,7 @@ fn spawn_agent_claude_on_tmux_starts_claude_through_the_launcher_with(key: &str)
         start_command(&lead_pane),
         format!(
             // tmux shows the start command as one double-quoted word.
-            "\"('{}' 'claude-teams' '--claude' '{}' '--' '--permission-mode' 'plan'); exec {shell}\"",
+            "\"('{}' 'claude-teams' '--claude' '{}' '--' '--settings' '{{\\\"env\\\":{{\\\"CLAUDE_CODE_NO_FLICKER\\\":\\\"0\\\"}}}}' '--permission-mode' 'plan'); exec {shell}\"",
             tmux_tools.display(),
             claude.display()
         )

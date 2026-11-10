@@ -135,6 +135,11 @@ impl Terminal {
         self.0.get("status_ms").and_then(Value::as_u64)
     }
 
+    /// The terminal's screen height; 0 when `hc get` does not report it.
+    fn rows(&self) -> usize {
+        self.0.get("rows").and_then(Value::as_u64).unwrap_or(0) as usize
+    }
+
     /// P6.2: Host state and the time its word last changed.
     fn host_state(&self) -> Option<(HostState, Option<u64>)> {
         if self.finished() {
@@ -175,7 +180,6 @@ impl Terminal {
 struct Read {
     text: String,
     how: String,
-    complete: bool,
 }
 
 impl Read {
@@ -188,9 +192,10 @@ impl Read {
         lines_text(&self.lines())
     }
 
-    /// Whether the read is a complete history read (P5.1).
-    fn complete_history(&self) -> bool {
-        self.complete && self.how == "history"
+    /// Whether the read reports `how: history` (P5.1). The `complete` value `hc read`
+    /// reports does not change Completeness.
+    fn is_history(&self) -> bool {
+        self.how == "history"
     }
 }
 
@@ -203,13 +208,23 @@ fn lines_text(lines: &[&str]) -> String {
     text
 }
 
-/// The History mark (P5.1): the line count and last line of the full read taken
-/// before submission, and whether that read was a complete history read.
+/// The History mark (P5.1): the lines of the full read taken before submission, and
+/// whether that read reported `how: history`.
 #[derive(serde::Serialize, serde::Deserialize)]
 struct Mark {
-    lines: usize,
-    anchor: Option<String>,
-    complete: bool,
+    lines: Vec<String>,
+    history: bool,
+}
+
+impl Mark {
+    /// P5.1: the smallest line index at which `after` differs from the mark read,
+    /// where a line that only one read has counts as different; the number of lines
+    /// of the mark read when the reads are equal.
+    fn first_changed_line(&self, after: &[&str]) -> usize {
+        let differs = (0..self.lines.len().max(after.len()))
+            .find(|&index| self.lines.get(index).map(String::as_str) != after.get(index).copied());
+        differs.unwrap_or(self.lines.len())
+    }
 }
 
 /// A prompt sent by [`HostPort::submit_prompt`], whose submission is judged against
@@ -346,7 +361,6 @@ impl HerdrHost {
         Ok(Read {
             text: str_field(&answer, "text").unwrap_or_default().to_owned(),
             how: str_field(&answer, "how").unwrap_or_default().to_owned(),
-            complete: answer.get("complete").and_then(Value::as_bool) == Some(true),
         })
     }
 
@@ -1093,11 +1107,9 @@ impl HostPort for HerdrHost {
 
     fn history_cursor(&self, pane: &str) -> Result<String> {
         let read = self.read(pane, ALL_LINES)?;
-        let lines = read.lines();
         Ok(serde_json::to_string(&Mark {
-            lines: lines.len(),
-            anchor: lines.last().map(|line| (*line).to_owned()),
-            complete: read.complete_history(),
+            lines: read.lines().into_iter().map(str::to_owned).collect(),
+            history: read.is_history(),
         })?)
     }
 
@@ -1110,22 +1122,23 @@ impl HostPort for HerdrHost {
             .map_err(|error| anyhow!("not a herdr History mark: {cursor:?} ({error})"))?;
         let read = self.read(pane, ALL_LINES)?;
         let lines = read.lines();
-        // P5.1: the result is every line after the mark; it is complete only when both
-        // reads are complete history reads and the anchor is still at its line.
-        let anchored = match (&mark.anchor, mark.lines.checked_sub(1)) {
-            (Some(anchor), Some(index)) => lines.get(index) == Some(&anchor.as_str()),
-            (None, None) => true,
-            _ => false,
+        // P5.1: the result is the read after settle from the first changed line to its
+        // end; it is complete only when both reads report `how: history` and the first
+        // changed line is at least the mark read's line count minus `rows`. The
+        // `complete` value `hc read` reports does not change Completeness.
+        let first_changed = mark.first_changed_line(&lines);
+        let both_history = mark.history && read.is_history();
+        let complete = both_history && {
+            let rows = self.get(pane)?.rows();
+            first_changed >= mark.lines.len().saturating_sub(rows)
         };
-        let complete = mark.complete && read.complete_history() && anchored;
-        let start = mark.lines.min(lines.len());
-        let incomplete_reason = if !mark.complete || !read.complete_history() {
-            "herdr reports no complete history for the pane".to_owned()
+        let incomplete_reason = if !both_history {
+            "herdr reports no history read for the pane".to_owned()
         } else {
-            "the pane's history moved after the mark".to_owned()
+            "the pane's history changed above its last screen after the mark".to_owned()
         };
         Ok(HistorySince {
-            text: lines_text(&lines[start..]),
+            text: lines_text(lines.get(first_changed..).unwrap_or_default()),
             complete,
             incomplete_reason,
         })

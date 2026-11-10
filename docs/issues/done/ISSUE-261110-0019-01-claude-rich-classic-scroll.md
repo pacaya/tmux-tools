@@ -2,7 +2,7 @@
 id: ISSUE-261110-0019-01
 kind: issue
 category: enhancement
-status: in-review
+status: done
 claimed_by: implement-issue@agentmac
 claimed_at: 2026-11-10T09:43:56Z
 brief_contract: agent-brief.v3
@@ -85,3 +85,16 @@ contract:
 - 2026-11-10 Orca acceptance evidence (Q186, maintainer-run from an Orca terminal against WIP `7676983`): `TMUX_TOOLS_LIVE_ORCA=1 TMUX_TOOLS_LIVE_ORCA_ONLY="claude rich" cargo test --features test-fixtures --test integration orca_contract_suite -- --nocapture` → `orca contract: claude rich: classic-scroll launch arguments (ADR-260919-0146-01)`, `test orca_contract::orca_contract_suite ... ok`, 1 passed.
 - 2026-11-10 `in-progress → ready-for-human` (attempt claimed by `implement-issue@agentmac` at 2026-11-10T09:03:47Z). Blocker, maintainer decision: real `hc` 0.1.19 reports `how: history` but `complete: false` for a classic-scroll Claude pane from its first turn on (verified on a private core: 12 lines `complete: true` at first idle; 16 lines `complete: false` after one turn on a 120-row screen, nothing scrolled off; only `--lines 0` reports `complete: true`). P5.1 Completeness requires `complete: true` on both reads, so the Herdr acceptance item "Completeness is true" cannot pass; every other check of that item passes live. Owner: PRD-261109-2223-01 P5.1. WIP: `wip/ISSUE-261110-0019-01-20261110T091944Z` @ `7dfacc2b0656aa6eb610e8c1f7ba99a4b0c8158b`.
 - 2026-11-10 `ready-for-human → needs-triage`: maintainer Q188 removed hc's `complete` flag from the P5.1 Completeness rule (PRD-261109-2223-01 P5.1). Implementation WIP: `agent/wip/ISSUE-261110-0019-01` @ `7dfacc2`.
+
+## Code Review
+
+Review: `issue-261110-0019-01-code-review-20261110-100202.md` — Outcome: ACCEPTED
+
+## Resolution
+
+- Commit: `feat: panes that spawn-agent claude starts on the rich surface run in classic scroll mode, not full screen, on every host (ISSUE-261110-0019-01)`
+- Route: `claude — deepseek-suspended` (Opus, effort medium); three attempts (r1 stopped on the old P5.1 mark → Q185; r2 stopped on hc `complete:false` → Q188; r3 completed).
+- TDD: red-green at `prompt --format json` against the fake `hc` (P5.1 cases) and the built-in registry.
+- Review: two independent Claude reviewers (Codex not run: its pane would open in the maintainer's default hc core); one LOW finding (L1) fixed in one correction batch and verified; Outcome ACCEPTED.
+- Suite: `env -u TT_TEAM -u TT_HOST -u TMUX -u TMUX_PANE -u HC_TERMINAL_ID -u HC_TERMINAL_SOCKET -u HC_SCOPE cargo test --workspace --features test-fixtures --no-fail-fast` — PASS, 521 passed, 0 failed. Live: tmux `alternate_on=0` PASS; Herdr private core (`TT_TEST_HERDR=1`) PASS; smoke `claude.rich` all PASS, `validated_version` `claude 2.1.322`; Orca PASS (maintainer-run, see Triage Notes).
+- Date: 2026-11-10 (UTC).

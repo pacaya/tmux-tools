@@ -4,8 +4,8 @@ tests (PRD-261109-2223-01 P8.2). It never reaches a real core.
 
 Its terminals live in the JSON file FAKE_HC_STATE:
 {"next": <n>, "terminals": [{"address", "name", "cwd", "argv", "labels", "state",
-"status", "status_ms", "turn", "lines", "how", "complete", "keys", "sent",
-"on_send"}]}.
+"status", "status_ms", "turn", "rows", "lines", "how", "complete", "keys",
+"sent", "on_send"}]}. `hc get` reports the terminal's `rows` (default 24).
 
 - FAKE_HC_LOG: append each call's argv as one JSON line.
 - FAKE_HC_DOWN=1: `server status` fails.
@@ -13,7 +13,8 @@ Its terminals live in the JSON file FAKE_HC_STATE:
 
 A terminal's `on_send` (set by a test) is applied by `send` after the text goes in:
 `turn` adds to the turn, `status` sets the status word with `status_ms` now, `rewrite`
-replaces its whole history, `append` adds lines to its history. A terminal whose status word is `blocked` refuses `send`.
+replaces its whole history, `append` adds lines to its history, `complete` sets the
+`complete` value later reads report. A terminal whose status word is `blocked` refuses `send`.
 """
 import json
 import os
@@ -96,6 +97,7 @@ def find(address):
 def full(terminal):
     out = {key: terminal.get(key) for key in (
         "address", "name", "cwd", "argv", "labels", "state", "status", "status_ms", "turn")}
+    out["rows"] = terminal.get("rows", 24)
     out["status"] = {"state": terminal["status"]} if terminal.get("status") else None
     return out
 
@@ -168,6 +170,8 @@ if command == ["send"]:
     if "rewrite" in effect:
         terminal["lines"] = list(effect["rewrite"])
     terminal["lines"].extend(effect.get("append", []))
+    if "complete" in effect:
+        terminal["complete"] = effect["complete"]
     save(state)
     answer({"started": None, "status": terminal["status"], "turn": terminal["turn"]})
 

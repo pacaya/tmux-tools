@@ -729,6 +729,10 @@ fn orca_contract_suite() {
             "claude teams: spawn-agent claude through the Launcher (PRD-261108-0447-01 P10.6)",
             claude_teams_through_spawn_agent,
         ),
+        (
+            "claude rich: classic-scroll launch arguments (ADR-260919-0146-01)",
+            claude_rich_launch_arguments,
+        ),
     ];
     // Development aid: run only the scenarios whose label contains this text.
     let only = original(ONLY_SWITCH);
@@ -2238,7 +2242,10 @@ fn real_screen(run: &Run, target: &str) -> String {
 }
 
 /// Spawn `claude` as Leader `name` through `spawn-agent` with hooks off (harness
-/// P9.6), and wait until its TUI is up. Every pane later opened in the Leader's tab is
+/// P9.6), and wait until its TUI is up. The one caller `--settings` value also carries
+/// the `rich` surface's `"env":{"CLAUDE_CODE_NO_FLICKER":"0"}`
+/// (ADR-260919-0146-01#claude-rich-launch), so the Leader stays in classic scroll mode
+/// whichever `--settings` Claude keeps. Every pane later opened in the Leader's tab is
 /// recorded as the run's (a teammate is a split of the Leader).
 fn spawn_leader(run: &Run, name: &str) -> String {
     let args = [
@@ -2252,7 +2259,7 @@ fn spawn_leader(run: &Run, name: &str) -> String {
         "json",
         "--",
         "--settings",
-        r#"{"disableAllHooks":true}"#,
+        r#"{"disableAllHooks":true,"env":{"CLAUDE_CODE_NO_FLICKER":"0"}}"#,
     ];
     let out = run.cli_creating(&args, real_state());
     out.assert_success(&format!("{args:?}"));
@@ -2746,6 +2753,78 @@ fn claude_teams_through_spawn_agent(run: &Run) {
             "orca terminal list shows {handle}"
         );
     }
+}
+
+/// ADR-260919-0146-01#claude-rich-launch item 1 on Orca, which reports no
+/// alternate-screen state: a pane `spawn-agent claude` starts with no `--surface` and no
+/// caller-supplied trailing arguments runs a `claude` whose command line carries both
+/// `rich` launch argv items, and that `--settings` is its only one.
+fn claude_rich_launch_arguments(run: &Run) {
+    let name = run.n("rich");
+    let args = ["spawn-agent", "claude", "--name", &name, "--format", "json"];
+    let out = run.cli_creating(&args, real_state());
+    out.assert_success(&format!("{args:?}"));
+    let spawned: Value = serde_json::from_str(out.stdout.trim()).unwrap();
+    evidence_json("rich-spawn.json", &spawned);
+    assert_eq!(spawned["surface"], "rich", "{spawned}");
+    let handle = spawned["pane_id"].as_str().unwrap().to_owned();
+    run.track(&handle);
+
+    // The pane runs the Launcher, whose child is the pane's `claude`.
+    let command_line = poll(
+        &format!("{name}: the claude process command line"),
+        Duration::from_secs(60),
+        || {
+            let launcher = claude_teams_launcher_pid(&handle)?;
+            let children = Command::new("pgrep")
+                .args(["-P", &launcher])
+                .output()
+                .ok()?;
+            String::from_utf8_lossy(&children.stdout)
+                .split_whitespace()
+                .filter_map(|pid| {
+                    let ps = Command::new("ps")
+                        .args(["-o", "args=", "-p", pid])
+                        .output()
+                        .ok()?;
+                    Some(String::from_utf8_lossy(&ps.stdout).trim().to_owned())
+                })
+                .find(|args| args.contains("claude"))
+        },
+    );
+    evidence("rich-claude-args.txt", &command_line);
+    assert!(
+        command_line.contains(r#"--settings {"env":{"CLAUDE_CODE_NO_FLICKER":"0"}}"#),
+        "both rich launch argv items: {command_line}"
+    );
+    assert_eq!(
+        command_line
+            .split_whitespace()
+            .filter(|word| *word == "--settings")
+            .count(),
+        1,
+        "one --settings: {command_line}"
+    );
+
+    run.cli(&["kill", "--target", &name], real_state())
+        .assert_success("kill the rich pane");
+    assert!(!run.orca_handles().contains(&handle));
+}
+
+/// The Launcher pid of the Team whose Leader is the pane `handle`, once its
+/// `team.json` exists.
+fn claude_teams_launcher_pid(handle: &str) -> Option<String> {
+    let state = original("XDG_STATE_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(original("HOME").unwrap()).join(".local/state"));
+    std::fs::read_dir(state.join("tmux-tools/teams"))
+        .ok()?
+        .flatten()
+        .filter_map(|entry| std::fs::read(entry.path().join("team.json")).ok())
+        .filter_map(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+        .find(|team| team["leader"]["handle"] == handle)
+        .and_then(|team| team["launcher_pid"].as_u64())
+        .map(|pid| pid.to_string())
 }
 
 // --- The live run's own cleanup, against the fake `orca` CLI (default run) ----------

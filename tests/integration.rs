@@ -13132,7 +13132,7 @@ fn spawn_agent_claude_on_orca_starts_claude_through_the_launcher() {
     assert_eq!(
         fake.pane_commands(),
         vec![format!(
-            "cd -- '{}' && '{}' 'claude-teams' '--claude' 'claude' '--' '--permission-mode' 'plan'",
+            "cd -- '{}' && '{}' 'claude-teams' '--claude' 'claude' '--' '--settings' '{{\"env\":{{\"CLAUDE_CODE_NO_FLICKER\":\"0\"}}}}' '--permission-mode' 'plan'",
             work.display(),
             tmux_tools.display()
         )],
@@ -13178,7 +13178,7 @@ args = ["--x"]
     assert_eq!(
         fake.pane_commands(),
         vec![format!(
-            "cd -- '{}' && '/opt/tools/claude-wrapper' '--x'",
+            "cd -- '{}' && '/opt/tools/claude-wrapper' '--settings' '{{\"env\":{{\"CLAUDE_CODE_NO_FLICKER\":\"0\"}}}}' '--x'",
             work.display()
         )],
         "{:?}",
@@ -13391,12 +13391,15 @@ fn spawn_agent_on_tmux_keeps_the_pane_command_of_a_binary_not_named_claude() {
     thread::sleep(Duration::from_millis(100));
     assert_eq!(
         std::fs::read_to_string(&argv_file).unwrap(),
-        format!("{}\n--permission-mode\nplan\n", claude.display()),
+        format!(
+            "{}\n--settings\n{{\"env\":{{\"CLAUDE_CODE_NO_FLICKER\":\"0\"}}}}\n--permission-mode\nplan\n",
+            claude.display()
+        ),
     );
     let start = pane_option(&server, &name, "pane_start_command");
     assert!(
         start.starts_with(&format!(
-            "\"('{}' '--permission-mode' 'plan'); exec ",
+            "\"('{}' '--settings' '{{\\\"env\\\":{{\\\"CLAUDE_CODE_NO_FLICKER\\\":\\\"0\\\"}}}}' '--permission-mode' 'plan'); exec ",
             claude.display()
         )),
         "{start}"

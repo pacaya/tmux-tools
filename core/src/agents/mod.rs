@@ -1919,6 +1919,8 @@ default_surface = "flat"
         assert_eq!(
             launch.args,
             vec![
+                "--settings".to_owned(),
+                r#"{"env":{"CLAUDE_CODE_NO_FLICKER":"0"}}"#.to_owned(),
                 "--permission-mode".to_owned(),
                 "plan".to_owned(),
                 "--resume".to_owned(),

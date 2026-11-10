@@ -829,15 +829,135 @@ fn completeness_and_the_scrollback_notice_follow_the_hc_read() {
     assert_eq!(out.stdout, "c", "{out:?}");
 }
 
-/// P5.1: both reads are complete history reads, but the anchor line moved between
-/// the mark and the settle read, so the result is not complete.
-#[test]
-fn a_moved_anchor_line_makes_the_prompt_result_incomplete() {
-    let fake = FakeHc::with_caller("herdr-anchor", json!({}));
+/// `prompt --format json` to a terminal whose history is `lines` and whose `hc get`
+/// reports `rows`; `on_send` sets the read after settle (the fake adds the prompt
+/// line first, then applies `rewrite` and `append`).
+fn p51_prompt(label: &str, lines: Value, rows: u64, on_send: Value) -> Value {
+    let fake = FakeHc::with_caller(label, json!({}));
+    let mut effect = on_send;
+    effect["status"] = json!("done");
     fake.add_terminal(json!({
-        "labels": {"tt.name": "s"}, "lines": ["a", "b"], "how": "history", "complete": true,
-        "status": "idle", "status_ms": 1,
-        "on_send": {"status": "done", "rewrite": ["x", "y", "go"], "append": ["c"]},
+        "labels": {"tt.name": "s"}, "lines": lines, "rows": rows, "how": "history",
+        "complete": true, "status": "idle", "status_ms": 1, "on_send": effect,
+    }));
+    json_payload(
+        &fake.cli(&[
+            "prompt",
+            "--target",
+            "s",
+            "--timeout",
+            "5",
+            "--format",
+            "json",
+            "go",
+        ]),
+        "prompt",
+    )
+}
+
+/// Acceptance (P5.1): a classic-scroll agent rewrites the last lines of the mark read
+/// and adds lines; the result starts at the first changed line and is complete.
+#[test]
+fn a_rewritten_tail_gives_the_result_from_the_first_changed_line() {
+    let result = p51_prompt(
+        "herdr-p51-rewrite",
+        json!(["l1", "l2", "l3", "l4", "l5"]),
+        3,
+        json!({"rewrite": ["l1", "l2", "l3", "l4x", "l5x", "R1"]}),
+    );
+    assert_eq!(result["output_since_prompt"], "l4x\nl5x\nR1", "{result}");
+    assert_eq!(result["complete"], true, "{result}");
+}
+
+/// Acceptance (P5.1): a shell only adds lines after the end of the mark read; the
+/// result is the added lines and is complete.
+#[test]
+fn appended_lines_are_the_result_and_complete() {
+    let result = p51_prompt(
+        "herdr-p51-append",
+        json!(["$ a", "b"]),
+        24,
+        json!({"append": ["c"]}),
+    );
+    assert_eq!(result["output_since_prompt"], "go\nc", "{result}");
+    assert_eq!(result["complete"], true, "{result}");
+}
+
+/// Acceptance (P5.1): the first changed line (1) is less than the mark read's 5 lines
+/// minus `rows` 2; the result starts there and is not complete.
+#[test]
+fn a_change_above_the_last_rows_lines_is_incomplete() {
+    let result = p51_prompt(
+        "herdr-p51-deep",
+        json!(["l1", "l2", "l3", "l4", "l5"]),
+        2,
+        json!({"rewrite": ["l1", "X", "l3", "l4", "l5", "R"]}),
+    );
+    assert_eq!(
+        result["output_since_prompt"], "X\nl3\nl4\nl5\nR",
+        "{result}"
+    );
+    assert_eq!(result["complete"], false, "{result}");
+}
+
+/// Acceptance (P5.1): equal reads give an empty result; the first changed line is the
+/// mark read's 2 lines, at least 2 minus `rows` 0, so it is complete.
+#[test]
+fn equal_reads_give_an_empty_complete_result() {
+    let result = p51_prompt(
+        "herdr-p51-equal",
+        json!(["a", "b"]),
+        0,
+        json!({"rewrite": ["a", "b"]}),
+    );
+    assert_eq!(result["output_since_prompt"], "", "{result}");
+    assert_eq!(result["complete"], true, "{result}");
+}
+
+/// Acceptance (P5.1): the read after settle is the mark read with its last 2 lines
+/// removed; the result is empty, and the first changed line 1 is less than the mark
+/// read's 3 lines minus `rows` 1, so it is not complete. With `rows` 2 it is.
+#[test]
+fn a_shortened_read_gives_an_empty_result_under_the_same_test() {
+    let result = p51_prompt(
+        "herdr-p51-short",
+        json!(["a", "b", "c"]),
+        1,
+        json!({"rewrite": ["a"]}),
+    );
+    assert_eq!(result["output_since_prompt"], "", "{result}");
+    assert_eq!(result["complete"], false, "{result}");
+    let result = p51_prompt(
+        "herdr-p51-short2",
+        json!(["a", "b", "c"]),
+        2,
+        json!({"rewrite": ["a"]}),
+    );
+    assert_eq!(result["output_since_prompt"], "", "{result}");
+    assert_eq!(result["complete"], true, "{result}");
+}
+
+/// Acceptance (P5.1, Q188): either read reports `complete: false` with `how: history`;
+/// Completeness follows the first-changed-line test and not that flag.
+#[test]
+fn hc_complete_false_does_not_change_completeness() {
+    // Only the read after settle reports `complete: false`; the first changed line 3
+    // is at least 5 lines minus `rows` 3, so the result is complete.
+    let result = p51_prompt(
+        "herdr-p51-flag-after",
+        json!(["l1", "l2", "l3", "l4", "l5"]),
+        3,
+        json!({"rewrite": ["l1", "l2", "l3", "l4x", "l5x", "R1"], "complete": false}),
+    );
+    assert_eq!(result["output_since_prompt"], "l4x\nl5x\nR1", "{result}");
+    assert_eq!(result["complete"], true, "{result}");
+
+    // Both reads report `complete: false`; a shell append is complete.
+    let fake = FakeHc::with_caller("herdr-p51-flag-both", json!({}));
+    fake.add_terminal(json!({
+        "labels": {"tt.name": "s"}, "lines": ["$ a", "b"], "rows": 24, "how": "history",
+        "complete": false, "status": "idle", "status_ms": 1,
+        "on_send": {"status": "done", "append": ["c"]},
     }));
     let result = json_payload(
         &fake.cli(&[
@@ -851,6 +971,21 @@ fn a_moved_anchor_line_makes_the_prompt_result_incomplete() {
             "go",
         ]),
         "prompt",
+    );
+    assert_eq!(result["output_since_prompt"], "go\nc", "{result}");
+    assert_eq!(result["complete"], true, "{result}");
+
+    // The read after settle reports `complete: false`; the first changed line 1 is
+    // less than 5 lines minus `rows` 2, so the result is not complete.
+    let result = p51_prompt(
+        "herdr-p51-flag-deep",
+        json!(["l1", "l2", "l3", "l4", "l5"]),
+        2,
+        json!({"rewrite": ["l1", "X", "l3", "l4", "l5", "R"], "complete": false}),
+    );
+    assert_eq!(
+        result["output_since_prompt"], "X\nl3\nl4\nl5\nR",
+        "{result}"
     );
     assert_eq!(result["complete"], false, "{result}");
 }
@@ -913,7 +1048,7 @@ fn claude_teams_fails_open_on_herdr_and_spawn_agent_claude_uses_the_launcher() {
     let command = command_of(&runs[0]).join(" ");
     assert!(
         command.contains(&format!(
-            "'{}' 'claude-teams' '--claude' 'claude' '--' '--permission-mode' 'plan'",
+            "'{}' 'claude-teams' '--claude' 'claude' '--' '--settings' '{{\"env\":{{\"CLAUDE_CODE_NO_FLICKER\":\"0\"}}}}' '--permission-mode' 'plan'",
             tmux_tools.display()
         )),
         "{command}"
@@ -1201,6 +1336,21 @@ fn history_read(core: &PrivateCore, pane: &str) -> (Vec<String>, String, bool) {
     )
 }
 
+/// P5.1: the smallest line index at which the two reads differ, where a line that only
+/// one read has counts as different; the mark read's line count when they are equal.
+fn first_changed_line(mark: &[String], after: &[String]) -> usize {
+    (0..mark.len().max(after.len()))
+        .find(|&index| mark.get(index) != after.get(index))
+        .unwrap_or(mark.len())
+}
+
+/// The pane's `rows` as `hc get --json` reports it.
+fn rows_of(core: &PrivateCore, pane: &str) -> usize {
+    core.get(pane)["rows"]
+        .as_u64()
+        .expect("hc get reports rows") as usize
+}
+
 /// Acceptance (P5.1): a real Claude pane in a private core. `prompt --format json`
 /// reports Completeness as the test's own `hc read --lines 1000000` reads before and
 /// after it imply, and `capture --all` gives the no-scrollback notice exactly when its
@@ -1272,20 +1422,17 @@ fn herdr_private_core_claude_completeness_and_capture_all() {
     );
     let result = json_payload(&out, "prompt claude");
     let (after, after_how, after_complete) = history_read(&core, &pane);
-    let anchored = mark
-        .len()
-        .checked_sub(1)
-        .is_some_and(|index| after.get(index) == mark.last());
-    let expected = mark_how == "history"
-        && mark_complete
-        && after_how == "history"
-        && after_complete
-        && anchored;
+    let first = first_changed_line(&mark, &after);
+    let rows = rows_of(&core, &pane);
+    // P5.1 (Q188): the `complete` value `hc read` reports does not change Completeness.
+    let expected =
+        mark_how == "history" && after_how == "history" && first >= mark.len().saturating_sub(rows);
     assert_eq!(
         result["complete"].as_bool(),
         Some(expected),
         "mark how={mark_how} complete={mark_complete}; after how={after_how} \
-         complete={after_complete}; anchored={anchored}; {result}"
+         complete={after_complete}; first changed line={first} of {} rows={rows}; {result}",
+        mark.len()
     );
 
     // P5.1: `capture --all` reads `hc read --lines 1000000`. Its raw stdout must be the
@@ -1340,6 +1487,172 @@ fn herdr_private_core_claude_completeness_and_capture_all() {
         );
         std::thread::sleep(Duration::from_secs(1));
     }
+}
+
+/// Acceptance (ADR-260919-0146-01#claude-rich-launch item 1): with the user's
+/// `CLAUDE_CODE_NO_FLICKER=1` setting, a pane `spawn-agent claude` starts on the
+/// default `rich` surface is in classic scroll mode, so `hc read --json` reports
+/// `how: history`, and `prompt --format json` returns the reply token and none of the
+/// text above the History mark. Opt-in with `TT_TEST_HERDR=1`; when enabled, a missing
+/// `claude` on the original `PATH` fails the test.
+#[test]
+fn herdr_private_core_claude_rich_is_classic_scroll() {
+    if original_environment().get(SWITCH).map(String::as_str) != Some("1") {
+        return;
+    }
+    let path = original_environment()
+        .get("PATH")
+        .cloned()
+        .unwrap_or_default();
+    let claude = path
+        .split(':')
+        .map(|entry| Path::new(entry).join("claude"))
+        .find(|candidate| candidate.is_file())
+        .expect("TT_TEST_HERDR=1 needs `claude` on the original PATH");
+    // Precondition: the user settings turn on fullscreen (`CLAUDE_CODE_NO_FLICKER=1`).
+    // Without it Claude is in classic scroll anyway and `how: history` proves nothing
+    // about the `rich` surface's `--settings` override.
+    let home = original_environment()
+        .get("HOME")
+        .cloned()
+        .expect("TT_TEST_HERDR=1 needs HOME in the original environment");
+    let settings_path = Path::new(&home).join(".claude/settings.json");
+    let settings: Value = std::fs::read_to_string(&settings_path)
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or(Value::Null);
+    assert_eq!(
+        settings["env"]["CLAUDE_CODE_NO_FLICKER"].as_str(),
+        Some("1"),
+        "precondition failed: {} must set env.CLAUDE_CODE_NO_FLICKER to \"1\" so that \
+         `how: history` proves the `rich` --settings override",
+        settings_path.display()
+    );
+    // `Drop` kills and removes the Claude terminal and stops the core, also on failure.
+    let core = PrivateCore::start("rich");
+    // The core's terminals do not carry the original `PATH`, so the built-in `claude`
+    // runs by the absolute path of the original `PATH`'s `claude`; its surfaces and
+    // access profiles stay the built-in ones.
+    let agents = core.dir.join("config/tmux-tools/agents.toml");
+    let mut toml = std::fs::read_to_string(&agents).unwrap();
+    toml.push_str(&format!("\n[claude]\nbinary = \"{}\"\n", claude.display()));
+    std::fs::write(&agents, toml).unwrap();
+    // The repository root: a directory Claude already trusts, so no trust dialog.
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let pane = core.pane_of(
+        &core.cli_in(
+            repo,
+            &[
+                "spawn-agent",
+                "claude",
+                "--name",
+                "rich",
+                "--format",
+                "json",
+            ],
+        ),
+        "spawn-agent claude",
+    );
+    let wait_idle = || {
+        let deadline = Instant::now() + Duration::from_secs(90);
+        loop {
+            let terminal = core.get(&pane);
+            if matches!(terminal["status"]["state"].as_str(), Some("idle" | "done")) {
+                break;
+            }
+            if Instant::now() >= deadline {
+                let (screen, how, _) = history_read(&core, &pane);
+                panic!(
+                    "Claude never reported idle: {terminal}\nhow={how}\n{}",
+                    screen.join("\n")
+                );
+            }
+            std::thread::sleep(Duration::from_millis(250));
+        }
+        std::thread::sleep(Duration::from_secs(1));
+    };
+    wait_idle();
+
+    // Run-unique tokens that only Claude's reply prints: the prompt carries the two
+    // addends, never their sum.
+    let seed = u64::from(std::process::id());
+    let ask = |addend: u64| {
+        let sum = seed + addend;
+        let out = core.cli_in(
+            repo,
+            &[
+                "prompt",
+                "--target",
+                "rich",
+                "--timeout",
+                "120",
+                "--format",
+                "json",
+                &format!("Reply with only the decimal sum of {seed} and {addend}, digits only"),
+            ],
+        );
+        (sum.to_string(), json_payload(&out, "prompt claude"))
+    };
+
+    // A first turn puts its token above the History mark of the second.
+    let (above, first) = ask(271_828);
+    assert!(
+        first["output_since_prompt"]
+            .as_str()
+            .is_some_and(|output| output.contains(&above)),
+        "the first reply holds its token {above}: {first}"
+    );
+    wait_idle();
+    let (mark, mark_how, mark_complete) = history_read(&core, &pane);
+    assert_eq!(mark_how, "history", "classic scroll before the prompt");
+    let banner = mark
+        .iter()
+        .find(|line| line.contains("Claude Code v"))
+        .cloned()
+        .unwrap_or_else(|| panic!("Claude's banner is above the mark: {mark:?}"));
+
+    let (token, result) = ask(314_159);
+    let (after, after_how, after_complete) = history_read(&core, &pane);
+    assert_eq!(
+        after_how, "history",
+        "classic scroll after the prompt: {result}"
+    );
+    let output = result["output_since_prompt"].as_str().unwrap_or_default();
+    assert!(output.contains(&token), "reply token {token}: {result}");
+    // The result starts at the first changed line: its first non-blank line is the
+    // first non-blank line of the test's own read after settle from that line.
+    let first = first_changed_line(&mark, &after);
+    let first_after = after[first.min(after.len())..]
+        .iter()
+        .find(|line| !line.trim().is_empty())
+        .map(|line| line.trim());
+    let first_output = output.lines().find(|line| !line.trim().is_empty());
+    assert_eq!(
+        first_output.map(str::trim),
+        first_after,
+        "the result starts at the first changed line {first}: {result}"
+    );
+    assert!(
+        !output.contains(&above),
+        "the first turn's token {above} is above the History mark: {result}"
+    );
+    assert!(
+        !output.contains(banner.trim()),
+        "the banner is above the History mark: {result}"
+    );
+    // P5.1 Completeness: both reads report `how: history` (checked above), and the first
+    // changed line is at least the mark read's line count minus `rows`; hc's `complete`
+    // value does not change it.
+    assert_eq!(
+        result["complete"],
+        true,
+        "Completeness: mark complete={mark_complete} lines={}; after complete={after_complete} \
+         lines={}; first changed line={}; rows={}; {result}",
+        mark.len(),
+        after.len(),
+        first_changed_line(&mark, &after),
+        rows_of(&core, &pane)
+    );
 }
 
 /// P8.3: every required verb against a private core. Opt-in with `TT_TEST_HERDR=1`.
