@@ -197,6 +197,12 @@ impl Read {
     fn is_history(&self) -> bool {
         self.how == "history"
     }
+
+    /// Whether the read reports `how: stitched` or `how: screen`; the `prompt` result
+    /// is then that whole read (P5.1).
+    fn is_stitched_or_screen(&self) -> bool {
+        matches!(self.how.as_str(), "stitched" | "screen")
+    }
 }
 
 fn lines_text(lines: &[&str]) -> String {
@@ -1137,8 +1143,15 @@ impl HostPort for HerdrHost {
         } else {
             "the pane's history changed above its last screen after the mark".to_owned()
         };
+        // P5.1: a `how: stitched` or `how: screen` read after settle is the whole result
+        // (a stated exception: it does not start at the History mark).
+        let text = if read.is_stitched_or_screen() {
+            read.capture()
+        } else {
+            lines_text(lines.get(first_changed..).unwrap_or_default())
+        };
         Ok(HistorySince {
-            text: lines_text(lines.get(first_changed..).unwrap_or_default()),
+            text,
             complete,
             incomplete_reason,
         })

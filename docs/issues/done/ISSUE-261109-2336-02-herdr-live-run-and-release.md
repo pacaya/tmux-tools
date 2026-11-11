@@ -2,7 +2,7 @@
 id: ISSUE-261109-2336-02
 kind: issue
 category: enhancement
-status: in-review
+status: done
 claimed_by: implement-issue@agentmac
 claimed_at: 2026-11-10T10:35:40Z
 brief_contract: agent-brief.v3
@@ -124,3 +124,22 @@ contract:
 **Bundle manifest:** `.planning-contracts/bundles/ISSUE-261109-2336-02/manifest.json`
 
 **Test seam:** `prompt --format json` against the fake `hc` in `cargo test --workspace --features test-fixtures`; `prompt --format json` with `TT_TEST_HERDR=1` (private core); `claude-teams` stderr and the fixture replay in `cargo test`; the `TMUX_TOOLS_LIVE_HERDR=1` run output; `tmux-tools list` and `hc ls --all --json`; `tmux-tools --version`; `README.md`
+
+## Triage Notes
+
+- 2026-11-11 P8.4 window confirmation (maintainer, relayed by the lead; acceptance item 5): "yes, looks like that was the behavior" — the `--split v` terminal opened in t1's tab, the no-split terminal opened in a new tab, the Claude pane showed Herdr's agent state (idle → working → done), and all of them closed after about 30 s. Run: `TMUX_TOOLS_LIVE_HERDR=1` in runner terminal t7 with t1's `herdr.space`/`herdr.tab` labels, run id `17694a`, 1 passed, EXIT=0.
+- 2026-11-11 Orca evidence (maintainer-run from an Orca terminal on the then-current working tree): `TMUX_TOOLS_LIVE_ORCA=1 TMUX_TOOLS_LIVE_ORCA_ONLY="claude teams" cargo test --features test-fixtures --test integration orca_contract_suite -- --nocapture` passed.
+
+## Code Review
+
+Review: `issue-261109-2336-02-code-review-20261110-110806.md` — Outcome: ACCEPTED
+
+## Resolution
+
+- Commit: `feat: the Herdr backend passes a live run in the maintainer's Herdr window and ships as a minor release with a README Herdr section (ISSUE-261109-2336-02)`
+- Route: `claude — deepseek-suspended` (Opus, effort medium); one attempt.
+- TDD: red-green at `prompt --format json` against the fake `hc` (P5.1 `how: stitched` / `how: screen` cases) and the private core.
+- Review: two independent Claude reviewers (Codex not run: its pane would open in the maintainer's default hc core); three LOW README findings (L1–L3) fixed and verified; Outcome ACCEPTED.
+- Release: 0.7.1 → 0.8.0; previous binary backed up to `~/.cargo/bin/tmux-tools.prev-0.7.1-herdr01`; `cargo install --path . --locked`; `tmux-tools --version` → `tmux-tools 0.8.0`. Rollback: copy the backup over `~/.cargo/bin/tmux-tools`.
+- Suite: `env -u TT_TEAM -u TT_HOST -u TMUX -u TMUX_PANE -u HC_TERMINAL_ID -u HC_TERMINAL_SOCKET -u HC_SCOPE cargo test --workspace --features test-fixtures --no-fail-fast` — PASS, 525 passed, 0 failed. P9.2 on 0.8.0: `TT_TEST_HERDR=1` `herdr_` PASS (31 passed); `TMUX_TOOLS_LIVE_HERDR=1` PASS (run `1b81d8`, 1 passed). `claude-teams` with Claude 2.1.322: no `not contract-tested` line. Leak checks: `hc ls --all --json` shows only t1 and t6, `tmux-tools list` shows no run terminal, `~/.local/state/herdr-core/` holds only `default`.
+- Date: 2026-11-11 (UTC).

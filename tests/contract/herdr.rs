@@ -5,6 +5,8 @@
 //! `PATH`, [`herdr_private_core_contract_suite`] runs the required verbs against a
 //! private core `HC_SESSION=tt-tests-<pid>` and, also on failure, stops that core and
 //! deletes its state directory (P8.3). It never reaches the default core.
+//! With `TMUX_TOOLS_LIVE_HERDR=1`, [`herdr_live_contract_suite`] runs the P8.4 cases in the
+//! core of the calling plain Herdr terminal and removes every terminal it created (P8.5).
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -819,7 +821,8 @@ fn completeness_and_the_scrollback_notice_follow_the_hc_read() {
         "prompt",
     );
     assert_eq!(result["complete"], false, "{result}");
-    assert_eq!(result["output_since_prompt"], "go\nc", "{result}");
+    // A `how: stitched` read after settle is the whole result.
+    assert_eq!(result["output_since_prompt"], "a\nb\ngo\nc", "{result}");
 
     fake.edit("t2", |terminal| terminal["how"] = json!("screen"));
     let out = fake.cli(&["capture", "--target", "s", "--all"]);
@@ -853,6 +856,26 @@ fn p51_prompt(label: &str, lines: Value, rows: u64, on_send: Value) -> Value {
         ]),
         "prompt",
     )
+}
+
+/// Acceptance (P5.1): the mark read reports `how: history`, the read after settle
+/// reports `how: stitched` (then, in a second case, `how: screen`) and starts with the
+/// mark read's lines; the result is that whole read and is not complete.
+#[test]
+fn a_stitched_or_screen_read_after_settle_is_the_whole_result_and_incomplete() {
+    for how in ["stitched", "screen"] {
+        let result = p51_prompt(
+            &format!("herdr-p51-{how}"),
+            json!(["l1", "l2", "l3"]),
+            24,
+            json!({"append": ["R1", "R2"], "how": how}),
+        );
+        assert_eq!(
+            result["output_since_prompt"], "l1\nl2\nl3\ngo\nR1\nR2",
+            "how={how}: {result}"
+        );
+        assert_eq!(result["complete"], false, "how={how}: {result}");
+    }
 }
 
 /// Acceptance (P5.1): a classic-scroll agent rewrites the last lines of the mark read
@@ -1489,29 +1512,22 @@ fn herdr_private_core_claude_completeness_and_capture_all() {
     }
 }
 
-/// Acceptance (ADR-260919-0146-01#claude-rich-launch item 1): with the user's
-/// `CLAUDE_CODE_NO_FLICKER=1` setting, a pane `spawn-agent claude` starts on the
-/// default `rich` surface is in classic scroll mode, so `hc read --json` reports
-/// `how: history`, and `prompt --format json` returns the reply token and none of the
-/// text above the History mark. Opt-in with `TT_TEST_HERDR=1`; when enabled, a missing
-/// `claude` on the original `PATH` fails the test.
-#[test]
-fn herdr_private_core_claude_rich_is_classic_scroll() {
-    if original_environment().get(SWITCH).map(String::as_str) != Some("1") {
-        return;
-    }
+/// The `claude` of the original `PATH`; a missing one fails the opt-in test.
+fn claude_on_original_path() -> PathBuf {
     let path = original_environment()
         .get("PATH")
         .cloned()
         .unwrap_or_default();
-    let claude = path
-        .split(':')
+    path.split(':')
         .map(|entry| Path::new(entry).join("claude"))
         .find(|candidate| candidate.is_file())
-        .expect("TT_TEST_HERDR=1 needs `claude` on the original PATH");
-    // Precondition: the user settings turn on fullscreen (`CLAUDE_CODE_NO_FLICKER=1`).
-    // Without it Claude is in classic scroll anyway and `how: history` proves nothing
-    // about the `rich` surface's `--settings` override.
+        .expect("TT_TEST_HERDR=1 needs `claude` on the original PATH")
+}
+
+/// Precondition: `~/.claude/settings.json` sets `env.CLAUDE_CODE_NO_FLICKER` to `"1"`,
+/// so a Claude started without a `--settings` override runs full screen; `proves`
+/// names what the test's result proves only under it.
+fn assert_user_settings_turn_on_fullscreen(proves: &str) {
     let home = original_environment()
         .get("HOME")
         .cloned()
@@ -1524,10 +1540,132 @@ fn herdr_private_core_claude_rich_is_classic_scroll() {
     assert_eq!(
         settings["env"]["CLAUDE_CODE_NO_FLICKER"].as_str(),
         Some("1"),
-        "precondition failed: {} must set env.CLAUDE_CODE_NO_FLICKER to \"1\" so that \
-         `how: history` proves the `rich` --settings override",
+        "precondition failed: {} must set env.CLAUDE_CODE_NO_FLICKER to \"1\" so that {proves}",
         settings_path.display()
     );
+}
+
+/// Acceptance (P5.1): a full-screen Claude pane that `launch --cmd claude` starts with
+/// the user setting `CLAUDE_CODE_NO_FLICKER=1`, so `hc read --json` reports
+/// `how: stitched`. `prompt --format json` sends a prompt that makes Claude print a
+/// run-unique token; the result (the whole read after settle) contains that token and
+/// Completeness is false. Opt-in with `TT_TEST_HERDR=1`; when enabled, a missing
+/// `claude` on the original `PATH` fails the test.
+#[test]
+fn herdr_private_core_full_screen_claude_prompt_is_the_whole_read() {
+    if original_environment().get(SWITCH).map(String::as_str) != Some("1") {
+        return;
+    }
+    let claude = claude_on_original_path().display().to_string();
+    assert_user_settings_turn_on_fullscreen("a plain `launch --cmd claude` runs full screen");
+    // `Drop` kills and removes the Claude terminal and stops the core, also on failure.
+    let core = PrivateCore::start("fs");
+    // The repository root: a directory Claude already trusts, so no trust dialog.
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let pane = core.pane_of(
+        &core.cli_in(
+            repo,
+            &[
+                "launch",
+                "--bare",
+                "--name",
+                "tt.fullscreen",
+                "--cmd",
+                &claude,
+                "--format",
+                "json",
+            ],
+        ),
+        "launch claude",
+    );
+    let deadline = Instant::now() + Duration::from_secs(90);
+    loop {
+        let terminal = core.get(&pane);
+        if matches!(terminal["status"]["state"].as_str(), Some("idle" | "done")) {
+            break;
+        }
+        if Instant::now() >= deadline {
+            let (screen, how, _) = history_read(&core, &pane);
+            panic!(
+                "Claude never reported idle: {terminal}\nhow={how}\n{}",
+                screen.join("\n")
+            );
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    std::thread::sleep(Duration::from_secs(1));
+    let (_, how, _) = history_read(&core, &pane);
+    assert_eq!(
+        how, "stitched",
+        "a full-screen Claude reads as `how: stitched`"
+    );
+
+    // A run-unique token that only Claude's reply prints: the prompt carries the two
+    // addends, never their sum.
+    let seed = u64::from(std::process::id());
+    let addend = 161_803_u64;
+    let token = (seed + addend).to_string();
+    let out = core.cli_in(
+        repo,
+        &[
+            "prompt",
+            "--target",
+            "tt.fullscreen",
+            "--timeout",
+            "120",
+            "--format",
+            "json",
+            &format!("Reply with only the decimal sum of {seed} and {addend}, digits only"),
+        ],
+    );
+    let result = json_payload(&out, "prompt full-screen claude");
+    let (after, after_how, _) = history_read(&core, &pane);
+    assert_eq!(
+        after_how, "stitched",
+        "still full screen after the prompt: {result}"
+    );
+    assert!(
+        result["output_since_prompt"]
+            .as_str()
+            .is_some_and(|output| output.contains(&token)),
+        "the reply token {token}: {result}"
+    );
+    // The result is the whole read after settle, not the part from the first changed
+    // line: its first non-blank line is the first non-blank line of the test's own read
+    // taken right after it.
+    let first_after = after
+        .iter()
+        .find(|line| !line.trim().is_empty())
+        .map(|line| line.trim());
+    let first_output = result["output_since_prompt"]
+        .as_str()
+        .unwrap_or_default()
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .map(str::trim);
+    assert_eq!(
+        first_output, first_after,
+        "the result starts at the top of the whole read: {result}"
+    );
+    assert_eq!(result["complete"], false, "{result}");
+}
+
+/// Acceptance (ADR-260919-0146-01#claude-rich-launch item 1): with the user's
+/// `CLAUDE_CODE_NO_FLICKER=1` setting, a pane `spawn-agent claude` starts on the
+/// default `rich` surface is in classic scroll mode, so `hc read --json` reports
+/// `how: history`, and `prompt --format json` returns the reply token and none of the
+/// text above the History mark. Opt-in with `TT_TEST_HERDR=1`; when enabled, a missing
+/// `claude` on the original `PATH` fails the test.
+#[test]
+fn herdr_private_core_claude_rich_is_classic_scroll() {
+    if original_environment().get(SWITCH).map(String::as_str) != Some("1") {
+        return;
+    }
+    let claude = claude_on_original_path();
+    // Precondition: the user settings turn on fullscreen (`CLAUDE_CODE_NO_FLICKER=1`).
+    // Without it Claude is in classic scroll anyway and `how: history` proves nothing
+    // about the `rich` surface's `--settings` override.
+    assert_user_settings_turn_on_fullscreen("`how: history` proves the `rich` --settings override");
     // `Drop` kills and removes the Claude terminal and stops the core, also on failure.
     let core = PrivateCore::start("rich");
     // The core's terminals do not carry the original `PATH`, so the built-in `claude`
@@ -1904,4 +2042,407 @@ fn herdr_private_core_contract_suite() {
         vec![core.caller.clone()],
         "only the run's caller terminal is left"
     );
+}
+
+// --- P8.4, P8.5: the opt-in live run -----------------------------------------------------
+
+/// The opt-in switch of the live run (PRD-261109-2223-01 `## Contracts`, P8.4).
+const LIVE_SWITCH: &str = "TMUX_TOOLS_LIVE_HERDR";
+
+/// How long the live run keeps its terminals open, after every case passed, so the
+/// maintainer can check the Herdr window (Verification item 3).
+const LIVE_HOLD: Duration = Duration::from_secs(30);
+
+/// One live run in the core of the calling Herdr terminal. Every CLI and `hc` call gets
+/// the calling terminal's `HC_*` variables and the original `PATH`, never `TMUX`. Each
+/// terminal the run creates carries one of the run-unique names of [`LiveRun::n`] as its
+/// `where` label from its creation (P3.4); `Drop` kills and removes, by hc address,
+/// every terminal that carries such a name, also on failure, and never another one.
+struct LiveRun {
+    hc: PathBuf,
+    dir: PathBuf,
+    tag: String,
+    names: std::cell::RefCell<Vec<String>>,
+    caller: String,
+}
+
+impl LiveRun {
+    fn start() -> LiveRun {
+        let original = original_environment();
+        assert!(
+            !original.contains_key("TMUX"),
+            "{LIVE_SWITCH}=1 runs from a plain Herdr terminal: unset TMUX"
+        );
+        let caller = original.get("HC_TERMINAL_ID").cloned().unwrap_or_else(|| {
+            panic!("{LIVE_SWITCH}=1 runs from a Herdr terminal: HC_TERMINAL_ID")
+        });
+        let hc = original
+            .get("PATH")
+            .map(String::as_str)
+            .unwrap_or_default()
+            .split(':')
+            .map(|entry| Path::new(entry).join("hc"))
+            .find(|candidate| candidate.is_file())
+            .expect("the live run needs `hc` on PATH");
+        let millis = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        let tag = format!("{:x}", (millis ^ u64::from(std::process::id())) & 0xff_ffff);
+        let dir = tempfile_dir("herdr-live");
+        for sub in ["config/tmux-tools", "bin"] {
+            std::fs::create_dir_all(dir.join(sub)).unwrap();
+        }
+        write_executable(&dir.join("bin/hexecho.py"), HEXECHO);
+        // The core's terminals need not carry the original `PATH`: the built-in `claude`
+        // runs by the absolute path of the original `PATH`'s `claude`.
+        std::fs::write(
+            dir.join("config/tmux-tools/agents.toml"),
+            format!(
+                "[claude]\nbinary = \"{}\"\n",
+                claude_on_original_path().display()
+            ),
+        )
+        .unwrap();
+        LiveRun {
+            hc,
+            dir,
+            tag,
+            names: std::cell::RefCell::new(Vec::new()),
+            caller,
+        }
+    }
+
+    /// The run-unique tmux-tools name for `role`, recorded for the teardown.
+    fn n(&self, role: &str) -> String {
+        let name = format!("tt.live{}.{role}", self.tag);
+        self.names.borrow_mut().push(name.clone());
+        name
+    }
+
+    /// The calling terminal's core: its `HC_*` variables, the original `PATH`, no
+    /// `TMUX`, and none of the calling Claude session's variables.
+    fn env(&self, command: &mut Command) {
+        let original = original_environment();
+        for key in claude_session_vars() {
+            command.env_remove(key);
+        }
+        command
+            .env_remove("TMUX")
+            .env_remove("TMUX_PANE")
+            .env("PATH", original.get("PATH").cloned().unwrap_or_default());
+        for key in [
+            "HC_TERMINAL_ID",
+            "HC_TERMINAL_SOCKET",
+            "HC_SCOPE",
+            "HC_SESSION",
+        ] {
+            match original.get(key) {
+                Some(value) => command.env(key, value),
+                None => command.env_remove(key),
+            };
+        }
+    }
+
+    fn hc(&self, args: &[&str]) -> std::process::Output {
+        let mut command = Command::new(&self.hc);
+        self.env(&mut command);
+        command
+            .args(args)
+            .stdin(Stdio::null())
+            .output()
+            .expect("run hc")
+    }
+
+    fn hc_json(&self, args: &[&str]) -> Value {
+        let out = self.hc(args);
+        serde_json::from_slice(&out.stdout).unwrap_or_else(|_| panic!("hc {args:?}: {out:?}"))
+    }
+
+    /// The CLI from the repository root (a directory Claude already trusts).
+    fn cli(&self, args: &[&str]) -> CmdOutput {
+        let mut command = Command::new(BIN);
+        self.env(&mut command);
+        let child = command
+            .args(args)
+            .current_dir(env!("CARGO_MANIFEST_DIR"))
+            .env("SHELL", "/bin/sh")
+            // `XDG_STATE_HOME` stays as inherited: hc finds the core's socket under it.
+            .env("XDG_CONFIG_HOME", self.dir.join("config"))
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        wait_for_child(
+            child,
+            &format!("tmux-tools {args:?}"),
+            Duration::from_secs(180),
+        )
+    }
+
+    fn get(&self, address: &str) -> Value {
+        self.hc_json(&["get", "--json", address])
+    }
+
+    /// `hc ls --all --json` rows whose `where` label is a name of this run.
+    fn own_rows(&self) -> Vec<Value> {
+        let names = self.names.borrow();
+        self.hc_json(&["ls", "--all", "--json"])["terminals"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|row| {
+                row["where"]
+                    .as_str()
+                    .is_some_and(|name| names.iter().any(|own| own == name))
+            })
+            .collect()
+    }
+
+    /// Wait until `pane`'s screen contains `text`.
+    fn wait_screen(&self, pane: &str, text: &str) {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            let screen = self.hc_json(&["read", "--json", pane, "--lines", "0"])["text"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned();
+            if screen.contains(text) {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "{pane} never showed {text:?}: {screen}"
+            );
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+}
+
+impl Drop for LiveRun {
+    fn drop(&mut self) {
+        // `own_rows` panics only when hc answers no JSON; a panic here during an unwind
+        // would abort, so the teardown is best effort and the leak assertion of the test
+        // body is the check.
+        let rows = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.own_rows()))
+            .unwrap_or_default();
+        for row in rows {
+            if let Some(address) = row["address"].as_str() {
+                let _ = self.hc(&["kill", "--json", address]);
+                let _ = self.hc(&["rm", "--json", address]);
+            }
+        }
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+/// P8.4: the contract suite in the core of the calling Herdr terminal, from a plain
+/// Herdr terminal (no `$TMUX`, `HC_TERMINAL_ID` set): a Claude agent pane with Host
+/// state, a key-name and a literal send, a multi-line prompt to the Claude pane with
+/// guaranteed delivery (P6.6), a `--split v` terminal in the caller's tab, and a
+/// no-split terminal in a new tab. The run holds its terminals for [`LIVE_HOLD`] so the
+/// maintainer can check the Herdr window, then kills them and asserts that neither
+/// `tmux-tools list` nor `hc ls --all --json` shows one (P8.5). Opt-in with
+/// `TMUX_TOOLS_LIVE_HERDR=1`.
+#[test]
+fn herdr_live_contract_suite() {
+    if original_environment().get(LIVE_SWITCH).map(String::as_str) != Some("1") {
+        return;
+    }
+    let run = LiveRun::start();
+    let caller = run.get(&run.caller);
+    let space = caller["labels"]["herdr.space"].as_str().map(str::to_owned);
+    let tab = caller["labels"]["herdr.tab"].as_str().map(str::to_owned);
+    assert!(
+        space.is_some() && tab.is_some(),
+        "the calling terminal carries herdr.space and herdr.tab: {caller}"
+    );
+    println!(
+        "P8.4 live run {}: caller {} space {space:?} tab {tab:?}",
+        run.tag, run.caller
+    );
+    let pane_of = |out: &CmdOutput, ctx: &str| -> String {
+        json_payload(out, ctx)["pane_id"]
+            .as_str()
+            .expect("pane_id")
+            .to_owned()
+    };
+
+    let report = json_payload(&run.cli(&["self", "--format", "json"]), "self");
+    assert_eq!(report["host"], "herdr", "{report}");
+
+    // A `--split v` terminal joins the caller's tab (P3.1, P3.2).
+    let split_name = run.n("v");
+    let hexecho = run.dir.join("bin/hexecho.py").display().to_string();
+    let split = pane_of(
+        &run.cli(&[
+            "launch",
+            "--split",
+            "v",
+            "--bare",
+            "--name",
+            &split_name,
+            "--cmd",
+            &hexecho,
+            "--format",
+            "json",
+        ]),
+        "launch --split v",
+    );
+    let terminal = run.get(&split);
+    assert_eq!(
+        terminal["labels"]["herdr.space"].as_str(),
+        space.as_deref(),
+        "{terminal}"
+    );
+    assert_eq!(
+        terminal["labels"]["herdr.tab"].as_str(),
+        tab.as_deref(),
+        "{terminal}"
+    );
+    println!("P8.4 --split v terminal {split} ({split_name}) is in the caller's tab: ok");
+
+    // A key-name and a literal send (P5.2).
+    run.wait_screen(&split, "HEXECHO READY");
+    run.cli(&["send", "--target", &split_name, "Hi"])
+        .assert_success("send literal");
+    run.wait_screen(&split, "HEX 48");
+    run.wait_screen(&split, "HEX 69");
+    run.cli(&["send", "--target", &split_name, "Up"])
+        .assert_success("send key");
+    run.wait_screen(&split, "HEX 1b5b41");
+    println!("P8.4 key-name and literal send: ok");
+
+    // A no-split terminal opens a new tab in the caller's space (P3.2).
+    let tab_name = run.n("tab");
+    let new_tab = pane_of(
+        &run.cli(&[
+            "launch",
+            "--name",
+            &tab_name,
+            "--cmd",
+            "echo tmux-tools live run: new tab",
+            "--format",
+            "json",
+        ]),
+        "launch",
+    );
+    let terminal = run.get(&new_tab);
+    assert_eq!(
+        terminal["labels"]["herdr.space"].as_str(),
+        space.as_deref(),
+        "{terminal}"
+    );
+    assert!(terminal["labels"].get("herdr.tab").is_none(), "{terminal}");
+    println!("P8.4 no-split terminal {new_tab} ({tab_name}) opens a new tab: ok");
+
+    // A Claude agent pane with Host state (P6.2).
+    let claude_name = run.n("claude");
+    let claude = pane_of(
+        &run.cli(&[
+            "spawn-agent",
+            "claude",
+            "--name",
+            &claude_name,
+            "--format",
+            "json",
+        ]),
+        "spawn-agent claude",
+    );
+    let deadline = Instant::now() + Duration::from_secs(90);
+    loop {
+        let status = json_payload(
+            &run.cli(&["status", "--target", &claude_name, "--format", "json"]),
+            "status claude",
+        );
+        if matches!(status["host_state"].as_str(), Some("idle" | "done")) {
+            assert!(status["host_word"].is_string(), "{status}");
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "Claude never reported a Host state: {status}"
+        );
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    std::thread::sleep(Duration::from_secs(1));
+    println!("P8.4 Claude pane {claude} ({claude_name}) reports Host state: ok");
+
+    // A multi-line prompt to the Claude pane: guaranteed delivery (P6.6). The run-unique
+    // token is a sum that only Claude's reply prints.
+    let seed = u64::from(std::process::id());
+    let addend = 141_421_u64;
+    let token = (seed + addend).to_string();
+    let prompt = format!(
+        "Reply with only the decimal sum of {seed} and {addend}.\nDigits only, no other text."
+    );
+    let result = json_payload(
+        &run.cli(&[
+            "prompt",
+            "--target",
+            &claude_name,
+            "--timeout",
+            "120",
+            "--format",
+            "json",
+            &prompt,
+        ]),
+        "prompt claude",
+    );
+    assert_eq!(result["one_submission_delivery"], "guaranteed", "{result}");
+    assert_eq!(result["submit"], "confirmed", "{result}");
+    assert!(
+        result["output_since_prompt"]
+            .as_str()
+            .is_some_and(|output| output.contains(&token)),
+        "the reply token {token}: {result}"
+    );
+    println!("P8.4 multi-line prompt to Claude, guaranteed delivery, reply {token}: ok");
+
+    println!(
+        "P8.4 holding the run's terminals for {}s for the Herdr window check",
+        LIVE_HOLD.as_secs()
+    );
+    std::thread::sleep(LIVE_HOLD);
+
+    // P8.5: kill every created terminal, then neither `tmux-tools list` nor
+    // `hc ls --all --json` shows one.
+    let names = run.names.borrow().clone();
+    for name in &names {
+        run.cli(&["kill", "--target", name, "--any"])
+            .assert_success(&format!("kill {name}"));
+    }
+    let rows = json_payload(&run.cli(&["list", "--format", "json"]), "final list");
+    let listed: Vec<&Value> = rows
+        .as_array()
+        .map(|rows| {
+            rows.iter()
+                .filter(|row| {
+                    row["name"]
+                        .as_str()
+                        .is_some_and(|name| names.iter().any(|own| own == name))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    assert!(listed.is_empty(), "tmux-tools list shows {listed:?}");
+    let created = [split, new_tab, claude];
+    let left: Vec<Value> = run.hc_json(&["ls", "--all", "--json"])["terminals"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|row| {
+            row["address"]
+                .as_str()
+                .is_some_and(|address| created.iter().any(|own| own == address))
+                || row["where"]
+                    .as_str()
+                    .is_some_and(|name| names.iter().any(|own| own == name))
+        })
+        .collect();
+    assert!(left.is_empty(), "hc ls --all --json shows {left:?}");
+    println!("P8.5 teardown: no terminal of the run is left: ok");
 }

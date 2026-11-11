@@ -14,7 +14,7 @@ Its terminals live in the JSON file FAKE_HC_STATE:
 A terminal's `on_send` (set by a test) is applied by `send` after the text goes in:
 `turn` adds to the turn, `status` sets the status word with `status_ms` now, `rewrite`
 replaces its whole history, `append` adds lines to its history, `complete` sets the
-`complete` value later reads report. A terminal whose status word is `blocked` refuses `send`.
+`complete` value later reads report, `how` sets the `how` value later reads report. A terminal whose status word is `blocked` refuses `send`.
 """
 import json
 import os
@@ -172,6 +172,8 @@ if command == ["send"]:
     terminal["lines"].extend(effect.get("append", []))
     if "complete" in effect:
         terminal["complete"] = effect["complete"]
+    if "how" in effect:
+        terminal["how"] = effect["how"]
     save(state)
     answer({"started": None, "status": terminal["status"], "turn": terminal["turn"]})
 

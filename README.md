@@ -33,7 +33,7 @@ $ tmux-tools prompt --target codex-helper "explain src/main.rs" --idle-seconds 3
 
 Most pane verbs accept `--target <name|id>`, `--format concise|json|raw`, `--session NAME`, and `--window NAME`. Defaults: `--format concise`, `--idle-seconds 2.0`, `--ready-stable-seconds 2.0`, `--timeout 120.0`.
 
-Every verb runs on the selected host, tmux or Orca (see "Hosts"). Every `--format json` object carries `host`; `list --format json` rows carry `host` and `host_state`. On every host a `--name` value must match `[A-Za-z0-9._-]+` and must not be `.` or `..`; any other value exits 1 with `invalid name: <name>` and creates no pane. An optional verb or option the host lacks (`rebalance`, `--split tile`, `--size`; on Orca also `--session` and `--window`) exits 3 with `unsupported: <verb> on <host>`.
+Every verb runs on the selected host, tmux, Orca or Herdr (see "Hosts"). Every `--format json` object carries `host`; `list --format json` rows carry `host` and `host_state`. On every host a `--name` value must match `[A-Za-z0-9._-]+` and must not be `.` or `..`; any other value exits 1 with `invalid name: <name>` and creates no pane. An optional verb or option the host lacks (`rebalance`, `--split tile`, `--size`; on Orca and Herdr also `--session` and `--window`) exits 3 with `unsupported: <verb> on <host>`.
 
 | Verb | Signature | Notes |
 | --- | --- | --- |
@@ -59,7 +59,7 @@ Every verb runs on the selected host, tmux or Orca (see "Hosts"). Every `--forma
 
 ### Host selection: `TMUX_TOOLS_HOST`
 
-`TMUX_TOOLS_HOST=tmux|orca` selects the host explicitly; any other value fails every verb with exit 1 and names the valid values. Unset, the first match selects: `$TMUX` set → tmux; `ORCA_TERMINAL_HANDLE` set → orca; otherwise tmux, with the Managed session outside tmux as before. When the selected host's CLI or runtime is unreachable, the verb exits 1 and names the host and what selected it; it never falls back to another host.
+`TMUX_TOOLS_HOST=tmux|orca|herdr` selects the host explicitly; any other value fails every verb with exit 1 and names the valid values (`tmux`, `orca`, `herdr`). Unset, the first match selects: `$TMUX` set → tmux; `ORCA_TERMINAL_HANDLE` set → orca; `HC_TERMINAL_ID` set → herdr; otherwise tmux, with the Managed session outside tmux as before. When the selected host's CLI or runtime is unreachable, the verb exits 1 and names the host and what selected it; it never falls back to another host.
 
 ### Agent profiles
 
@@ -326,7 +326,7 @@ On `wait-idle` timeout, concise output starts with `reason=timed_out duration=<s
 
 ## Hosts
 
-tmux-tools drives the panes of one host per invocation through a pane-level Host port: tmux, or Orca through the `orca` CLI. The tmux backend keeps every behaviour described in this README.
+tmux-tools drives the panes of one host per invocation through a pane-level Host port: tmux, Orca through the `orca` CLI, or Herdr through the herdr-core `hc` CLI. The tmux backend keeps every behaviour described in this README.
 
 ### Orca
 
@@ -338,6 +338,35 @@ Limits on Orca:
 - **Every `prompt` result is `complete: false`.** Orca reports no pane width and no full-screen state, so Completeness cannot be established. `capture --all` prints no full-screen notice. The History mark is Orca's read cursor; history is paged to the settle point, and a full-screen program, which keeps no line history, yields its rendered screen.
 - **Cursor and keypad keys always send their normal-mode bytes.** `send` classifies each argument by tmux's own key grammar and writes the bytes tmux's xterm key output produces (`M-x` → `ESC x`, `F1` → `ESC O P`, `Up` → `ESC [ A`, `^c` → `0x03`); Orca does not expose a pane's application cursor or keypad mode, so an application that enabled it receives the normal-mode bytes. `interrupt` sends the surface's `interrupt_key` the same way, never Orca's `--interrupt`.
 - **One-submission delivery is a proxy, with a remaining risk.** `prompt` refuses before sending anything when the runtime lacks the capability `terminal.prompt-delivery.v1`. Otherwise delivery is guaranteed only when `terminal show` reports the pane's registered agent, `worktree ps` reports that agent live, and the capability is present; a multi-line prompt to a bracketed-paste surface is refused when delivery is not guaranteed. Orca decides on its server whether to bracket the text, and nothing it reports before sending reproduces that check: it can still write the raw text, and a shell in the pane then runs each line.
+
+### Herdr
+
+Herdr terminals are driven through the herdr-core `hc` CLI: the backend runs only `hc <command> … --json` and reads its JSON; it never calls `herdr-app` and never uses `hc connect`.
+
+**Selection.** Herdr is selected by `TMUX_TOOLS_HOST=herdr`, or, with `TMUX_TOOLS_HOST` unset, by `HC_TERMINAL_ID` when neither `$TMUX` nor `ORCA_TERMINAL_HANDLE` is set; under tmux the host stays tmux unless `TMUX_TOOLS_HOST=herdr`. When `hc` is not on `PATH` or `hc server status --json` fails, the verb exits 1 and names `herdr` and what selected it. The calling pane is always `HC_TERMINAL_ID` (never `$TMUX` or `TMUX_PANE`, also when a stale `TMUX_PANE` is set); without it, `self` and every verb that acts on the calling pane without `--target` exit 1 and name `HC_TERMINAL_ID`. A Target is a tmux-tools pane name or an hc address `t<n>`; a registered name wins, and a value is used as an hc address only when no registered name matches it.
+
+**Placement.** A new terminal starts with `hc run --bg --outlive-parent --no-notify --name tt-<16 lowercase hex of SHA-256(name)> --cwd <cwd>` and its labels, so its name and registration exist when it is created. It shows in the Herdr window only through the labels `herdr.space` and `herdr.tab`, taken, first match, from the `--target` terminal, else the calling terminal (`HC_TERMINAL_ID`), else `TMUX_TOOLS_HERDR_SPACE` and `TMUX_TOOLS_HERDR_TAB` (a Herdr space id and tab id). When no source gives a space, the terminal gets neither label and stays hidden.
+
+- `--split h` and `--split v` set both labels, so the terminal joins that tab; Herdr chooses its position, and the split direction has no effect.
+- No `--split`, and `--split window`, set only `herdr.space`, so Herdr opens a new tab.
+- `--split tile`, `--size`, `--session`, `--window` and `rebalance` exit 3 with no side effect; the automatic tile after a spawn is skipped.
+
+**Labels.** The Pane registration is stored as hc labels on the terminal, all string values; an absent label is unset: `tt.name`, `tt.agent`, `tt.access`, `tt.launched_at` (RFC 3339), `tt.cwd`, `tt.surface`, `tt.surface_unvalidated` (`"true"` or `"false"`), `tt.parent`, `tt.team`, `tt.shim_id`, `tt.title`, `tt.claude_agent_name`, `tt.claude_team_name`. The label `where` is the tmux-tools pane name, and `herdr.space` and `herdr.tab` place the terminal. Herdr uses no Pane record. A name is unique among live terminals through its hc name: a spawn whose hc name is taken exits 1 and creates no terminal. A terminal in state `finished` that carries `tt.name` is dead: every verb that resolves, lists or spawns that name first removes it (`hc rm`), and `list` shows it once with `status: dead`. Ownership reads `tt.name` and `tt.cwd`.
+
+**Verbs.**
+
+- `list` shows the terminals of `hc ls --all --json` that carry `tt.name`: `pane` is the hc address, `session` the `herdr.space` label, and a live terminal has `status: running`; rows have no `window` key. In `status`, `spawn-agent` and `launch`, `window` is the `herdr.tab` label or `null`. Every other JSON key with no Herdr source is `null`.
+- `kill` runs `hc kill`, then `hc rm`. `launch` keeps the shell after the command; `--bare` lets the terminal finish with the command.
+- Host state (`host_state`) comes from the `status` of `hc get --json`: `idle`, `working`, `blocked` and `done` map to themselves, `error` maps to `blocked`, anything else and a finished terminal map to `null`. `status --format json` adds `host_word`, the exact hc status word (on every host; always `null` on tmux and Orca).
+- `prompt` submits with `hc send` (never `--force`); when hc refuses because the program is blocked, it exits 1 with `prompt target blocked: <reason>`. `submit` is `confirmed` when the terminal's `turn` goes up, or its status word changes to `working` after the send; otherwise `accepted`.
+- `notify` exits 0 and prints `notify: not delivered on herdr` on stderr.
+- `claude-teams` has no teammate shim on Herdr: it fails open with `claude-teams: no team: no teammate shim on herdr; starting claude without teammate panes`, so `spawn-agent claude` on Herdr starts Claude with in-process teammates.
+
+Limits on Herdr:
+
+- **`send` types only a fixed character set.** `hc keys` sends one key per character. The typeable set is space, `a`–`z`, `A`–`Z`, `0`–`9`, and `` ' , - . / ; = [ \ ] ` ``. `hc keys` cannot type any other character, including `! " # $ % & ( ) * + : < > ? @ ^ _ { | } ~`. Every argument is checked before anything is sent: a character outside the set exits 1 with `cannot type on herdr: U+<XXXX>`, and a key name with no `hc keys` name exits 1 with `cannot type on herdr: <argument>`; nothing is sent then. Only when `hc keys` still rejects a key during the send can part of the input be sent. `send-enter` sends `enter`, `escape` sends `esc`, and `interrupt` sends the surface's `interrupt_key` this way (never `hc interrupt`).
+- **One-submission delivery is guaranteed only for a pane with Host state.** `hc send` wraps the text in bracketed paste when the program has mode 2004 on, and writes it raw otherwise; hc does not report the mode. Delivery is guaranteed for a pane whose Host state is not `null` (the program reports OSC 7501). A multi-line prompt to any other pane is refused before anything is sent; other prompts to it are sent with delivery `unavailable`.
+- **A full-screen pane gives its whole read.** The History mark is one `hc read --lines 1000000` before submission; the `prompt` result is the read after settle from the first line that differs from the mark read. When the read after settle reports `how: stitched` or `how: screen` (a full-screen program), the result is that whole read and does not start at the mark. Completeness is true only when both reads report `how: history` and the first changed line is at least the number of lines of the mark read minus `rows`, so output that only appends after the mark read is complete. `capture --all` prints the no-scrollback notice when its read reports `how: screen`.
 
 ## Claude teams
 
@@ -431,6 +460,30 @@ TMUX_TOOLS_LIVE_ORCA=1 cargo test --features test-fixtures --test integration or
 
 It closes every pane it creates, also on failure, and ends by asserting that neither `tmux-tools list`
 nor `orca terminal list` shows one of them.
+
+The default run never reaches herdr-core either: the Herdr tests drive a fake `hc`, and child
+processes get no `HC_*` variables and no `hc` on `PATH`. With `TT_TEST_HERDR=1` and `hc` on `PATH`,
+the Herdr contract suite runs against a private core `HC_SESSION=tt-tests-<pid>-<tag>`; each test stops
+its core and deletes its own `~/.local/state/herdr-core/tt-tests-<pid>-<tag>`, also on failure. Its
+Claude tests need `claude` on `PATH`; two of them (the full-screen test and the `rich` test) need
+`env.CLAUDE_CODE_NO_FLICKER` set to `"1"` in `~/.claude/settings.json`:
+
+```sh
+TT_TEST_HERDR=1 cargo test --features test-fixtures --test integration herdr_ -- --nocapture
+```
+
+The live Herdr run uses the core of the calling terminal, so start it from a plain Herdr terminal (no
+`$TMUX`, `HC_TERMINAL_ID` set) that carries `herdr.space` and `herdr.tab`:
+
+```sh
+TMUX_TOOLS_LIVE_HERDR=1 cargo test --features test-fixtures --test integration herdr_live_contract_suite -- --nocapture
+```
+
+It starts a `--split v` terminal in the caller's tab, a no-split terminal in a new tab, and a Claude
+pane through `spawn-agent claude`; it sends a key name and literal text, and a multi-line prompt to
+Claude with guaranteed delivery. It keeps these terminals for 30 seconds so you can check the Herdr
+window, then kills them, also on failure, and ends by asserting that neither `tmux-tools list` nor
+`hc ls --all --json` shows one of them.
 
 The live vendor surfaces are validated separately, by a manual smoke that never runs under
 `cargo test` (it drives the real `claude`, `codex` and `dsh` binaries):
