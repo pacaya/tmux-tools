@@ -505,7 +505,7 @@ fn align_offset(before: &[&str], after: &[&str]) -> Option<usize> {
         {
             matched += 1;
         }
-        if best.map_or(true, |(_, best_matched)| matched > best_matched) {
+        if best.is_none_or(|(_, best_matched)| matched > best_matched) {
             best = Some((offset, matched));
         }
     }

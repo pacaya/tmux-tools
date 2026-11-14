@@ -570,8 +570,7 @@ impl Drop for IsolatedTmuxServer {
         // was never read (a failed startup), still runs `-L <label>`: end it by its
         // pid and by its label so no test server outlives the suite.
         let deadline = Instant::now() + Duration::from_secs(2);
-        while (self.answers() || process_exists(&self.server_pid)) && Instant::now() < deadline
-        {
+        while (self.answers() || process_exists(&self.server_pid)) && Instant::now() < deadline {
             thread::sleep(Duration::from_millis(20));
         }
         if process_exists(&self.server_pid) {
