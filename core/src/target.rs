@@ -33,7 +33,7 @@ pub fn parse(s: &str) -> TargetSpec {
 pub fn resolve(spec: &TargetSpec, session: Option<&str>, window: Option<&str>) -> Result<String> {
     match host::current().host() {
         Host::Orca => return resolve_on_orca(spec, session, window),
-        Host::Herdr => return resolve_on_herdr(spec, session, window),
+        Host::Herdr | Host::Rex => return resolve_on_herdr(spec, session, window),
         Host::Tmux => {}
     }
     match spec {
@@ -71,7 +71,8 @@ fn resolve_on_orca(
     names::find_pane_by_name(name)?.ok_or_else(|| anyhow!("no pane registered with name {name:?}"))
 }
 
-/// PRD-261109-2223-01 P7.6: on Herdr a Target is a pane name or an hc address `t<n>`.
+/// PRD-261109-2223-01 P7.6: on Herdr a Target is a pane name or an hc address `t<n>`;
+/// on Rex a pane name or a block id `block:<uuid>` (PRD-261112-2108-01 P1).
 /// A registered name wins; a value is an hc address only when no registered name
 /// matches it, and a dead name fails as an unknown one (P4.4). A verb without
 /// `--target` acts on the calling terminal. `--session` and `--window` are unsupported.
@@ -153,15 +154,16 @@ pub fn calling_pane_id() -> Option<String> {
     if let Some(leader) = crate::team::leader_handle() {
         return Some(leader);
     }
-    // On Orca and Herdr the calling pane is the host's own variable, read through the
-    // Host port; `TMUX_PANE` is never read there (PRD-261109-2223-01 P2.6).
+    // On Orca, Rex and Herdr the calling pane is the host's own variable, read through
+    // the Host port; `TMUX_PANE` is never read there (PRD-261109-2223-01 P2.6,
+    // PRD-261112-2108-01 P2.6).
     match host::current().host() {
         Host::Orca => {
             return env::var(host::ORCA_TERMINAL_HANDLE)
                 .ok()
                 .filter(|handle| !handle.trim().is_empty());
         }
-        Host::Herdr => return host::current().calling_pane().ok(),
+        Host::Herdr | Host::Rex => return host::current().calling_pane().ok(),
         Host::Tmux => {}
     }
     if let Ok(pane) = env::var("TMUX_PANE") {

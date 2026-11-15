@@ -106,9 +106,11 @@ fn run_on_registry_host(args: &StatusArgs) -> Result<()> {
         Format::Json => {
             let row = description.summary?;
             let host = host::current();
-            // On Herdr an absent label is `null`; Orca keeps its reported strings.
+            // On Herdr an absent label is `null`, and on Rex a value with no source
+            // (PRD-261112-2108-01 P7.3); Orca keeps its reported strings.
             let label = |value: &str| {
-                (host.host() != Host::Herdr || !value.is_empty()).then(|| value.to_owned())
+                (!matches!(host.host(), Host::Herdr | Host::Rex) || !value.is_empty())
+                    .then(|| value.to_owned())
             };
             let json = StatusJson {
                 host: host.host(),

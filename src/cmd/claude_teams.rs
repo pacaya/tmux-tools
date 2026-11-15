@@ -157,6 +157,8 @@ fn set_up(claude: ClaudeBinary) -> std::result::Result<Started, String> {
         // PRD-261109-2223-01 P7.7: Herdr has no teammate shim, so Claude starts with
         // in-process teammates.
         Host::Herdr => return Err("no teammate shim on herdr".to_owned()),
+        // PRD-261112-2108-01 P7.6: neither has Rex.
+        Host::Rex => return Err("no teammate shim on rex".to_owned()),
     };
     let server_id = port
         .server_identity()

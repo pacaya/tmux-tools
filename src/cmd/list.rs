@@ -219,8 +219,9 @@ fn render_json(rows: &[PaneRow], orphans: &[bool]) -> Result<()> {
                 host: host.host(),
                 name: row.name.clone(),
                 agent: row.agent.clone(),
-                session: (host.host() != Host::Herdr || !row.session.is_empty())
-                    .then(|| row.session.clone()),
+                session: (!matches!(host.host(), Host::Herdr | Host::Rex)
+                    || !row.session.is_empty())
+                .then(|| row.session.clone()),
                 pane: pane_label(row),
                 access: row.access.clone(),
                 launched: row.launched_at.clone(),

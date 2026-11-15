@@ -2,8 +2,8 @@
 //! panes of a Host.
 //!
 //! A [`Host`] is the terminal program whose panes the tool drives. A Host backend is the
-//! implementation of [`HostPort`] for one host: [`TmuxHost`], [`OrcaHost`] and
-//! [`HerdrHost`]. The
+//! implementation of [`HostPort`] for one host: [`TmuxHost`], [`OrcaHost`],
+//! [`RexHost`] and [`HerdrHost`]. The
 //! [`HostSelection`] of an invocation picks one (P3); [`current`] returns it. Every
 //! module outside a backend (the verbs, [`crate::layout`], [`crate::target`],
 //! [`crate::names`] and [`crate::idle`]) reaches a host only through this port, and no
@@ -25,13 +25,16 @@ use crate::layout::{Registration, WindowGeometry};
 use crate::names::Registered;
 
 mod herdr;
+mod history_mark;
 mod orca;
+mod rex;
 mod tmux;
 
 pub use self::herdr::{
     hc_name, HerdrHost, HC_TERMINAL_ID, TMUX_TOOLS_HERDR_SPACE, TMUX_TOOLS_HERDR_TAB,
 };
 pub use self::orca::{OrcaHost, ORCA_TERMINAL_HANDLE, ORCA_WORKTREE_ID};
+pub use self::rex::{RexHost, REX_BLOCK, REX_SERVER, REX_SESSION, TMUX_TOOLS_REX_SESSION};
 pub use self::tmux::TmuxHost;
 use crate::team::{TT_HOST, TT_TEAM};
 
@@ -41,15 +44,17 @@ use crate::team::{TT_HOST, TT_TEAM};
 pub enum Host {
     Tmux,
     Orca,
+    Rex,
     Herdr,
 }
 
 impl Host {
-    /// The host's name as the CLI reports it: `tmux`, `orca` or `herdr`.
+    /// The host's name as the CLI reports it: `tmux`, `orca`, `rex` or `herdr`.
     pub fn as_str(self) -> &'static str {
         match self {
             Host::Tmux => "tmux",
             Host::Orca => "orca",
+            Host::Rex => "rex",
             Host::Herdr => "herdr",
         }
     }
@@ -91,9 +96,10 @@ pub struct HostSelection {
 
 impl HostSelection {
     /// Select the host from the process environment: `TMUX_TOOLS_HOST` when set
-    /// (`tmux`, `orca` or `herdr`; anything else, the empty value included, is an
-    /// error); otherwise `$TMUX` set selects tmux, `ORCA_TERMINAL_HANDLE` set selects
-    /// orca, and `HC_TERMINAL_ID` set selects herdr, in that order; otherwise tmux.
+    /// (`tmux`, `orca`, `rex` or `herdr`; anything else, the empty value included, is
+    /// an error); otherwise `$TMUX` set selects tmux, `ORCA_TERMINAL_HANDLE` set selects
+    /// orca, `REX_BLOCK` set selects rex, and `HC_TERMINAL_ID` set selects herdr, in
+    /// that order; otherwise tmux.
     pub fn from_env() -> Result<HostSelection> {
         Self::from_lookup(|name| std::env::var(name).ok())
     }
@@ -119,9 +125,10 @@ impl HostSelection {
             let host = match value.as_str() {
                 "tmux" => Host::Tmux,
                 "orca" => Host::Orca,
+                "rex" => Host::Rex,
                 "herdr" => Host::Herdr,
                 other => anyhow::bail!(
-                    "{TMUX_TOOLS_HOST}={other:?} is not a host; valid values are tmux, orca and herdr"
+                    "{TMUX_TOOLS_HOST}={other:?} is not a host; valid values are tmux, orca, rex and herdr"
                 ),
             };
             return Ok(HostSelection {
@@ -133,6 +140,7 @@ impl HostSelection {
         for (env_var, host) in [
             ("TMUX", Host::Tmux),
             (ORCA_TERMINAL_HANDLE, Host::Orca),
+            (REX_BLOCK, Host::Rex),
             (HC_TERMINAL_ID, Host::Herdr),
         ] {
             if set(env_var) {
@@ -168,8 +176,10 @@ pub fn selection() -> Result<HostSelection> {
         crate::team::current()?;
     }
     // PRD-261109-2223-01 P2.3: a selected Herdr whose `hc` is missing or whose
-    // `hc server status` fails ends the invocation before any verb runs.
-    if selection.host == Host::Herdr {
+    // `hc server status` fails ends the invocation before any verb runs; so does a
+    // selected Rex whose `rex` is missing or whose `rex server status` fails
+    // (PRD-261112-2108-01 P2.4).
+    if matches!(selection.host, Host::Herdr | Host::Rex) {
         current().server_identity()?;
     }
     Ok(selection)
@@ -267,12 +277,17 @@ pub struct HostCapabilities {
 /// any verb runs.
 pub fn current() -> &'static dyn HostPort {
     static ORCA: std::sync::OnceLock<OrcaHost> = std::sync::OnceLock::new();
+    static REX: std::sync::OnceLock<RexHost> = std::sync::OnceLock::new();
     static HERDR: std::sync::OnceLock<HerdrHost> = std::sync::OnceLock::new();
     match selection_cell() {
         Ok(HostSelection {
             host: Host::Orca,
             source,
         }) => ORCA.get_or_init(|| OrcaHost::new(source.clone())),
+        Ok(HostSelection {
+            host: Host::Rex,
+            source,
+        }) => REX.get_or_init(|| RexHost::new(source.clone())),
         Ok(HostSelection {
             host: Host::Herdr,
             source,
@@ -773,6 +788,21 @@ pub trait HostPort: Sync {
         Ok(submit)
     }
 
+    /// After [`HostPort::submit_prompt`]: the instant the host took immediately before
+    /// it transmitted the prompt to `pane`, in milliseconds since the Unix epoch, when
+    /// it records one (Rex PRD-261112-2108-01 P6.8). Only a Host state newer than it may
+    /// end the settle. The default is `None`: the caller's own pre-send time applies.
+    fn send_boundary_ms(&self, _pane: &str) -> Option<u64> {
+        None
+    }
+
+    /// After [`HostPort::submit_prompt`]: whether the host saw the agent take the turn
+    /// apart from Host state `working` (Rex PRD-261112-2108-01 P6.7). The default is
+    /// `false`.
+    fn turn_observed(&self, _pane: &str) -> bool {
+        false
+    }
+
     /// The Host state of `pane` with the time it began, in milliseconds since the Unix
     /// epoch when the host reports it.
     fn host_state_since(&self, pane: &str) -> Result<Option<(HostState, Option<u64>)>> {
@@ -890,6 +920,24 @@ mod tests {
         assert_eq!(override_herdr.host, Host::Herdr);
         let error = select(&[(TMUX_TOOLS_HOST, "foo")]).unwrap_err().to_string();
         assert!(error.contains("herdr"), "{error}");
+
+        // PRD-261112-2108-01 P2.1–P2.2: `rex` is a valid value, and `REX_BLOCK`
+        // selects it after `ORCA_TERMINAL_HANDLE` and before `HC_TERMINAL_ID`; under
+        // tmux the host stays tmux unless `TMUX_TOOLS_HOST=rex`.
+        let rex = select(&[(REX_BLOCK, "block:x"), (HC_TERMINAL_ID, "t1")]).unwrap();
+        assert_eq!(
+            (rex.host, rex.source),
+            (Host::Rex, SelectionSource::Detected(REX_BLOCK.to_owned()))
+        );
+        let orca_before_rex =
+            select(&[(ORCA_TERMINAL_HANDLE, "term_x"), (REX_BLOCK, "block:x")]).unwrap();
+        assert_eq!(orca_before_rex.host, Host::Orca);
+        let tmux_before_rex = select(&[("TMUX", "/s,1,0"), (REX_BLOCK, "block:x")]).unwrap();
+        assert_eq!(tmux_before_rex.host, Host::Tmux);
+        let override_rex = select(&[(TMUX_TOOLS_HOST, "rex"), ("TMUX", "/s,1,0")]).unwrap();
+        assert_eq!(override_rex.host, Host::Rex);
+        let error = select(&[(TMUX_TOOLS_HOST, "foo")]).unwrap_err().to_string();
+        assert!(error.contains("rex"), "{error}");
 
         let empty = select(&[(TMUX_TOOLS_HOST, ""), ("TMUX", "/s,1,0")])
             .unwrap_err()

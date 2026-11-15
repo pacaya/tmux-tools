@@ -41,7 +41,7 @@ fn build_all() -> BTreeMap<String, AgentSpec> {
                 // glyph `▌`/`›` is on screen idle *and* generating, so it cannot
                 // discriminate. Its reliable idle/busy signal is the status line —
                 // `· Ready · Context …` vs `· Working ·` — which the P8 smoke
-                // (src/bin/tt-vendor-smoke.rs) measured against codex-cli 0.167.0
+                // (src/bin/tt-vendor-smoke.rs) measured against codex-cli 0.168.0
                 // and stamped below. The status line is one of the bottom two non-blank
                 // lines (on 0.167.0 it sits directly below the composer), so
                 // ready_lines = 2. Re-run the smoke and re-stamp the version when codex
@@ -57,7 +57,7 @@ fn build_all() -> BTreeMap<String, AgentSpec> {
                         // fire while generating.
                         bracketed_paste: true,
                         quit_when_idle: true,
-                        validated_version: Some("codex-cli 0.167.0".to_owned()),
+                        validated_version: Some("codex-cli 0.168.0".to_owned()),
                         // Resume is a subcommand: `codex resume <session-id>`, where the
                         // session id is a UUID. With no id codex opens an interactive
                         // session picker, which P6 refuses. Measured live on codex-cli 0.167.0.
@@ -147,11 +147,11 @@ fn build_all() -> BTreeMap<String, AgentSpec> {
                             // pasting. Measured live: C-c does not quit claude while idle.
                             bracketed_paste: true,
                             quit_when_idle: false,
-                            validated_version: Some("claude 2.1.322".to_owned()),
+                            validated_version: Some("claude 2.1.325".to_owned()),
                             // Resume: `claude --resume <session-id>` (also `-r`), where the
                             // session id is a UUID. With no id claude opens an interactive
                             // session picker, which P6 refuses. Measured live by the P8
-                            // smoke against claude 2.1.322.
+                            // smoke against claude 2.1.325.
                             resume: resume("--resume {id}", UUID_SHAPE),
                             // Floor: one step above the 2026-08-01 cliff (at 14 rows a
                             // `ready_lines = 0` scan no longer finds the sentinel), measured
@@ -170,7 +170,7 @@ fn build_all() -> BTreeMap<String, AgentSpec> {
                             // idle/busy chrome. See the comment above.
                             bracketed_paste: true,
                             quit_when_idle: false,
-                            validated_version: Some("claude 2.1.278".to_owned()),
+                            validated_version: Some("claude 2.1.325".to_owned()),
                             // `--ax-screen-reader` selects the rendering; it does not change
                             // resume, so the flat surface declares the same syntax and shape.
                             resume: resume("--resume {id}", UUID_SHAPE),
@@ -531,9 +531,9 @@ mod tests {
         let agents = all();
 
         let expected = [
-            ("claude", "rich", true, false, "claude 2.1.322"),
-            ("claude", "flat", true, false, "claude 2.1.278"),
-            ("codex", "default", true, true, "codex-cli 0.167.0"),
+            ("claude", "rich", true, false, "claude 2.1.325"),
+            ("claude", "flat", true, false, "claude 2.1.325"),
+            ("codex", "default", true, true, "codex-cli 0.168.0"),
         ];
         for (name, surface_name, bracketed_paste, quit_when_idle, version) in expected {
             let surface = &agents[name].surfaces[surface_name];

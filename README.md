@@ -70,7 +70,7 @@ Agent profiles are loaded from built-ins and deep-merged with `$XDG_CONFIG_HOME/
 # Codex's input glyph `›` is on screen idle *and* generating, so readiness keys off
 # the status line: `· Ready · Context` when idle/done vs `· Working ·` while busy.
 # The built-in codex surface already ships these measured patterns (stamped
-# `codex-cli 0.167.0`) and the launch argument `--no-alt-screen`; the override below
+# `codex-cli 0.168.0`) and the launch argument `--no-alt-screen`; the override below
 # is only needed to change the patterns, and is shown for the config shape. It keeps
 # `--no-alt-screen`, because a surface's `args` change only when written. Pairs with the --ready-stable-seconds debounce, which
 # covers the <0.4s residual `· Ready ·` right after a prompt is sent.

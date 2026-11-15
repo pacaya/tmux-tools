@@ -10,7 +10,7 @@ pub(in crate::host) const SHIFT: u8 = 1;
 
 /// The bytes one `send` argument stands for: the key's bytes when tmux parses the
 /// argument as a key, else the argument as literal text.
-pub(super) fn translate(argument: &str) -> Result<String> {
+pub(in crate::host) fn translate(argument: &str) -> Result<String> {
     match parse(argument) {
         Some((modifiers, key)) => key_bytes(modifiers, key),
         None => Ok(argument.to_owned()),

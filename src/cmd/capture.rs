@@ -24,8 +24,9 @@ pub fn run(args: &CaptureArgs) -> Result<()> {
     let pane = target::resolve_from_common(&args.common)?;
 
     // A zero-line tail reads as the visible pane on tmux rather than a zero-length
-    // range, so honour the explicit zero intent here.
-    if args.lines == Some(0) && !args.all {
+    // range, so honour the explicit zero intent here. On Rex `--lines 0` gives the last
+    // `rows` lines (PRD-261112-2108-01 P5.1).
+    if args.lines == Some(0) && !args.all && host::current().host() != host::Host::Rex {
         let rendered = format::render_capture("", args.common.format);
         return render_output(args.common.format, &pane, &rendered, None);
     }

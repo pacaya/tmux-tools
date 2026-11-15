@@ -238,7 +238,8 @@ pub(crate) fn spawn_json<T: Serialize>(output: &T, pane: &str) -> Result<String>
     if !host.creates_registered() {
         return Ok(serde_json::to_string(&hosted(output))?);
     }
-    let window_id = if host.host() == host::Host::Herdr {
+    // On Rex `window_id` is the block's Rex window id (PRD-261112-2108-01 P7.3).
+    let window_id = if matches!(host.host(), host::Host::Herdr | host::Host::Rex) {
         host.describe_pane(Some(pane))?
             .summary
             .ok()
