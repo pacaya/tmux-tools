@@ -2,7 +2,7 @@
 id: ISSUE-261114-0707-01
 kind: issue
 category: enhancement
-status: needs-triage
+status: ready-for-agent
 brief_contract: agent-brief.v3
 context: tmux-tools
 summary: tmux-tools runs every required verb on Rex through a rex Host backend over the rex CLI, tested against a fake rex and a private Rex server
@@ -138,7 +138,7 @@ contract:
 **Current observable:** `TMUX_TOOLS_HOST=rex tmux-tools list` exits 1 and does not name `rex` as a valid value. A plain Rex terminal (no `$TMUX`, `REX_BLOCK` set) does not select `rex`.
 
 **Required change:**
-- First, move the first-changed-line rule out of `core/src/host/herdr.rs` into one shared module under `core/src/host/` that both backends call (P5.2), with the Herdr tests unchanged.
+- First, move the first-changed-line rule out of `core/src/host/herdr.rs` into one shared module under `core/src/host/` that both backends call (P5.2), with the Herdr tests unchanged except for the P8.2 invalid-value exception.
 - Then add the `rex` backend and wire it in: selection P2, placement P3, the Rex Pane record with atomic server-directory publication, the address-check sweep, and spawn recovery P4, capture, keys, and send P5, Host state and `prompt` P6, and the other verbs P7, including the `claude-teams` fail-open of P7.6. The tmux, Orca, and Herdr results do not change (P9.4); the Orca sweep keeps PRD-261107-0825-01 P4.3.
 - Add `tests/contract/fake_rex.py`, `tests/contract/rex.rs`, and the `TT_TEST_REX=1` suite (P8.2, P8.3, P8.5, P8.6).
 - Update `CONTEXT.md` as P1 lists.
@@ -157,7 +157,7 @@ contract:
 - [ ] Given a fake block whose Host state before the send is not `working` and that gets a `program_status` record after the send with state `done` (and, in another case, raw `error`), when `prompt` runs, then `submit` is `confirmed`; given only an older `idle` record, the settle does not end on it and `submit` is `accepted`. Observable at `prompt --format json`.
 - [ ] Given `api_revision` 11, when `prompt` runs, then it exits 1 with `rex api revision 11 is older than 12` and the fake `rex` receives no paste or send; given a multi-line prompt to a block without mode 2004 on, it is refused before any transmission. Observable at stderr, the exit status, and the call log.
 - [ ] Given host `rex` and `REX_BLOCK` set, when `notify` runs, then it exits 0 with `notify: not delivered on rex` on stderr; when `claude-teams` runs with a fake `claude`, then stderr carries `claude-teams: no team: no teammate shim on rex; starting claude without teammate panes`. Observable at stderr and the exit status.
-- [ ] Given the tmux, Orca, and Herdr contract tests, when the default suite runs, then they pass unchanged. Observable at `cargo test --workspace --features test-fixtures`.
+- [ ] Given the tmux, Orca, and Herdr contract tests, when the default suite runs, then they pass unchanged, except that `an_unreachable_herdr_names_the_host_and_the_selection_source` uses a value that is not a host as its invalid `TMUX_TOOLS_HOST` and checks that stderr names `tmux`, `orca`, `rex`, and `herdr` (P8.2). Observable at `cargo test --workspace --features test-fixtures`.
 - [ ] Given `TT_TEST_REX=1` with a real `rex` on `PATH`, when the contract suite runs, then every required verb passes against a private server, a create that times out does not exit 4, and afterwards the private server is stopped, its directory is gone, the default server's `rex ls --json` is unchanged, the operator's `tmux-tools/rex/` registry is unchanged, and no created block remains. Observable at the test run and those checks.
 
 **Verification and release:** `cargo test --workspace --features test-fixtures` passes. `TT_TEST_REX=1 cargo test --workspace --features test-fixtures` passes on the agent Mac. No release from this issue.
