@@ -160,9 +160,14 @@ pub fn sweep_other_servers(host: Host, server_id: &str) -> Result<()> {
 
 /// Reserve `record.name` by creating its record exclusively. A name already reserved
 /// fails.
+///
+/// On Rex the server directory is never made here: the backend publishes it first
+/// (PRD-261112-2108-01 P4.1).
 pub fn reserve(record: &PaneRecord) -> Result<()> {
     let dir = server_dir(record.host, &record.server_id)?;
-    fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
+    if record.host != Host::Rex {
+        fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
+    }
     let path = record_path(&dir, &record.name);
     let mut file = match fs::OpenOptions::new()
         .write(true)
@@ -195,10 +200,13 @@ impl std::fmt::Display for NameTaken {
 
 impl std::error::Error for NameTaken {}
 
-/// Replace the record of `record.name` by write-to-temp and atomic rename.
+/// Replace the record of `record.name` by write-to-temp and atomic rename. On Rex the
+/// server directory is never made here (see [`reserve`]).
 pub fn write(record: &PaneRecord) -> Result<()> {
     let dir = server_dir(record.host, &record.server_id)?;
-    fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
+    if record.host != Host::Rex {
+        fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
+    }
     let path = record_path(&dir, &record.name);
     let temp = dir.join(format!(".{}.{}.tmp", record.name, std::process::id()));
     fs::write(&temp, serde_json::to_vec(record)?)

@@ -230,14 +230,15 @@ fn hc_terminal_id_selects_herdr_and_the_calling_pane_is_that_terminal() {
     assert!(out.stderr.contains("HC_TERMINAL_ID"), "{}", out.stderr);
 }
 
-/// P2.1, P2.3: `TMUX_TOOLS_HOST` names all three hosts; a missing `hc` or a failing
-/// `hc server status` fails with exit 1 naming herdr and the selection source.
+/// P2.1, P2.3: an invalid `TMUX_TOOLS_HOST` names all four hosts
+/// (PRD-261112-2108-01 P8.2); a missing `hc` or a failing `hc server status` fails
+/// with exit 1 naming herdr and the selection source.
 #[test]
 fn an_unreachable_herdr_names_the_host_and_the_selection_source() {
     let fake = FakeHc::with_caller("herdr-down", json!({}));
-    let invalid = fake.cli_with(&["list"], &[("TMUX_TOOLS_HOST", "rex")], &[]);
+    let invalid = fake.cli_with(&["list"], &[("TMUX_TOOLS_HOST", "bogus")], &[]);
     assert_eq!(invalid.status, 1, "{invalid:?}");
-    for host in ["tmux", "orca", "herdr"] {
+    for host in ["tmux", "orca", "rex", "herdr"] {
         assert!(invalid.stderr.contains(host), "{}", invalid.stderr);
     }
 

@@ -14,6 +14,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{anyhow, bail, Result};
 use serde_json::Value;
 
+use crate::host::history_mark;
 use crate::host::{
     CaptureRange, Delivery, HistoryProbe, HistorySince, Host, HostCapabilities, HostPort,
     HostState, ListScope, PaneDescription, PaneListing, PaneSummary, RegistrationKey,
@@ -227,9 +228,7 @@ impl Mark {
     /// where a line that only one read has counts as different; the number of lines
     /// of the mark read when the reads are equal.
     fn first_changed_line(&self, after: &[&str]) -> usize {
-        let differs = (0..self.lines.len().max(after.len()))
-            .find(|&index| self.lines.get(index).map(String::as_str) != after.get(index).copied());
-        differs.unwrap_or(self.lines.len())
+        history_mark::first_changed_line(&self.lines, after)
     }
 }
 
@@ -1136,7 +1135,7 @@ impl HostPort for HerdrHost {
         let both_history = mark.history && read.is_history();
         let complete = both_history && {
             let rows = self.get(pane)?.rows();
-            first_changed >= mark.lines.len().saturating_sub(rows)
+            history_mark::within_last_rows(first_changed, mark.lines.len(), rows)
         };
         let incomplete_reason = if !both_history {
             "herdr reports no history read for the pane".to_owned()

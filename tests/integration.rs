@@ -12669,6 +12669,11 @@ mod orca_contract;
 #[path = "contract/herdr.rs"]
 mod herdr_contract;
 
+// --- The Rex backend (PRD-261112-2108-01 P8): fake `rex`, and the opt-in private server
+
+#[path = "contract/rex.rs"]
+mod rex_contract;
+
 // --- P3 host selection and the P4.1 name check, on tmux (ISSUE-261107-0921-03) -------
 
 /// Acceptance: on tmux, `launch --name <v>` and `spawn-agent <agent> --name <v>` with

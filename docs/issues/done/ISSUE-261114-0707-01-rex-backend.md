@@ -2,7 +2,7 @@
 id: ISSUE-261114-0707-01
 kind: issue
 category: enhancement
-status: in-review
+status: done
 claimed_by: implement-issue@agentmac
 claimed_at: 2026-11-15T07:01:36Z
 brief_contract: agent-brief.v3
@@ -206,4 +206,17 @@ contract:
 
 **Test seam:** the `tmux-tools` CLI (stdout, stderr, exit status, `prompt --format json`) with the fake `rex` call log and the registry directory, via `cargo test --workspace --features test-fixtures` (`tests/contract/rex.rs`, `tests/contract/fake_rex.py`) and the `TT_TEST_REX=1` private-server suite
 
+## Code Review
+
+Review: `issue-261114-0707-01-code-review-20261115-081000.md` — Outcome: ACCEPTED
+
 ## Triage Notes
+
+## Resolution
+
+- **Commit:** `feat: tmux-tools runs every required verb on Rex through a rex Host backend over the rex CLI, tested against a fake rex and a private Rex server (ISSUE-261114-0707-01)`
+- **Route:** `claude — deepseek-suspended` (code-primary feature plus tests; Opus, effort medium) for the implementation and the one correction batch.
+- **TDD:** red-green at the tmux-tools CLI seam (stdout, stderr, exit status, `prompt --format json`) with the fake `rex` call log and the registry directory.
+- **Review:** dual review (Claude + Codex), 6 cross-verified findings (M1–M3, L1–L3), all `VERIFIED_FIXED` after 1 correction batch — Outcome: ACCEPTED. No scope proposals.
+- **Suite:** PASS — `cargo test --workspace --features test-fixtures` (569 passed) and `TT_TEST_REX=1 cargo test --workspace --features test-fixtures` (569 passed; private-server suite ran live, default server and operator registry unchanged, no private directory left), clippy `-D warnings` and `cargo fmt --check` clean. Run with `TT_TEAM`/`TT_HOST` unset (inside a claude-teams session the Orca live-run tests fail with `team not found` on the baseline as well).
+- **Date:** 2026-11-15 (UTC)

@@ -6,7 +6,7 @@ use std::thread;
 use std::time::Duration;
 use tmux_tools_core::{
     format::{render_capture, strip_ansi, Format},
-    host::{self, CaptureRange, HistoryProbe as PaneProbe, HostState, Submission},
+    host::{self, CaptureRange, HistoryProbe as PaneProbe, Host, HostState, Submission},
     idle::{
         resolve_timeout, validate_seconds, wait_for_idle, IdleConfig, DEFAULT_READY_STABLE_SECONDS,
     },
@@ -256,6 +256,14 @@ fn run_with_submission(
     };
     let delivery = if guaranteed {
         DeliveryOutcome::Guaranteed
+    } else if host.host() == Host::Rex && args.text.contains('\n') {
+        // PRD-261112-2108-01 P6.4: a multi-line prompt to a block without mode 2004 on
+        // is refused before any transmission.
+        DeliveryOutcome::Refused(format!(
+            "refusing to send a multi-line prompt to pane {pane}: the block does not have \
+             bracketed paste (mode 2004) on, so delivering could submit fragments; wait for \
+             the agent to come up and retry"
+        ))
     } else if host.refuses_unguaranteed_multiline() && args.text.contains('\n') {
         // PRD-261109-2223-01 P6.6: hc does not report whether the program brackets a
         // paste, so a multi-line prompt to a pane with no Host state is refused.
@@ -300,13 +308,16 @@ fn run_with_submission(
         }
     }
 
+    // PRD-261112-2108-01 P6.8: a Host state ends the settle only when it is newer than
+    // the send; a host that records its own send boundary gives that instant.
+    let began_after_ms = host.send_boundary_ms(pane).unwrap_or(submitted_ms);
     cfg.host_state =
-        crate::cmd::wait_idle::host_state_gate(args.until.is_some(), Some(submitted_ms));
+        crate::cmd::wait_idle::host_state_gate(args.until.is_some(), Some(began_after_ms));
     let outcome = wait_for_idle(pane, &cfg)?;
     let submit = host.settle_submission(pane, submit)?;
     let history = host.read_history_since_complete(pane, &mark)?;
     let output_since_prompt = strip_ansi(&history.text);
-    let turn_observed = outcome.busy_seen;
+    let turn_observed = outcome.busy_seen || host.turn_observed(pane);
     let complete = history.complete;
 
     if matches!(args.common.format, Format::Raw | Format::Concise) {
