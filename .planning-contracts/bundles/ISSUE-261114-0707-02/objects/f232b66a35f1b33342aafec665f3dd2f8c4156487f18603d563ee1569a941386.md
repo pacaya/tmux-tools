@@ -2,7 +2,7 @@
 id: ISSUE-261114-0707-02
 kind: issue
 category: enhancement
-status: in-progress
+status: in-review
 claimed_by: implement-issue@agentmac
 claimed_at: 2026-11-15T09:36:28Z
 brief_contract: agent-brief.v3
