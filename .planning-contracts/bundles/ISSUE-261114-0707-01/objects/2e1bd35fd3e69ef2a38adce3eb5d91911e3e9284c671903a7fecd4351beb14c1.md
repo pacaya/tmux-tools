@@ -2,7 +2,9 @@
 id: ISSUE-261114-0707-01
 kind: issue
 category: enhancement
-status: ready-for-agent
+status: in-progress
+claimed_by: implement-issue@agentmac
+claimed_at: 2026-11-15T07:01:36Z
 brief_contract: agent-brief.v3
 context: tmux-tools
 summary: tmux-tools runs every required verb on Rex through a rex Host backend over the rex CLI, tested against a fake rex and a private Rex server
@@ -163,5 +165,45 @@ contract:
 **Verification and release:** `cargo test --workspace --features test-fixtures` passes. `TT_TEST_REX=1 cargo test --workspace --features test-fixtures` passes on the agent Mac. No release from this issue.
 
 **Out of scope:** the `TMUX_TOOLS_LIVE_REX=1` live run, README, version bump, and install (ISSUE-261114-0707-02); the Rex teammate shim; harness `rex` guard and poll rows; Rex event streams, `rex block stream`, `rex resize`, and block identity across a Rex server restart.
+
+## Context Pack — canonical at claim (2026-11-15T07:01:36Z)
+
+**Contract approval:** `review-20261115T051749Z` · canonical · revision check complete
+
+**Issue binding:** `tmux-tools:ISSUE-261114-0707-01` · revision `18caa59d00e71b43515de9e9d1be1eeb46b2fad2` · sha256 `28716f954677320c2447ce5a0fa397316f92f7a7590b31b672a95a8f81dff70f`
+
+**Required source objects:**
+- `tmux-tools:PRD-260918-0323-01#p1-transport` · revision `e218fd4a9c1150c4488fd30731e617f14e57ea86` · sha256 `8842bfd61bf171639a253a44e316076a470c48844b93a7069d7cdc6e9c9c1d18` · `objects/8842bfd61bf171639a253a44e316076a470c48844b93a7069d7cdc6e9c9c1d18.md`
+- `tmux-tools:PRD-260918-0323-01#p3-state` · revision `e218fd4a9c1150c4488fd30731e617f14e57ea86` · sha256 `5a416456cdbf417d93cf1cf17af464fbffe97c0511e3dcac6f472eb9ac9d0435` · `objects/5a416456cdbf417d93cf1cf17af464fbffe97c0511e3dcac6f472eb9ac9d0435.md`
+- `tmux-tools:PRD-260918-0323-01#p4-capture` · revision `e218fd4a9c1150c4488fd30731e617f14e57ea86` · sha256 `40c395669c2ab6b627bacde2e0124382d55ab505d66bfe28a458a326f74c1648` · `objects/40c395669c2ab6b627bacde2e0124382d55ab505d66bfe28a458a326f74c1648.md`
+- `tmux-tools:PRD-260918-0323-01#p7-prompt` · revision `e218fd4a9c1150c4488fd30731e617f14e57ea86` · sha256 `05941c8a9b107818f53b60318fcb6990b213c10e6b0f3470e28eaf1feefa458c` · `objects/05941c8a9b107818f53b60318fcb6990b213c10e6b0f3470e28eaf1feefa458c.md`
+- `tmux-tools:PRD-261107-0825-01#p10-tests` · revision `e218fd4a9c1150c4488fd30731e617f14e57ea86` · sha256 `a28eb660fd94942cad51db5869d5ba74757bff5b2ac3317f6e44699676aa3fcb` · `objects/a28eb660fd94942cad51db5869d5ba74757bff5b2ac3317f6e44699676aa3fcb.md`
+- `tmux-tools:PRD-261107-0825-01#p2-host-port` · revision `e218fd4a9c1150c4488fd30731e617f14e57ea86` · sha256 `57dfaef1b2a9e0c453e377e6b8b7f07730d8e891de67ab911255357cea195271` · `objects/57dfaef1b2a9e0c453e377e6b8b7f07730d8e891de67ab911255357cea195271.md`
+- `tmux-tools:PRD-261107-0825-01#p3-selection` · revision `e218fd4a9c1150c4488fd30731e617f14e57ea86` · sha256 `f9e205e8b5a0046153da498982bd63d179b48d390062414e75e01487a48b0bef` · `objects/f9e205e8b5a0046153da498982bd63d179b48d390062414e75e01487a48b0bef.md`
+- `tmux-tools:PRD-261107-0825-01#p4-registration` · revision `e218fd4a9c1150c4488fd30731e617f14e57ea86` · sha256 `4f3186b44eac6fb0216ee87b1f469f422617cadb577ee7033ab286156b50986c` · `objects/4f3186b44eac6fb0216ee87b1f469f422617cadb577ee7033ab286156b50986c.md`
+- `tmux-tools:PRD-261107-0825-01#p5-verb-classes` · revision `e218fd4a9c1150c4488fd30731e617f14e57ea86` · sha256 `126f8593490e6c1e977cd250f022086d9b8e12236740621981f2238d89d8acbe` · `objects/126f8593490e6c1e977cd250f022086d9b8e12236740621981f2238d89d8acbe.md`
+- `tmux-tools:PRD-261107-0825-01#p6-host-state` · revision `e218fd4a9c1150c4488fd30731e617f14e57ea86` · sha256 `8116a17457d9e0d4d77810f04fb8d25e9ceb7d9648425937e1a10758ecba2389` · `objects/8116a17457d9e0d4d77810f04fb8d25e9ceb7d9648425937e1a10758ecba2389.md`
+- `tmux-tools:PRD-261107-0825-01#p7-notify` · revision `e218fd4a9c1150c4488fd30731e617f14e57ea86` · sha256 `314e45ba7b329a7205cffe4ca13f1ef0295742983604de237a67bb2c2cddf9f4` · `objects/314e45ba7b329a7205cffe4ca13f1ef0295742983604de237a67bb2c2cddf9f4.md`
+- `tmux-tools:PRD-261107-0825-01#p8-self` · revision `e218fd4a9c1150c4488fd30731e617f14e57ea86` · sha256 `c9b5c2c4a75da7c6af673a9c3e73e9295a84bae0f5e841abd0790f711207e329` · `objects/c9b5c2c4a75da7c6af673a9c3e73e9295a84bae0f5e841abd0790f711207e329.md`
+- `tmux-tools:PRD-261107-0825-01#p9-orca` · revision `e218fd4a9c1150c4488fd30731e617f14e57ea86` · sha256 `689b0faaccf9198710903fe9aac136378099c40b1f0ce0727a655ee9b31c773c` · `objects/689b0faaccf9198710903fe9aac136378099c40b1f0ce0727a655ee9b31c773c.md`
+- `tmux-tools:PRD-261108-0447-01#p2-launcher` · revision `e218fd4a9c1150c4488fd30731e617f14e57ea86` · sha256 `6b2eb1fbd83eaa40af4b96d98442b69f4cdcc43c00acbde2a864611d425c035c` · `objects/6b2eb1fbd83eaa40af4b96d98442b69f4cdcc43c00acbde2a864611d425c035c.md`
+- `tmux-tools:PRD-261108-0447-01#p7-parent` · revision `e218fd4a9c1150c4488fd30731e617f14e57ea86` · sha256 `95737dfe26516ef9c5236d638b465fbdd35e179211b3a0e850323e24b663aac2` · `objects/95737dfe26516ef9c5236d638b465fbdd35e179211b3a0e850323e24b663aac2.md`
+- `tmux-tools:PRD-261109-2223-01#p5-io` · revision `e218fd4a9c1150c4488fd30731e617f14e57ea86` · sha256 `16c605a4a5c69459aa491661c76fc4bea358946393d5482093ab186588d012d3` · `objects/16c605a4a5c69459aa491661c76fc4bea358946393d5482093ab186588d012d3.md`
+- `tmux-tools:PRD-261109-2223-01#p6-state` · revision `e218fd4a9c1150c4488fd30731e617f14e57ea86` · sha256 `0cdfb0022698c1c2b41e63870910987d21cea4f2a1f935f1c9a617ab97cf430d` · `objects/0cdfb0022698c1c2b41e63870910987d21cea4f2a1f935f1c9a617ab97cf430d.md`
+- `tmux-tools:PRD-261112-2108-01#contracts` · revision `e218fd4a9c1150c4488fd30731e617f14e57ea86` · sha256 `11c1bde745db73543c46e8c39386237b4d3a237006ae47b1908f506ccfeea039` · `objects/11c1bde745db73543c46e8c39386237b4d3a237006ae47b1908f506ccfeea039.md`
+- `tmux-tools:PRD-261112-2108-01#p1-definitions` · revision `e218fd4a9c1150c4488fd30731e617f14e57ea86` · sha256 `af58d8456463e362e2306e67ed47ea46fc06ca21e0c9229b66747358bca77c25` · `objects/af58d8456463e362e2306e67ed47ea46fc06ca21e0c9229b66747358bca77c25.md`
+- `tmux-tools:PRD-261112-2108-01#p2-selection` · revision `e218fd4a9c1150c4488fd30731e617f14e57ea86` · sha256 `2a349aa253b443e118dbe430906dcf4689a80b2da6781053765291de7c965bad` · `objects/2a349aa253b443e118dbe430906dcf4689a80b2da6781053765291de7c965bad.md`
+- `tmux-tools:PRD-261112-2108-01#p3-placement` · revision `e218fd4a9c1150c4488fd30731e617f14e57ea86` · sha256 `2762ef21e9d3d5948ecf560a5c8a2ddf5c111ff562da601f2d2985703bcbbc7c` · `objects/2762ef21e9d3d5948ecf560a5c8a2ddf5c111ff562da601f2d2985703bcbbc7c.md`
+- `tmux-tools:PRD-261112-2108-01#p4-registration` · revision `e218fd4a9c1150c4488fd30731e617f14e57ea86` · sha256 `21b2c9c7820f2ddbdde9b6c386bff5e4b594d4f7e94d5794a33efc95594733d2` · `objects/21b2c9c7820f2ddbdde9b6c386bff5e4b594d4f7e94d5794a33efc95594733d2.md`
+- `tmux-tools:PRD-261112-2108-01#p5-io` · revision `e218fd4a9c1150c4488fd30731e617f14e57ea86` · sha256 `2b189784c6126af38379e9469ac9f448d2bbceb04d32645f0ca4c5c0243b3b1a` · `objects/2b189784c6126af38379e9469ac9f448d2bbceb04d32645f0ca4c5c0243b3b1a.md`
+- `tmux-tools:PRD-261112-2108-01#p6-state` · revision `e218fd4a9c1150c4488fd30731e617f14e57ea86` · sha256 `7960ff054e8830a43ee5e12594d7ca8a8bc4f079cc003f6287d7d15a1da696bc` · `objects/7960ff054e8830a43ee5e12594d7ca8a8bc4f079cc003f6287d7d15a1da696bc.md`
+- `tmux-tools:PRD-261112-2108-01#p7-other-verbs` · revision `e218fd4a9c1150c4488fd30731e617f14e57ea86` · sha256 `5652f6b9f74d50f277f5f91367903f1ac1cbe24df00cdbf6701de9a522f5897f` · `objects/5652f6b9f74d50f277f5f91367903f1ac1cbe24df00cdbf6701de9a522f5897f.md`
+- `tmux-tools:PRD-261112-2108-01#p8-tests` · revision `e218fd4a9c1150c4488fd30731e617f14e57ea86` · sha256 `f7102c0030dc591e4e076dd53421ebefc580298b4f3d957455311ea547996684` · `objects/f7102c0030dc591e4e076dd53421ebefc580298b4f3d957455311ea547996684.md`
+- `tmux-tools:PRD-261112-2108-01#p9-rollout` · revision `e218fd4a9c1150c4488fd30731e617f14e57ea86` · sha256 `4d0234f606cd1cfe25dce65d9dc2a00eec246b0831608dc0192d8fac8d24e147` · `objects/4d0234f606cd1cfe25dce65d9dc2a00eec246b0831608dc0192d8fac8d24e147.md`
+- `tmux-tools:PRD-261112-2108-01#verification` · revision `e218fd4a9c1150c4488fd30731e617f14e57ea86` · sha256 `0c28ec664ce373454aaea445c69984a4f1ede7b79a3f46312bba799ea27a7ccb` · `objects/0c28ec664ce373454aaea445c69984a4f1ede7b79a3f46312bba799ea27a7ccb.md`
+
+**Bundle manifest:** `.planning-contracts/bundles/ISSUE-261114-0707-01/manifest.json`
+
+**Test seam:** the `tmux-tools` CLI (stdout, stderr, exit status, `prompt --format json`) with the fake `rex` call log and the registry directory, via `cargo test --workspace --features test-fixtures` (`tests/contract/rex.rs`, `tests/contract/fake_rex.py`) and the `TT_TEST_REX=1` private-server suite
 
 ## Triage Notes
