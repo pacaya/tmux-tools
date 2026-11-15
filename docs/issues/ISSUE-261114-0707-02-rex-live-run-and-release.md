@@ -2,7 +2,9 @@
 id: ISSUE-261114-0707-02
 kind: issue
 category: enhancement
-status: ready-for-agent
+status: in-progress
+claimed_by: implement-issue@agentmac
+claimed_at: 2026-11-15T09:36:28Z
 brief_contract: agent-brief.v3
 context: tmux-tools
 summary: the Rex backend passes a live run in a plain Rex terminal, the maintainer confirms it in the Rex app, and it ships as 0.9.0 with a README Rex section
@@ -86,5 +88,28 @@ contract:
 **Verification and release:** 0.9.0 is installed only after `TT_TEST_REX=1` and `TMUX_TOOLS_LIVE_REX=1` both pass on the release revision and the maintainer confirms the P9.2 items in the visual check. This issue's work lands from `agent/rex-live-release`. Rollback is reverting the release; records left under `tmux-tools/rex/` are inert.
 
 **Out of scope:** backend behaviour (ISSUE-261114-0707-01); the Rex teammate shim; harness `rex` guard and poll rows.
+
+## Context Pack — canonical at claim (2026-11-15T09:36:28Z)
+
+**Contract approval:** `review-20261115T093443Z` · canonical · revision check complete
+
+**Issue binding:** `tmux-tools:ISSUE-261114-0707-02` · revision `eb2ebc61205769b3349eabb7244302005e20ae6c` · sha256 `7e4cf6ae57ae98c2a2d9b10356add676e87c27b4bcaa1e7eeaf2bff259205338`
+
+**Required source objects:**
+- `tmux-tools:PRD-261107-0825-01#p10-tests` · revision `eb2ebc61205769b3349eabb7244302005e20ae6c` · sha256 `a28eb660fd94942cad51db5869d5ba74757bff5b2ac3317f6e44699676aa3fcb` · `objects/a28eb660fd94942cad51db5869d5ba74757bff5b2ac3317f6e44699676aa3fcb.md`
+- `tmux-tools:PRD-261112-2108-01#contracts` · revision `eb2ebc61205769b3349eabb7244302005e20ae6c` · sha256 `11c1bde745db73543c46e8c39386237b4d3a237006ae47b1908f506ccfeea039` · `objects/11c1bde745db73543c46e8c39386237b4d3a237006ae47b1908f506ccfeea039.md`
+- `tmux-tools:PRD-261112-2108-01#p2-selection` · revision `eb2ebc61205769b3349eabb7244302005e20ae6c` · sha256 `2a349aa253b443e118dbe430906dcf4689a80b2da6781053765291de7c965bad` · `objects/2a349aa253b443e118dbe430906dcf4689a80b2da6781053765291de7c965bad.md`
+- `tmux-tools:PRD-261112-2108-01#p3-placement` · revision `eb2ebc61205769b3349eabb7244302005e20ae6c` · sha256 `2762ef21e9d3d5948ecf560a5c8a2ddf5c111ff562da601f2d2985703bcbbc7c` · `objects/2762ef21e9d3d5948ecf560a5c8a2ddf5c111ff562da601f2d2985703bcbbc7c.md`
+- `tmux-tools:PRD-261112-2108-01#p4-registration` · revision `eb2ebc61205769b3349eabb7244302005e20ae6c` · sha256 `21b2c9c7820f2ddbdde9b6c386bff5e4b594d4f7e94d5794a33efc95594733d2` · `objects/21b2c9c7820f2ddbdde9b6c386bff5e4b594d4f7e94d5794a33efc95594733d2.md`
+- `tmux-tools:PRD-261112-2108-01#p5-io` · revision `eb2ebc61205769b3349eabb7244302005e20ae6c` · sha256 `2b189784c6126af38379e9469ac9f448d2bbceb04d32645f0ca4c5c0243b3b1a` · `objects/2b189784c6126af38379e9469ac9f448d2bbceb04d32645f0ca4c5c0243b3b1a.md`
+- `tmux-tools:PRD-261112-2108-01#p6-state` · revision `eb2ebc61205769b3349eabb7244302005e20ae6c` · sha256 `7960ff054e8830a43ee5e12594d7ca8a8bc4f079cc003f6287d7d15a1da696bc` · `objects/7960ff054e8830a43ee5e12594d7ca8a8bc4f079cc003f6287d7d15a1da696bc.md`
+- `tmux-tools:PRD-261112-2108-01#p7-other-verbs` · revision `eb2ebc61205769b3349eabb7244302005e20ae6c` · sha256 `5652f6b9f74d50f277f5f91367903f1ac1cbe24df00cdbf6701de9a522f5897f` · `objects/5652f6b9f74d50f277f5f91367903f1ac1cbe24df00cdbf6701de9a522f5897f.md`
+- `tmux-tools:PRD-261112-2108-01#p8-tests` · revision `eb2ebc61205769b3349eabb7244302005e20ae6c` · sha256 `f7102c0030dc591e4e076dd53421ebefc580298b4f3d957455311ea547996684` · `objects/f7102c0030dc591e4e076dd53421ebefc580298b4f3d957455311ea547996684.md`
+- `tmux-tools:PRD-261112-2108-01#p9-rollout` · revision `eb2ebc61205769b3349eabb7244302005e20ae6c` · sha256 `4d0234f606cd1cfe25dce65d9dc2a00eec246b0831608dc0192d8fac8d24e147` · `objects/4d0234f606cd1cfe25dce65d9dc2a00eec246b0831608dc0192d8fac8d24e147.md`
+- `tmux-tools:PRD-261112-2108-01#verification` · revision `eb2ebc61205769b3349eabb7244302005e20ae6c` · sha256 `0c28ec664ce373454aaea445c69984a4f1ede7b79a3f46312bba799ea27a7ccb` · `objects/0c28ec664ce373454aaea445c69984a4f1ede7b79a3f46312bba799ea27a7ccb.md`
+
+**Bundle manifest:** `.planning-contracts/bundles/ISSUE-261114-0707-02/manifest.json`
+
+**Test seam:** the CLI binary driven by `tests/integration.rs` (PRD-261112-2108-01 P8.1) with `TMUX_TOOLS_LIVE_REX=1`; `tmux-tools --version`; `README.md`
 
 ## Triage Notes
