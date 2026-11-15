@@ -2,7 +2,7 @@
 id: ISSUE-261114-0707-02
 kind: issue
 category: enhancement
-status: needs-triage
+status: ready-for-agent
 brief_contract: agent-brief.v3
 context: tmux-tools
 summary: the Rex backend passes a live run in a plain Rex terminal, the maintainer confirms it in the Rex app, and it ships as 0.9.0 with a README Rex section
@@ -63,7 +63,7 @@ contract:
 ---
 ## Agent Brief
 
-**Outcome and scope:** The `TMUX_TOOLS_LIVE_REX=1` run (PRD-261112-2108-01 P8.4) exists and passes in a plain Rex terminal on the default server, the maintainer confirms the P9.2 items in the Rex app, and the Rex backend ships as the 0.9.0 release of P9.1. This issue owns P8.4, P9.1, P9.2, the P9.3 landing order, and Verification items 3–4.
+**Outcome and scope:** The `TMUX_TOOLS_LIVE_REX=1` run (PRD-261112-2108-01 P8.4) exists and passes in a plain Rex terminal on the default server, the maintainer confirms the P9.2 items in the Rex app, and the Rex backend ships as the 0.9.0 release of P9.1. This issue owns P8.4, P9.1, P9.2, and Verification items 3–4.
 
 **Required sources:** `tmux-tools:PRD-261112-2108-01` clauses `p8-tests` (items 4 and 6), `p9-rollout` (items 1–3), `contracts` (the `TMUX_TOOLS_LIVE_REX` switch), and `verification`; `p2-selection`, `p3-placement`, `p4-registration`, `p5-io`, `p6-state`, `p7-other-verbs` for the README content; `tmux-tools:PRD-261107-0825-01#p10-tests` for the contract suite.
 
@@ -83,7 +83,7 @@ contract:
 - [ ] Given the release, when `tmux-tools --version` runs, then it shows 0.9.0. Observable at the CLI.
 - [ ] Given the released README, when it is read, then its Rex section covers selection, `REX_SERVER` and the `server-address` sweep check, P3 placement and session source, the Pane record, the P5.2 scrollback limit, the P6.4 delivery rule, the P6.5 revision floor, and `notify`, and `rex` is listed under `TMUX_TOOLS_HOST`. Observable in `README.md`.
 
-**Verification and release:** 0.9.0 is installed only after `TT_TEST_REX=1` and `TMUX_TOOLS_LIVE_REX=1` both pass on the release revision and the maintainer confirms the P9.2 items in the visual check. `agent/rex-backend` is offered for landing only after the Herdr backend has landed (P9.3). Rollback is reverting the release; records left under `tmux-tools/rex/` are inert.
+**Verification and release:** 0.9.0 is installed only after `TT_TEST_REX=1` and `TMUX_TOOLS_LIVE_REX=1` both pass on the release revision and the maintainer confirms the P9.2 items in the visual check. This issue's work lands from `agent/rex-live-release`. Rollback is reverting the release; records left under `tmux-tools/rex/` are inert.
 
 **Out of scope:** backend behaviour (ISSUE-261114-0707-01); the Rex teammate shim; harness `rex` guard and poll rows.
 
