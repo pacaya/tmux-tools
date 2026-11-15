@@ -2,7 +2,7 @@
 id: ISSUE-261115-1003-01
 kind: issue
 category: enhancement
-status: needs-triage
+status: ready-for-agent
 brief_contract: agent-brief.v3
 context: tmux-tools
 summary: claude-teams on Herdr sets up a Team whose teammates are Herdr Teammate panes in the Leader's tab; live-checked in the maintainer's Herdr window and released as the next minor version
