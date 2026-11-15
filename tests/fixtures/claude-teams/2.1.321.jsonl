@@ -1,0 +1,17 @@
+{"argv":["show","-Av","mouse"],"exit":1,"stdout":""}
+{"argv":["show","-gv","focus-events"],"exit":1,"stdout":""}
+{"argv":["display-message","-p","-t","%1","#{session_name}:#{window_id}.#{pane_id}"],"exit":0,"stdout":"tt-team-{{team_id}}:@0.%1\n"}
+{"argv":["display-message","-p","-t","%1","#{client_termtype}\t#{allow-passthrough}\t#{focus-events}\t#{pane_top}\t#{pane_left}\t#{status}\t#{status-position}\t#{window_bigger}"],"exit":0,"stdout":"\toff\toff\t0\t0\toff\tbottom\t0\n"}
+{"argv":["-S","/tmp/tt-ct-live-state-86684-1/tmux-tools/teams/{{team_id}}/tmux-fake","display-message","-t","%1","-p","#{window_id}"],"exit":0,"stdout":"@0\n"}
+{"argv":["-S","/tmp/tt-ct-live-state-86684-1/tmux-tools/teams/{{team_id}}/tmux-fake","list-panes","-t","@0","-F","#{pane_id}"],"exit":0,"stdout":"%1\n"}
+{"argv":["-S","/tmp/tt-ct-live-state-86684-1/tmux-tools/teams/{{team_id}}/tmux-fake","split-window","-d","-t","%1","-h","-l","70%","-P","-F","#{pane_id}","--","cat"],"exit":0,"stdout":"%2\n"}
+{"argv":["-S","/tmp/tt-ct-live-state-86684-1/tmux-tools/teams/{{team_id}}/tmux-fake","set-option","-p","-t","%2","window-style","bg=default,fg=blue"],"exit":0,"stdout":""}
+{"argv":["-S","/tmp/tt-ct-live-state-86684-1/tmux-tools/teams/{{team_id}}/tmux-fake","set-option","-p","-t","%2","pane-border-style","fg=blue"],"exit":0,"stdout":""}
+{"argv":["-S","/tmp/tt-ct-live-state-86684-1/tmux-tools/teams/{{team_id}}/tmux-fake","set-option","-p","-t","%2","pane-active-border-style","fg=blue"],"exit":0,"stdout":""}
+{"argv":["-S","/tmp/tt-ct-live-state-86684-1/tmux-tools/teams/{{team_id}}/tmux-fake","select-pane","-t","%2","-T","r1"],"exit":0,"stdout":""}
+{"argv":["-S","/tmp/tt-ct-live-state-86684-1/tmux-tools/teams/{{team_id}}/tmux-fake","set-option","-p","-t","%2","pane-border-format","#[fg=blue,bold] #{pane_title} #[default]"],"exit":0,"stdout":""}
+{"argv":["-S","/tmp/tt-ct-live-state-86684-1/tmux-tools/teams/{{team_id}}/tmux-fake","list-panes","-t","@0","-F","#{pane_id}"],"exit":0,"stdout":"%1\n%2\n"}
+{"argv":["-S","/tmp/tt-ct-live-state-86684-1/tmux-tools/teams/{{team_id}}/tmux-fake","set-option","-w","-t","@0","pane-border-status","top"],"exit":0,"stdout":""}
+{"argv":["-S","/tmp/tt-ct-live-state-86684-1/tmux-tools/teams/{{team_id}}/tmux-fake","set-option","-p","-t","%2","remain-on-exit","failed"],"exit":0,"stdout":""}
+{"argv":["-S","/tmp/tt-ct-live-state-86684-1/tmux-tools/teams/{{team_id}}/tmux-fake","respawn-pane","-k","-t","%2","--","cd {{cwd}} && env CLAUDECODE=1 CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 CLAUDE_CODE_ATTRIBUTION_PROJECT='' CLAUDE_CODE_USER_DELEGATED_SESSION_DIRECT_API='' CLAUDE_CODE_USER_DELEGATED_SESSION_ALLOWED_CHECK_MODELS='' CLAUDE_CODE_EVEN_MORE_DANGEROUSLY_SKIP_PERMISSIONS= {{claude}} --agent-id r1@session-429df3dc --agent-name r1 --team-name session-429df3dc --agent-color blue --parent-session-id 429df3dc-2782-4f4d-9dd6-f41822e2f9b2 --agent-type worker-low --dangerously-skip-permissions --disallowed-tools Bash --settings '{\"disableAllHooks\":true}' --model 'opus[1m]'"],"exit":0,"stdout":""}
+{"argv":["-S","/tmp/tt-ct-live-state-86684-1/tmux-tools/teams/{{team_id}}/tmux-fake","kill-pane","-t","%2"],"exit":0,"stdout":""}

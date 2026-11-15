@@ -1,9 +1,12 @@
 use anyhow::Result;
 use clap::Args;
 use serde::Serialize;
-use tmux_tools_core::{format::Format, target, tmux};
+use tmux_tools_core::{format::Format, host, target};
 
-use crate::{cmd::safety, CommonArgs};
+use crate::{
+    cmd::{hosted, safety},
+    CommonArgs,
+};
 
 const VERB: &str = "escape";
 
@@ -30,7 +33,7 @@ pub fn run(args: &EscapeArgs) -> Result<()> {
     let pane = target::resolve_from_common(&args.common)?;
     safety::enforce_for_pane(VERB, &pane, args.force, args.any)?;
 
-    tmux::run_checked(&["send-keys", "-t", &pane, "Escape"])?;
+    host::current().send_keys(&pane, &["Escape"])?;
 
     match args.common.format {
         Format::Concise => println!("sent Escape to {pane}"),
@@ -39,7 +42,7 @@ pub fn run(args: &EscapeArgs) -> Result<()> {
                 target: &pane,
                 key: "Escape",
             };
-            println!("{}", serde_json::to_string(&output)?);
+            println!("{}", serde_json::to_string(&hosted(&output))?);
         }
         Format::Raw => println!(),
     }

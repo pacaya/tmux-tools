@@ -6,8 +6,9 @@
 //!
 //! - compares the live `--version` with the surface's `validated_version` stamp by
 //!   exact version-token equality;
-//! - launches the agent on that surface and checks a flat surface is still
-//!   non-alternate-screen;
+//! - launches the agent on that surface and checks that a flat surface (including
+//!   `codex` `default`, launched with `--no-alt-screen`), and the classic-scroll
+//!   `claude` `rich` surface, is not on the alternate screen;
 //! - checks the declared `bracketed_paste` against the pane's live
 //!   `bracket_paste_flag`;
 //! - establishes idleness independently of the declared `ready_regex` (the pane
@@ -22,7 +23,10 @@
 //!   present and no turn may start across a sampled stability window, with
 //!   transcript growth and busy frames as independent turn evidence;
 //! - confirms a positive stable idle, then sends the declared `interrupt_key` and
-//!   checks whether the agent quits, comparing the result with `quit_when_idle`.
+//!   checks whether the agent quits, comparing the result with `quit_when_idle`;
+//! - for the `claude` `rich` surface, measures the declared resume syntax: a session
+//!   started with a known identifier and one finished turn is relaunched through the
+//!   declared syntax and must show that turn's reply again.
 //!
 //! It exits non-zero on any mismatch. The declarations are read from the shipped
 //! built-in registry (claude, codex) and from the `agents.toml` block the README
@@ -69,8 +73,11 @@ enum PasteEvidence {
 }
 
 /// Every `claude`, `codex` and README-documented `dsh` surface this smoke validates.
-/// `flat` marks the non-alternate-screen rendering, whose check is the only one that
-/// applies to flat surfaces alone. `boot_evidence` is the surface's native startup
+/// `never_alternate` marks a rendering that must not be on the alternate screen: every
+/// flat surface (including `codex` `default`, which launches with `--no-alt-screen`),
+/// and `claude` `rich`, which runs in classic scroll mode
+/// (ADR-260919-0146-01#claude-rich-launch). `measure_resume` marks a surface whose
+/// declared resume syntax is measured live. `boot_evidence` is the surface's native startup
 /// chrome: the smoke waits for it and then for a content-stable window, so idleness is
 /// never inferred from the declared `ready_regex`. `paste_evidence` is how that surface
 /// renders a collapsed or inline large paste. `note` is printed when the surface
@@ -78,7 +85,8 @@ enum PasteEvidence {
 struct InScope {
     agent: &'static str,
     surface: &'static str,
-    flat: bool,
+    never_alternate: bool,
+    measure_resume: bool,
     boot_evidence: &'static str,
     paste_evidence: PasteEvidence,
     note: Option<&'static str>,
@@ -88,17 +96,19 @@ const IN_SCOPE: &[InScope] = &[
     InScope {
         agent: "claude",
         surface: "rich",
-        flat: false,
+        never_alternate: true,
+        measure_resume: true,
         boot_evidence: r"Claude Code v",
         paste_evidence: PasteEvidence::Lines,
         note: Some(
-            "claude's rich TUI declares no readiness patterns; readiness falls back to idle detection",
+            "claude's rich surface declares no readiness patterns; readiness falls back to idle detection",
         ),
     },
     InScope {
         agent: "claude",
         surface: "flat",
-        flat: true,
+        never_alternate: true,
+        measure_resume: false,
         boot_evidence: r"Claude Code v",
         paste_evidence: PasteEvidence::Lines,
         note: Some(
@@ -108,7 +118,8 @@ const IN_SCOPE: &[InScope] = &[
     InScope {
         agent: "codex",
         surface: "default",
-        flat: true,
+        never_alternate: true,
+        measure_resume: false,
         boot_evidence: r"OpenAI Codex",
         paste_evidence: PasteEvidence::Chars,
         note: None,
@@ -116,7 +127,8 @@ const IN_SCOPE: &[InScope] = &[
     InScope {
         agent: "dsh",
         surface: "rich",
-        flat: false,
+        never_alternate: false,
+        measure_resume: false,
         boot_evidence: r"DeepSeek Harness",
         paste_evidence: PasteEvidence::Lines,
         note: Some("dsh --profile tui declares no readiness patterns"),
@@ -124,7 +136,8 @@ const IN_SCOPE: &[InScope] = &[
     InScope {
         agent: "dsh",
         surface: "flat",
-        flat: true,
+        never_alternate: true,
+        measure_resume: false,
         boot_evidence: r"dshline",
         paste_evidence: PasteEvidence::InlineSentinel,
         note: None,
@@ -257,12 +270,7 @@ fn check_surface(server: &Server, registry: &Registry, scope: &InScope) -> Resul
     let session = format!("smoke-{}-{}", scope.agent, scope.surface);
 
     // --- launch and independent idle ----------------------------------------
-    let argv = launch_argv(agent, surface);
-    let cmd = argv
-        .iter()
-        .map(|arg| shell_quote(arg))
-        .collect::<Vec<_>>()
-        .join(" ");
+    let cmd = shell_command(&launch_argv(agent, surface));
     tmux_new_session(server, &session, &cmd)?;
     let patterns = compile_patterns(scope.agent, scope.surface, surface)?;
     let boot = Regex::new(scope.boot_evidence)
@@ -279,17 +287,19 @@ fn check_surface(server: &Server, registry: &Registry, scope: &InScope) -> Resul
 
     // --- live rendering checks ----------------------------------------------
     let alternate_on = display(server, &session, "#{alternate_on}")?;
-    if scope.flat {
+    if scope.never_alternate {
         if alternate_on.trim() == "0" {
-            pass("flat surface is non-alternate-screen");
+            pass("pane is not on the alternate screen (alternate_on=0)");
         } else {
             failures.push(format!(
-                "{}.{}: flat surface has alternate_on={alternate_on:?}, expected 0",
-                scope.agent, scope.surface
+                "{}.{}: pane is on the alternate screen (alternate_on={:?}), expected 0",
+                scope.agent,
+                scope.surface,
+                alternate_on.trim()
             ));
         }
     } else {
-        println!("    INFO alternate_on={alternate_on} (rich surface: no requirement)");
+        println!("    INFO alternate_on={alternate_on} (full-screen rich surface: no requirement)");
     }
 
     let bracket_paste_flag = display(server, &session, "#{bracket_paste_flag}")?;
@@ -322,9 +332,9 @@ fn check_surface(server: &Server, registry: &Registry, scope: &InScope) -> Resul
             check_busy(server, &session, scope, patterns, &mut failures)?;
         }
     } else if let Some(note) = scope.note {
-        println!("    INFO no declared patterns: {note}");
+        println!("    INFO no declared ready_regex/busy_regex (noted, not failed): {note}");
     } else {
-        println!("    INFO no declared patterns");
+        println!("    INFO no declared ready_regex/busy_regex (noted, not failed)");
     }
 
     // --- quit-when-idle ------------------------------------------------------
@@ -389,7 +399,125 @@ fn check_surface(server: &Server, registry: &Registry, scope: &InScope) -> Resul
 
     kill_session(server, &session);
     kill_session(server, &paste_session);
+
+    // --- resume --------------------------------------------------------------
+    if scope.measure_resume {
+        check_resume(server, registry, scope, &boot, &mut failures)?;
+    }
     Ok(failures)
+}
+
+/// Measure the declared resume syntax live: start the surface with a known session
+/// identifier (`--session-id`), finish one turn whose reply is a run-unique token, end
+/// the pane, then relaunch through [`Registry::resolve_launch`] with that identifier.
+/// The resumed pane must reach a stable idle and show the token again.
+fn check_resume(
+    server: &Server,
+    registry: &Registry,
+    scope: &InScope,
+    boot: &Regex,
+    failures: &mut Vec<String>,
+) -> Result<()> {
+    let label = format!("{}.{}", scope.agent, scope.surface);
+    let id = session_uuid();
+    let started = registry.resolve_launch(scope.agent, None, Some(scope.surface), None)?;
+    let mut first_argv = vec![started.binary.clone()];
+    first_argv.extend(started.args);
+    first_argv.extend(["--session-id".to_owned(), id.clone()]);
+
+    let first = format!("smoke-{}-{}-resume-a", scope.agent, scope.surface);
+    tmux_new_session(server, &first, &shell_command(&first_argv))?;
+    if wait_for_stable_idle(server, &first, boot)?.is_none() {
+        failures.push(format!(
+            "{label}: resume: the first pane never reached a stable idle"
+        ));
+        kill_session(server, &first);
+        return Ok(());
+    }
+    // The prompt carries the addends, never their sum, so only the reply prints it.
+    let seed = u64::from(std::process::id());
+    let token = (seed + 271_828).to_string();
+    tmux_ok(
+        server,
+        &[
+            "send-keys",
+            "-l",
+            "-t",
+            &first,
+            &format!("Reply with only the decimal sum of {seed} and 271828, digits only"),
+        ],
+    )?;
+    sleep(Duration::from_millis(500));
+    tmux_ok(server, &["send-keys", "-t", &first, "Enter"])?;
+    let replied = wait_for_text(server, &first, &token, Duration::from_secs(120))?;
+    let settled = replied && wait_for_stable_idle(server, &first, boot)?.is_some();
+    kill_session(server, &first);
+    if !settled {
+        failures.push(format!(
+            "{label}: resume: the first turn never printed its token {token} and settled"
+        ));
+        return Ok(());
+    }
+
+    let resumed = match registry.resolve_launch(scope.agent, None, Some(scope.surface), Some(&id)) {
+        Ok(resumed) => resumed,
+        Err(error) => {
+            failures.push(format!("{label}: resume: {error:#}"));
+            return Ok(());
+        }
+    };
+    let mut resume_argv = vec![resumed.binary.clone()];
+    resume_argv.extend(resumed.args);
+    let second = format!("smoke-{}-{}-resume-b", scope.agent, scope.surface);
+    tmux_new_session(server, &second, &shell_command(&resume_argv))?;
+    let shown = wait_for_text(server, &second, &token, Duration::from_secs(60))?;
+    let idle = shown && wait_for_stable_idle(server, &second, boot)?.is_some();
+    kill_session(server, &second);
+    if idle {
+        pass(&format!(
+            "resume: {:?} relaunched session {id} and showed its earlier reply",
+            resume_argv[1..].join(" ")
+        ));
+    } else {
+        failures.push(format!(
+            "{label}: resume: relaunching with {:?} did not show the earlier reply {token}",
+            resume_argv[1..].join(" ")
+        ));
+    }
+    Ok(())
+}
+
+/// A fresh random-version UUID for `--session-id`, from the clock and the pid.
+fn session_uuid() -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos())
+        .unwrap_or_default();
+    let pid = u64::from(std::process::id());
+    let high = pid.wrapping_mul(0x9e37_79b9_7f4a_7c15) ^ (nanos as u64).rotate_left(29);
+    let mixed = (u128::from(high) << 64) | (nanos & u128::from(u64::MAX));
+    format!(
+        "{:08x}-{:04x}-4{:03x}-8{:03x}-{:012x}",
+        (mixed >> 96) as u32,
+        (mixed >> 80) as u16,
+        (mixed >> 64) as u16 & 0x0fff,
+        (mixed >> 48) as u16 & 0x0fff,
+        mixed as u64 & 0xffff_ffff_ffff
+    )
+}
+
+/// Poll the pane's whole capture until it contains `text`; `false` on timeout.
+fn wait_for_text(server: &Server, session: &str, text: &str, timeout: Duration) -> Result<bool> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if capture_pane(server, session)?.contains(text) {
+            return Ok(true);
+        }
+        if Instant::now() >= deadline {
+            return Ok(false);
+        }
+        sleep(POLL);
+    }
 }
 
 fn check_version(binary: &str, surface: &Surface, failures: &mut Vec<String>) {
@@ -785,7 +913,19 @@ fn check_large_paste(
 // ---------------------------------------------------------------------------
 
 fn tmux(server: &Server, args: &[&str]) -> std::process::Output {
-    Command::new("tmux")
+    let mut command = Command::new("tmux");
+    // The private server's panes must not inherit a calling Claude session's variables
+    // (`CLAUDECODE`, `CLAUDE_*`): a Claude started under them saves no transcript, so
+    // the resume measurement would have nothing to resume.
+    for (key, _) in std::env::vars_os() {
+        if key
+            .to_str()
+            .is_some_and(|key| key == "CLAUDECODE" || key.starts_with("CLAUDE_"))
+        {
+            command.env_remove(key);
+        }
+    }
+    command
         .arg("-L")
         .arg(&server.socket)
         .args(args)
@@ -887,6 +1027,13 @@ fn launch_argv(agent: &tmux_tools_core::agents::AgentSpec, surface: &Surface) ->
         argv.extend(profile.args.iter().cloned());
     }
     argv
+}
+
+fn shell_command(argv: &[String]) -> String {
+    argv.iter()
+        .map(|arg| shell_quote(arg))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn shell_quote(value: &str) -> String {

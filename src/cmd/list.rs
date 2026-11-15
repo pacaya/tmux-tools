@@ -1,14 +1,13 @@
-use anyhow::{anyhow, Context, Result};
+use anyhow::Result;
 use clap::Args;
 use serde::Serialize;
-use std::collections::BTreeSet;
-use std::env;
 use tmux_tools_core::{
-    format::{self, non_empty, Format, MISSING_GLYPH},
-    names, target, tmux,
+    format::{self, Format, MISSING_GLYPH},
+    host::{self, Host, HostState, ListScope, PaneListing as PaneRow},
+    team,
 };
 
-const FIELD_SEP: char = '\x1f';
+use crate::util::{instant_later, parse_rfc3339_utc};
 
 #[derive(Args, Debug)]
 pub struct ListArgs {
@@ -20,42 +19,28 @@ pub struct ListArgs {
     pub format: Format,
 }
 
-#[derive(Debug)]
-struct PaneRow {
-    raw: String,
-    session: String,
-    window_index_sort: u64,
-    window_name: String,
-    pane_index_sort: u64,
-    pane_id: String,
-    name: Option<String>,
-    agent: Option<String>,
-    access: Option<String>,
-    launched_at: Option<String>,
-    pane_dead: bool,
-    pane_dead_status: Option<String>,
-    last_activity: Option<i64>,
-}
-
 #[derive(Serialize)]
 struct ListJsonRow {
+    host: Host,
     name: Option<String>,
     agent: Option<String>,
-    session: String,
+    /// The pane's session; on Herdr its `herdr.space` label or `null`
+    /// (PRD-261109-2223-01 P7.3).
+    session: Option<String>,
     pane: String,
     access: Option<String>,
     launched: Option<String>,
     status: String,
     last_activity: Option<i64>,
+    host_state: Option<HostState>,
+    parent: Option<String>,
+    team: Option<String>,
+    shim_id: Option<String>,
+    orphan: bool,
 }
 
 pub fn run(args: &ListArgs) -> Result<()> {
-    let scope = session_scope(args)?;
-    let mut rows = list_panes()?;
-
-    if let Some(scope) = &scope {
-        rows.retain(|row| scope.contains(&row.session));
-    }
+    let mut rows = host::current().list_panes(list_scope(args))?;
 
     rows.sort_by(|left, right| {
         left.session
@@ -66,127 +51,77 @@ pub fn run(args: &ListArgs) -> Result<()> {
 
     match args.format {
         Format::Raw => render_raw(&rows),
-        Format::Concise => render_concise(&rows),
-        Format::Json => render_json(&rows)?,
+        Format::Concise => {
+            let orphans = orphans(&rows, args)?;
+            render_concise(&rows, &orphans)
+        }
+        Format::Json => {
+            let orphans = orphans(&rows, args)?;
+            render_json(&rows, &orphans)?
+        }
     }
 
     Ok(())
 }
 
-fn session_scope(args: &ListArgs) -> Result<Option<BTreeSet<String>>> {
-    if let Some(session) = &args.session {
-        return Ok(Some(BTreeSet::from([session.clone()])));
-    }
-
-    if args.all {
-        return Ok(None);
-    }
-
-    let mut scope = BTreeSet::from([target::MANAGED_SESSION.to_owned()]);
-    if env::var_os("TMUX").is_some() {
-        scope.insert(current_session()?);
-    }
-
-    Ok(Some(scope))
-}
-
-fn current_session() -> Result<String> {
-    let session = tmux::run_checked(&["display-message", "-p", "#{session_name}"])?
-        .trim()
-        .to_owned();
-    if session.is_empty() {
-        return Err(anyhow!("tmux returned an empty current session name"));
-    }
-
-    Ok(session)
-}
-
-fn list_panes() -> Result<Vec<PaneRow>> {
-    let list_format = list_format();
-    let output = tmux::run(&["list-panes", "-a", "-F", &list_format])
-        .context("failed to run tmux command: tmux list-panes -a")?;
-
-    if output.exit_code != 0 {
-        if stderr_indicates_no_server(&output.stderr) {
-            return Ok(Vec::new());
-        }
-
-        return Err(anyhow!(
-            "tmux command failed (args: {:?}, exit code {}): {}",
-            ["list-panes", "-a", "-F", list_format.as_str()],
-            output.exit_code,
-            output.stderr.trim()
-        ));
-    }
-
-    output.stdout.lines().map(parse_pane_row).collect()
-}
-
-fn list_format() -> String {
-    format!(
-        "#{{session_name}}\x1f#{{window_index}}\x1f#{{window_name}}\x1f#{{pane_index}}\x1f#{{pane_id}}\x1f#{{{}}}\x1f#{{{}}}\x1f#{{{}}}\x1f#{{{}}}\x1f#{{pane_dead}}\x1f#{{pane_dead_status}}\x1f#{{window_activity}}",
-        names::KEY_NAME,
-        names::KEY_AGENT,
-        names::KEY_ACCESS,
-        names::KEY_LAUNCHED_AT,
-    )
-}
-
-fn stderr_indicates_no_server(stderr: &str) -> bool {
-    const NO_SERVER_MARKERS: &[&str] = &[
-        "no server running",
-        "No such file or directory",
-        "Connection refused",
-        "error connecting",
-    ];
-    NO_SERVER_MARKERS
-        .iter()
-        .any(|marker| stderr.contains(marker))
-}
-
-fn parse_pane_row(line: &str) -> Result<PaneRow> {
-    let fields: Vec<&str> = line.split(FIELD_SEP).collect();
-    if fields.len() != 12 {
-        return Err(anyhow!("unexpected tmux list-panes output: {line:?}"));
-    }
-
-    let window_index_sort = fields[1].parse().with_context(|| {
-        format!(
-            "failed to parse tmux window index {:?} for pane {}",
-            fields[1], fields[4]
-        )
-    })?;
-    let pane_index_sort = fields[3].parse().with_context(|| {
-        format!(
-            "failed to parse tmux pane index {:?} for pane {}",
-            fields[3], fields[4]
-        )
-    })?;
-
-    let last_activity = match fields[11] {
-        "" => None,
-        raw => match raw.parse::<i64>() {
-            Ok(0) => None,
-            Ok(value) => Some(value),
-            Err(_) => None,
-        },
+/// Whether each row is an Orphan (PRD-261108-0447-01 P8.3): its `parent` does not
+/// resolve to a live pane, or resolves to a pane launched later than the row; or it has
+/// a `team` whose team directory does not exist or whose `leader.lock` is not held.
+fn orphans(rows: &[PaneRow], args: &ListArgs) -> Result<Vec<bool>> {
+    let live: Vec<PaneRow>;
+    let live_rows = if rows.iter().all(|row| row.parent.is_none()) {
+        &[][..]
+    } else if args.all || host::current().creates_registered() {
+        rows
+    } else {
+        // A parent can live outside the listed scope.
+        live = host::current().list_panes(ListScope::All)?;
+        &live[..]
     };
+    Ok(rows
+        .iter()
+        .map(|row| {
+            let parent_gone = row.parent.as_deref().is_some_and(|parent| {
+                !live_rows.iter().any(|candidate| {
+                    candidate.name.as_deref() == Some(parent)
+                        && !candidate.pane_dead
+                        && !launched_later(candidate, row)
+                })
+            });
+            let team_gone = row.team.as_deref().is_some_and(|id| !team::is_running(id));
+            parent_gone || team_gone
+        })
+        .collect())
+}
 
-    Ok(PaneRow {
-        raw: line.to_owned(),
-        session: fields[0].to_owned(),
-        window_index_sort,
-        window_name: fields[2].to_owned(),
-        pane_index_sort,
-        pane_id: fields[4].to_owned(),
-        name: non_empty(fields[5]),
-        agent: non_empty(fields[6]),
-        access: non_empty(fields[7]),
-        launched_at: non_empty(fields[8]),
-        pane_dead: fields[9] == "1",
-        pane_dead_status: non_empty(fields[10]),
-        last_activity,
-    })
+/// Whether `candidate` was launched after `row`, compared as parsed instants (whole-
+/// second and sub-second records both read). An unknown time is never later.
+fn launched_later(candidate: &PaneRow, row: &PaneRow) -> bool {
+    let instant = |row: &PaneRow| row.launched_at.as_deref().and_then(parse_rfc3339_utc);
+    match (instant(candidate), instant(row)) {
+        (Some(candidate), Some(row)) => instant_later(candidate, row),
+        _ => false,
+    }
+}
+
+/// The `PARENT` cell: `orphan:<parent>` or `orphan` for an Orphan, else the parent.
+fn parent_cell(row: &PaneRow, orphan: bool) -> String {
+    match (orphan, row.parent.as_deref()) {
+        (true, Some(parent)) => format!("orphan:{parent}"),
+        (true, None) => "orphan".to_owned(),
+        (false, parent) => display_value(parent),
+    }
+}
+
+/// The panes `list` reads: `--session`, `--all`, else the host's default scope.
+fn list_scope(args: &ListArgs) -> ListScope<'_> {
+    if let Some(session) = &args.session {
+        ListScope::Session(session)
+    } else if args.all {
+        ListScope::All
+    } else {
+        ListScope::Default
+    }
 }
 
 fn render_raw(rows: &[PaneRow]) {
@@ -195,73 +130,48 @@ fn render_raw(rows: &[PaneRow]) {
     }
 }
 
-fn render_concise(rows: &[PaneRow]) {
-    render_concise_at(rows, current_unix_time())
+fn render_concise(rows: &[PaneRow], orphans: &[bool]) {
+    render_concise_at(rows, orphans, current_unix_time())
 }
 
-fn render_concise_at(rows: &[PaneRow], now: i64) {
-    let table: Vec<[String; 8]> = rows
+fn render_concise_at(rows: &[PaneRow], orphans: &[bool], now: i64) {
+    let table: Vec<[String; 9]> = rows
         .iter()
-        .map(|row| {
+        .zip(orphans)
+        .map(|(row, orphan)| {
             [
                 display_value(row.name.as_deref()),
                 display_value(row.agent.as_deref()),
+                parent_cell(row, *orphan),
                 row.session.clone(),
-                row.pane_label(),
+                pane_label(row),
                 display_value(row.access.as_deref()),
                 display_value(row.launched_at.as_deref()),
-                row.status(),
+                pane_status(row),
                 format_activity(row.last_activity, now),
             ]
         })
         .collect();
 
     let headers = [
-        "NAME", "AGENT", "SESSION", "PANE", "ACCESS", "LAUNCHED", "STATUS", "ACTIVITY",
+        "NAME", "AGENT", "PARENT", "SESSION", "PANE", "ACCESS", "LAUNCHED", "STATUS", "ACTIVITY",
     ];
     let widths = column_widths(&headers, &table);
-
-    println!(
-        "{:<w0$}  {:<w1$}  {:<w2$}  {:<w3$}  {:<w4$}  {:<w5$}  {:<w6$}  {:<w7$}",
-        headers[0],
-        headers[1],
-        headers[2],
-        headers[3],
-        headers[4],
-        headers[5],
-        headers[6],
-        headers[7],
-        w0 = widths[0],
-        w1 = widths[1],
-        w2 = widths[2],
-        w3 = widths[3],
-        w4 = widths[4],
-        w5 = widths[5],
-        w6 = widths[6],
-        w7 = widths[7],
-    );
-
+    println!("{}", table_line(&headers.map(str::to_owned), &widths));
     for row in table {
-        println!(
-            "{:<w0$}  {:<w1$}  {:<w2$}  {:<w3$}  {:<w4$}  {:<w5$}  {:<w6$}  {:<w7$}",
-            row[0],
-            row[1],
-            row[2],
-            row[3],
-            row[4],
-            row[5],
-            row[6],
-            row[7],
-            w0 = widths[0],
-            w1 = widths[1],
-            w2 = widths[2],
-            w3 = widths[3],
-            w4 = widths[4],
-            w5 = widths[5],
-            w6 = widths[6],
-            w7 = widths[7],
-        );
+        println!("{}", table_line(&row, &widths));
     }
+}
+
+/// One table line: every cell left-aligned to its column width, two spaces apart, as
+/// the earlier fixed format printed it (trailing padding included).
+fn table_line(cells: &[String; 9], widths: &[usize; 9]) -> String {
+    cells
+        .iter()
+        .zip(widths)
+        .map(|(cell, width)| format!("{cell:<width$}"))
+        .collect::<Vec<_>>()
+        .join("  ")
 }
 
 fn current_unix_time() -> i64 {
@@ -296,26 +206,40 @@ fn format_activity(activity: Option<i64>, now: i64) -> String {
     }
 }
 
-fn render_json(rows: &[PaneRow]) -> Result<()> {
-    let json_rows: Vec<ListJsonRow> = rows
+fn render_json(rows: &[PaneRow], orphans: &[bool]) -> Result<()> {
+    let host = host::current();
+    let pane_ids: Vec<String> = rows.iter().map(|row| row.pane_id.clone()).collect();
+    let host_states = host.host_states(&pane_ids)?;
+    let json_rows = rows
         .iter()
-        .map(|row| ListJsonRow {
-            name: row.name.clone(),
-            agent: row.agent.clone(),
-            session: row.session.clone(),
-            pane: row.pane_label(),
-            access: row.access.clone(),
-            launched: row.launched_at.clone(),
-            status: row.status(),
-            last_activity: row.last_activity,
+        .zip(host_states)
+        .zip(orphans)
+        .map(|((row, host_state), orphan)| {
+            Ok(ListJsonRow {
+                host: host.host(),
+                name: row.name.clone(),
+                agent: row.agent.clone(),
+                session: (host.host() != Host::Herdr || !row.session.is_empty())
+                    .then(|| row.session.clone()),
+                pane: pane_label(row),
+                access: row.access.clone(),
+                launched: row.launched_at.clone(),
+                status: pane_status(row),
+                last_activity: row.last_activity,
+                host_state,
+                parent: row.parent.clone(),
+                team: row.team.clone(),
+                shim_id: row.shim_id.clone(),
+                orphan: *orphan,
+            })
         })
-        .collect();
+        .collect::<Result<Vec<_>>>()?;
 
     println!("{}", serde_json::to_string_pretty(&json_rows)?);
     Ok(())
 }
 
-fn column_widths(headers: &[&str; 8], rows: &[[String; 8]]) -> [usize; 8] {
+fn column_widths(headers: &[&str; 9], rows: &[[String; 9]]) -> [usize; 9] {
     let mut widths = headers.map(str::len);
     for row in rows {
         for (index, value) in row.iter().enumerate() {
@@ -329,102 +253,33 @@ fn display_value(value: Option<&str>) -> String {
     format::display_value(value).to_owned()
 }
 
-impl PaneRow {
-    fn pane_label(&self) -> String {
-        format!(
-            "{}.{}:{}.{}",
-            self.window_index_sort, self.window_name, self.pane_index_sort, self.pane_id
-        )
+fn pane_label(row: &PaneRow) -> String {
+    if let Some(label) = &row.label {
+        return label.clone();
+    }
+    format!(
+        "{}.{}:{}.{}",
+        row.window_index_sort, row.window_name, row.pane_index_sort, row.pane_id
+    )
+}
+
+fn pane_status(row: &PaneRow) -> String {
+    if row.unknown {
+        return "unknown".to_owned();
+    }
+    if !row.pane_dead {
+        return "running".to_owned();
     }
 
-    fn status(&self) -> String {
-        if !self.pane_dead {
-            return "running".to_owned();
-        }
-
-        self.pane_dead_status
-            .as_ref()
-            .map(|status| format!("dead+{status}"))
-            .unwrap_or_else(|| "dead".to_owned())
-    }
+    row.pane_dead_status
+        .as_ref()
+        .map(|status| format!("dead+{status}"))
+        .unwrap_or_else(|| "dead".to_owned())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn build_line(fields: &[&str]) -> String {
-        fields.join(&FIELD_SEP.to_string())
-    }
-
-    #[test]
-    fn parses_pane_row_with_unit_separator() {
-        let line = build_line(&[
-            "managed",
-            "0",
-            "main",
-            "1",
-            "%42",
-            "my-pane",
-            "claude",
-            "alice",
-            "2024-01-01T00:00:00Z",
-            "0",
-            "",
-            "1700000000",
-        ]);
-
-        let row = parse_pane_row(&line).expect("row parses");
-        assert_eq!(row.session, "managed");
-        assert_eq!(row.window_index_sort, 0);
-        assert_eq!(row.window_name, "main");
-        assert_eq!(row.pane_index_sort, 1);
-        assert_eq!(row.pane_id, "%42");
-        assert_eq!(row.name.as_deref(), Some("my-pane"));
-        assert_eq!(row.agent.as_deref(), Some("claude"));
-        assert_eq!(row.access.as_deref(), Some("alice"));
-        assert_eq!(row.launched_at.as_deref(), Some("2024-01-01T00:00:00Z"));
-        assert!(!row.pane_dead);
-        assert_eq!(row.pane_dead_status, None);
-        assert_eq!(row.last_activity, Some(1_700_000_000));
-    }
-
-    #[test]
-    fn parses_pane_row_with_tab_in_name() {
-        // A tab inside a user-supplied @tt-name should not break parsing
-        // because the field separator is now \x1f.
-        let line = build_line(&[
-            "managed",
-            "0",
-            "main",
-            "1",
-            "%42",
-            "my\tname\twith\ttabs",
-            "",
-            "",
-            "",
-            "0",
-            "",
-            "0",
-        ]);
-
-        let row = parse_pane_row(&line).expect("row parses with tab in name");
-        assert_eq!(row.name.as_deref(), Some("my\tname\twith\ttabs"));
-        assert_eq!(row.last_activity, None);
-    }
-
-    #[test]
-    fn parses_pane_row_rejects_wrong_field_count() {
-        let line = build_line(&["only", "three", "fields"]);
-        assert!(parse_pane_row(&line).is_err());
-    }
-
-    #[test]
-    fn last_activity_zero_is_none() {
-        let line = build_line(&["s", "0", "w", "0", "%1", "", "", "", "", "0", "", "0"]);
-        let row = parse_pane_row(&line).expect("row parses");
-        assert_eq!(row.last_activity, None);
-    }
 
     #[test]
     fn json_row_includes_last_activity() {
@@ -442,17 +297,28 @@ mod tests {
             pane_dead: false,
             pane_dead_status: None,
             last_activity: Some(1_700_000_000),
+            label: None,
+            unknown: false,
+            parent: None,
+            team: None,
+            shim_id: None,
         };
 
         let json_row = ListJsonRow {
+            host: Host::Tmux,
             name: row.name.clone(),
             agent: row.agent.clone(),
-            session: row.session.clone(),
-            pane: row.pane_label(),
+            session: Some(row.session.clone()),
+            pane: pane_label(&row),
             access: row.access.clone(),
             launched: row.launched_at.clone(),
-            status: row.status(),
+            status: pane_status(&row),
             last_activity: row.last_activity,
+            host_state: None,
+            parent: None,
+            team: None,
+            shim_id: None,
+            orphan: false,
         };
 
         let json = serde_json::to_string(&json_row).unwrap();
@@ -465,14 +331,20 @@ mod tests {
     #[test]
     fn json_row_last_activity_null_when_missing() {
         let json_row = ListJsonRow {
+            host: Host::Tmux,
             name: None,
             agent: None,
-            session: "s".into(),
+            session: Some("s".into()),
             pane: "0.w:0.%1".into(),
             access: None,
             launched: None,
             status: "running".into(),
             last_activity: None,
+            host_state: None,
+            parent: None,
+            team: None,
+            shim_id: None,
+            orphan: false,
         };
 
         let json = serde_json::to_string(&json_row).unwrap();
@@ -480,17 +352,6 @@ mod tests {
             json.contains("\"last_activity\":null"),
             "expected null last_activity: {json}"
         );
-    }
-
-    #[test]
-    fn stderr_no_server_detection() {
-        assert!(stderr_indicates_no_server("no server running on /tmp/tmux"));
-        assert!(stderr_indicates_no_server(
-            "error connecting to /tmp/tmux-501/default (No such file or directory)"
-        ));
-        assert!(stderr_indicates_no_server("Connection refused"));
-        assert!(stderr_indicates_no_server("error connecting to socket"));
-        assert!(!stderr_indicates_no_server("some other tmux error"));
     }
 
     #[test]

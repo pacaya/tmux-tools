@@ -16,6 +16,7 @@
 //! the calling pane; `--any` lets you act on cross-cwd or non-owned panes.
 
 use anyhow::{anyhow, Result};
+use tmux_tools_core::host::{self, Host};
 use tmux_tools_core::{names, names::Registered, target};
 
 /// Verdict produced by [`evaluate`]: either `Allow` (proceed) or `Deny`
@@ -98,11 +99,17 @@ pub fn enforce_for_pane(
     let current_cwd = std::env::current_dir()
         .ok()
         .map(|p| p.to_string_lossy().into_owned());
+    // PRD-261109-2223-01 P4.5: on Herdr, Ownership needs `tt.name`; `tt.agent` alone
+    // does not make a terminal ours. tmux and Orca keep the name-or-agent rule.
+    let mut ownership = registered.clone();
+    if host::current().host() == Host::Herdr {
+        ownership.agent = None;
+    }
     enforce(&SafetyInput {
         verb,
         target_pane: pane,
         calling_pane: calling.as_deref(),
-        registered: &registered,
+        registered: &ownership,
         current_cwd: current_cwd.as_deref(),
         force,
         any,
@@ -123,6 +130,7 @@ mod tests {
             cwd: None,
             surface: None,
             surface_unvalidated: false,
+            ..Default::default()
         }
     }
 
@@ -135,6 +143,7 @@ mod tests {
             cwd: cwd.map(str::to_owned),
             surface: None,
             surface_unvalidated: false,
+            ..Default::default()
         }
     }
 
@@ -325,6 +334,7 @@ mod tests {
             cwd: Some("/work".to_owned()),
             surface: None,
             surface_unvalidated: false,
+            ..Default::default()
         };
         let input = SafetyInput {
             verb: "kill",

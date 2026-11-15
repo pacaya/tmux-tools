@@ -1,17 +1,15 @@
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result};
 use clap::Args;
 use serde::Serialize;
 use std::env;
 use tmux_tools_core::{
-    format::{non_empty, Format},
+    format::Format,
+    host::{self, Host, HostState, PaneSummary as StatusRow},
     layout::{self, WindowReport},
-    names, target, tmux,
+    target,
 };
 
 use crate::{util::load_registry_for_floors, CommonArgs};
-
-const FIELD_SEP: char = '\x1f';
-const STATUS_FIELD_COUNT: usize = 8;
 
 #[derive(Args, Debug)]
 pub struct StatusArgs {
@@ -19,46 +17,46 @@ pub struct StatusArgs {
     pub(crate) common: CommonArgs,
 }
 
-#[derive(Debug)]
-struct StatusRow {
-    session: String,
-    window_index: String,
-    window_name: String,
-    pane_index: String,
-    pane_id: String,
-    name: Option<String>,
-    agent: Option<String>,
-    access: Option<String>,
-    launched_at: Option<String>,
-    cwd: Option<String>,
-}
-
 #[derive(Serialize)]
 struct StatusJson {
-    session: String,
-    window: String,
-    window_index: u64,
-    pane: u64,
+    host: Host,
+    /// The pane's session; on Herdr its `herdr.space` label or `null`.
+    session: Option<String>,
+    /// The pane's window; on Herdr its `herdr.tab` label or `null`.
+    window: Option<String>,
+    window_index: Option<u64>,
+    pane: Option<u64>,
     pane_id: String,
     name: Option<String>,
     agent: Option<String>,
     access: Option<String>,
     launched_at: Option<String>,
     cwd: Option<String>,
-    /// The smallest pane width in the pane's window.
-    min_pane_cols: u32,
-    /// The smallest pane height in the pane's window.
-    min_pane_rows: u32,
-    /// Whether the pane's window is below its effective floor.
-    below_floor: bool,
+    /// The smallest pane width in the pane's window; `null` on a host without `tile`.
+    min_pane_cols: Option<u32>,
+    /// The smallest pane height in the pane's window; `null` on a host without `tile`.
+    min_pane_rows: Option<u32>,
+    /// Whether the pane's window is below its effective floor; `null` on a host without
+    /// `tile`.
+    below_floor: Option<bool>,
+    host_state: Option<HostState>,
+    /// The host's exact status word; always `null` on tmux and Orca
+    /// (PRD-261109-2223-01 P6.3).
+    host_word: Option<String>,
 }
 
 #[derive(Serialize)]
 struct NotInTmuxJson {
+    host: Host,
     in_tmux: bool,
+    host_state: Option<HostState>,
+    host_word: Option<String>,
 }
 
 pub fn run(args: &StatusArgs) -> Result<()> {
+    if host::current().creates_registered() {
+        return run_on_registry_host(args);
+    }
     if args.common.target.is_none() && env::var_os("TMUX").is_none() {
         return render_not_in_tmux(args.common.format);
     }
@@ -67,20 +65,72 @@ pub fn run(args: &StatusArgs) -> Result<()> {
         Some(_) => Some(target::resolve_from_common(&args.common)?),
         None => None,
     };
-    let raw = display_status(pane_id.as_deref())?;
+    let description = host::current().describe_pane(pane_id.as_deref())?;
 
     match args.common.format {
-        Format::Raw => print!("{raw}"),
+        Format::Raw => print!("{}", description.raw),
         Format::Concise => {
-            let row = parse_status(raw.trim_end_matches('\n'))?;
+            let row = description.summary?;
             render_concise(&row, &window_report(&row)?);
         }
         Format::Json => {
-            let row = parse_status(raw.trim_end_matches('\n'))?;
+            let row = description.summary?;
             render_json(&row, &window_report(&row)?)?;
         }
     }
 
+    Ok(())
+}
+
+/// `status` on a host without tmux sessions and windows (Orca, Herdr): the pane is
+/// `--target` or the calling pane, its `window` is its tab (Orca tab id, Herdr
+/// `herdr.tab`), and the keys the host has no source for are `null` (P9.13;
+/// PRD-261109-2223-01 P7.3).
+fn run_on_registry_host(args: &StatusArgs) -> Result<()> {
+    let pane = target::resolve_from_common(&args.common)?;
+    let description = host::current().describe_pane(Some(&pane))?;
+    match args.common.format {
+        Format::Raw => print!("{}", description.raw),
+        Format::Concise => {
+            let row = description.summary?;
+            println!("session: {}", row.session);
+            println!("window: {}", row.window_name);
+            println!("pane: {}", row.pane_id);
+            if let Some(name) = &row.name {
+                println!("name: {name}");
+            }
+            if let Some(agent) = &row.agent {
+                println!("agent: {agent}");
+            }
+        }
+        Format::Json => {
+            let row = description.summary?;
+            let host = host::current();
+            // On Herdr an absent label is `null`; Orca keeps its reported strings.
+            let label = |value: &str| {
+                (host.host() != Host::Herdr || !value.is_empty()).then(|| value.to_owned())
+            };
+            let json = StatusJson {
+                host: host.host(),
+                session: label(&row.session),
+                window: label(&row.window_name),
+                window_index: None,
+                pane: None,
+                pane_id: row.pane_id.clone(),
+                name: row.name.clone(),
+                agent: row.agent.clone(),
+                access: row.access.clone(),
+                launched_at: row.launched_at.clone(),
+                cwd: row.cwd.clone(),
+                min_pane_cols: None,
+                min_pane_rows: None,
+                below_floor: None,
+                host_state: host.host_state(&row.pane_id)?,
+                host_word: host.host_word(&row.pane_id)?,
+            };
+            println!("{}", serde_json::to_string_pretty(&json)?);
+        }
+    }
     Ok(())
 }
 
@@ -89,61 +139,19 @@ fn render_not_in_tmux(format: Format) -> Result<()> {
         Format::Json => {
             println!(
                 "{}",
-                serde_json::to_string_pretty(&NotInTmuxJson { in_tmux: false })?
+                serde_json::to_string_pretty(&NotInTmuxJson {
+                    host: host::current().host(),
+                    in_tmux: false,
+                    // No pane, so no Host state.
+                    host_state: None,
+                    host_word: None,
+                })?
             );
         }
         Format::Concise | Format::Raw => println!("not in tmux"),
     }
 
     Ok(())
-}
-
-fn display_status(pane_id: Option<&str>) -> Result<String> {
-    let status_format = status_format();
-    let args = match pane_id {
-        Some(pane_id) => vec!["display-message", "-p", "-t", pane_id, &status_format],
-        None => vec!["display-message", "-p", &status_format],
-    };
-
-    tmux::run_checked(&args)
-}
-
-fn status_format() -> String {
-    format!(
-        "#{{session_name}}\x1f#{{window_index}}.#{{window_name}}\x1f#{{pane_index}}.#{{pane_id}}\x1f#{{{}}}\x1f#{{{}}}\x1f#{{{}}}\x1f#{{{}}}\x1f#{{{}}}",
-        names::KEY_NAME,
-        names::KEY_AGENT,
-        names::KEY_ACCESS,
-        names::KEY_LAUNCHED_AT,
-        names::KEY_CWD,
-    )
-}
-
-fn parse_status(line: &str) -> Result<StatusRow> {
-    let fields: Vec<&str> = line.split(FIELD_SEP).collect();
-    if fields.len() != STATUS_FIELD_COUNT {
-        return Err(anyhow!("unexpected tmux status output: {line:?}"));
-    }
-
-    let (window_index, window_name) = fields[1]
-        .split_once('.')
-        .ok_or_else(|| anyhow!("unexpected tmux window status output: {:?}", fields[1]))?;
-    let (pane_index, pane_id) = fields[2]
-        .split_once('.')
-        .ok_or_else(|| anyhow!("unexpected tmux pane status output: {:?}", fields[2]))?;
-
-    Ok(StatusRow {
-        session: fields[0].to_owned(),
-        window_index: window_index.to_owned(),
-        window_name: window_name.to_owned(),
-        pane_index: pane_index.to_owned(),
-        pane_id: pane_id.to_owned(),
-        name: non_empty(fields[3]),
-        agent: non_empty(fields[4]),
-        access: non_empty(fields[5]),
-        launched_at: non_empty(fields[6]),
-        cwd: non_empty(fields[7]),
-    })
 }
 
 /// The measured geometry and floor verdict of the window holding the status pane.
@@ -169,95 +177,36 @@ fn render_concise(row: &StatusRow, window: &WindowReport) {
 }
 
 fn render_json(row: &StatusRow, window: &WindowReport) -> Result<()> {
+    let host = host::current();
     let json = StatusJson {
-        session: row.session.clone(),
-        window: row.window_name.clone(),
-        window_index: row.window_index.parse().with_context(|| {
+        host: host.host(),
+        session: Some(row.session.clone()),
+        window: Some(row.window_name.clone()),
+        window_index: Some(row.window_index.parse().with_context(|| {
             format!(
                 "failed to parse tmux window index {:?} for pane {}",
                 row.window_index, row.pane_id
             )
-        })?,
-        pane: row.pane_index.parse().with_context(|| {
+        })?),
+        pane: Some(row.pane_index.parse().with_context(|| {
             format!(
                 "failed to parse tmux pane index {:?} for pane {}",
                 row.pane_index, row.pane_id
             )
-        })?,
+        })?),
         pane_id: row.pane_id.clone(),
         name: row.name.clone(),
         agent: row.agent.clone(),
         access: row.access.clone(),
         launched_at: row.launched_at.clone(),
         cwd: row.cwd.clone(),
-        min_pane_cols: window.min_pane_cols,
-        min_pane_rows: window.min_pane_rows,
-        below_floor: window.below_floor,
+        min_pane_cols: Some(window.min_pane_cols),
+        min_pane_rows: Some(window.min_pane_rows),
+        below_floor: Some(window.below_floor),
+        host_state: host.host_state(&row.pane_id)?,
+        host_word: host.host_word(&row.pane_id)?,
     };
 
     println!("{}", serde_json::to_string_pretty(&json)?);
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn build_line(fields: &[&str]) -> String {
-        fields.join(&FIELD_SEP.to_string())
-    }
-
-    #[test]
-    fn parses_status_with_unit_separator() {
-        let line = build_line(&[
-            "managed",
-            "0.main",
-            "1.%42",
-            "my-pane",
-            "claude",
-            "workspace-write",
-            "1700000000",
-            "/work",
-        ]);
-
-        let row = parse_status(&line).expect("status parses");
-        assert_eq!(row.session, "managed");
-        assert_eq!(row.window_index, "0");
-        assert_eq!(row.window_name, "main");
-        assert_eq!(row.pane_index, "1");
-        assert_eq!(row.pane_id, "%42");
-        assert_eq!(row.name.as_deref(), Some("my-pane"));
-        assert_eq!(row.agent.as_deref(), Some("claude"));
-        assert_eq!(row.access.as_deref(), Some("workspace-write"));
-        assert_eq!(row.launched_at.as_deref(), Some("1700000000"));
-        assert_eq!(row.cwd.as_deref(), Some("/work"));
-    }
-
-    #[test]
-    fn parses_status_with_tab_in_name() {
-        // Tab inside the user-supplied name must not break parsing.
-        let line = build_line(&[
-            "managed",
-            "0.main",
-            "1.%42",
-            "name\twith\ttab",
-            "",
-            "",
-            "",
-            "",
-        ]);
-
-        let row = parse_status(&line).expect("status parses with tab");
-        assert_eq!(row.name.as_deref(), Some("name\twith\ttab"));
-        assert_eq!(row.agent, None);
-        assert_eq!(row.access, None);
-        assert_eq!(row.launched_at, None);
-        assert_eq!(row.cwd, None);
-    }
-
-    #[test]
-    fn parses_status_rejects_wrong_field_count() {
-        let line = build_line(&["only", "three", "fields"]);
-        assert!(parse_status(&line).is_err());
-    }
 }

@@ -5,12 +5,15 @@ use std::path::PathBuf;
 use tmux_tools_core::{
     agents::Registry,
     format::{display_value, Format},
+    host,
     layout::{self, AgentRegistration, Landing, Registration, Split},
+    names,
 };
 
 use crate::{
     cmd::launch::{
-        concise_landing_fields, destination, invoking_cwd, warn_if_unmeasured, wrap_keep_open,
+        caller_dir, caller_dir_prefix, cd_prefix, concise_landing_fields, destination,
+        invoking_cwd, keep_alive, require_placement_options, spawn_json, warn_if_unmeasured,
         WindowJson,
     },
     util::rfc3339_utc_now,
@@ -68,6 +71,10 @@ struct SpawnAgentJson<'a> {
 }
 
 pub fn run(args: &SpawnAgentArgs) -> Result<()> {
+    if let Some(name) = &args.name {
+        names::validate_name(name)?;
+    }
+    require_placement_options(args.split, args.size.is_some())?;
     let (registry, warnings) = Registry::load()?;
     for warning in &warnings {
         eprintln!("warning: agent {}: {}", warning.agent, warning.detail);
@@ -80,9 +87,10 @@ pub fn run(args: &SpawnAgentArgs) -> Result<()> {
     )?;
     let binary = resolved.binary;
     let argv = launch_argv(binary.clone(), resolved.args, &args.extra_args);
-    let cmd = launch_command(&argv, args.cwd.as_ref(), args.bare)?;
+    let cmd = launch_command(&pane_argv(&argv)?, args.cwd.as_ref(), args.bare)?;
     let launched_at = rfc3339_utc_now()?;
     let cwd = invoking_cwd();
+    let parent = crate::cmd::self_::calling_pane_name()?;
 
     let landing = layout::place(
         &cmd,
@@ -102,6 +110,8 @@ pub fn run(args: &SpawnAgentArgs) -> Result<()> {
                 // validated by construction and do not set the mark.
                 surface_unvalidated: !args.extra_args.is_empty(),
             }),
+            parent: parent.as_deref(),
+            team: None,
         },
         &registry,
     )?;
@@ -123,6 +133,42 @@ fn launch_argv(binary: String, profile_args: Vec<String>, extra_args: &[String])
         .collect()
 }
 
+/// The argv the pane runs. On tmux and on Orca, an agent whose binary basename is
+/// `claude` starts through the Launcher, so its teammates are tmux-tools panes
+/// (PRD-261108-0447-01 P9.1, P9.2): `<tmux-tools path> claude-teams --claude <binary>
+/// -- <claude args>`. Every other agent runs its own argv.
+fn pane_argv(argv: &[String]) -> Result<Vec<String>> {
+    let (binary, claude_args) = argv.split_first().expect("argv starts with the binary");
+    let is_claude = std::path::Path::new(binary)
+        .file_name()
+        .is_some_and(|name| name == "claude");
+    if !is_claude {
+        return Ok(argv.to_vec());
+    }
+    let tmux_tools = std::env::current_exe()
+        .and_then(std::fs::canonicalize)
+        .map_err(|error| anyhow!("cannot locate tmux-tools: {error}"))?;
+    let tmux_tools = tmux_tools
+        .to_str()
+        .ok_or_else(|| {
+            anyhow!(
+                "tmux-tools path is not valid UTF-8: {}",
+                tmux_tools.display()
+            )
+        })?
+        .to_owned();
+    Ok([
+        tmux_tools,
+        "claude-teams".to_owned(),
+        "--claude".to_owned(),
+        binary.clone(),
+        "--".to_owned(),
+    ]
+    .into_iter()
+    .chain(claude_args.iter().cloned())
+    .collect())
+}
+
 fn launch_command(argv: &[String], cwd: Option<&PathBuf>, bare: bool) -> Result<String> {
     let command = argv
         .iter()
@@ -134,15 +180,26 @@ fn launch_command(argv: &[String], cwd: Option<&PathBuf>, bare: bool) -> Result<
     // with `-`, so a relative cwd like `-foo` is not parsed as a flag.
     let cwd_prefix = match cwd {
         Some(cwd) => {
+            // A relative --cwd is relative to the caller's cwd. tmux starts the pane's
+            // shell there, so on tmux the pane command keeps the path as given. Orca
+            // starts it in the worktree root, so on Orca the path is made absolute
+            // against the caller's directory, as tmux would see it.
+            let cwd = if cwd.is_relative() && !host::current().pane_starts_in_caller_dir() {
+                caller_dir()?.join(cwd)
+            } else {
+                cwd.clone()
+            };
             let cwd = cwd
                 .to_str()
                 .ok_or_else(|| anyhow!("--cwd path is not valid UTF-8: {}", cwd.display()))?;
-            Some(format!("cd -- {} &&", shell_quote(cwd)))
+            Some(cd_prefix(cwd))
         }
-        None => None,
+        // With no --cwd, tmux starts the pane in the caller's directory; on Orca the
+        // pane command `cd`s there.
+        None => caller_dir_prefix(),
     };
 
-    if bare {
+    if bare && !host::current().shell_stays_after_command() {
         return Ok(match cwd_prefix {
             Some(prefix) => format!("{prefix} {command}"),
             None => command,
@@ -153,7 +210,7 @@ fn launch_command(argv: &[String], cwd: Option<&PathBuf>, bare: bool) -> Result<
     // the cwd if `cd` succeeded. `&&` binds tighter than `;`, so `cd && (cmd);
     // exec <shell>` runs the exec whether `cd` or the inner command fails —
     // output is preserved in every branch.
-    let wrapped = wrap_keep_open(&command);
+    let wrapped = keep_alive(&command, bare);
     Ok(match cwd_prefix {
         Some(prefix) => format!("{prefix} {wrapped}"),
         None => wrapped,
@@ -198,7 +255,7 @@ fn render_output(
                 relocated: landing.relocated,
                 window: WindowJson::of(landing),
             };
-            println!("{}", serde_json::to_string(&output)?);
+            println!("{}", spawn_json(&output, &landing.pane_id)?);
         }
         Format::Raw => println!("{}", landing.pane_id),
     }

@@ -12,634 +12,15 @@
 //! and `TMUX_PANE` naming the private server and a pane the harness owns, or
 //! outside tmux, with both removed.
 
-use std::io::Read;
+#[path = "harness/mod.rs"]
+mod harness;
+
+#[allow(unused_imports)]
+use harness::*;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
-
-const BIN: &str = env!("CARGO_BIN_EXE_tmux-tools");
-
-/// Serializes the integration suite. Hold this guard for the lifetime of a
-/// test to keep things deterministic under default `cargo test`.
-fn serial_guard() -> MutexGuard<'static, ()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner())
-}
-
-#[derive(Debug)]
-struct CmdOutput {
-    status: i32,
-    stdout: String,
-    stderr: String,
-}
-
-impl CmdOutput {
-    fn assert_success(&self, ctx: &str) {
-        assert_eq!(
-            self.status, 0,
-            "{ctx}: expected exit 0, got {}\n--- stdout ---\n{}\n--- stderr ---\n{}",
-            self.status, self.stdout, self.stderr
-        );
-    }
-}
-
-/// Wait for a spawned child, then collect its captured stdout/stderr.
-fn wait_for_child(mut child: std::process::Child, label: &str, timeout: Duration) -> CmdOutput {
-    let started = Instant::now();
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                let mut stdout = String::new();
-                let mut stderr = String::new();
-                if let Some(mut s) = child.stdout.take() {
-                    let _ = s.read_to_string(&mut stdout);
-                }
-                if let Some(mut s) = child.stderr.take() {
-                    let _ = s.read_to_string(&mut stderr);
-                }
-                return CmdOutput {
-                    status: status.code().unwrap_or(-1),
-                    stdout,
-                    stderr,
-                };
-            }
-            Ok(None) => {
-                if started.elapsed() > timeout {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    panic!("{label} timed out after {timeout:?}");
-                }
-                thread::sleep(Duration::from_millis(50));
-            }
-            Err(e) => panic!("error waiting for {label}: {e}"),
-        }
-    }
-}
-
-/// Width and height of every harness server's first window.
-const SERVER_WIDTH: &str = "280";
-const SERVER_HEIGHT: &str = "82";
-
-/// The session every harness server starts with. Its single pane is the pane the
-/// harness owns: in inside-tmux mode the CLI runs with `TMUX_PANE` pointing at it.
-const HARNESS_SESSION: &str = "isolated-root";
-
-/// How the CLI under test sees tmux.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum CliMode {
-    /// `TMUX` is the private server's socket triple and `TMUX_PANE` is the harness
-    /// pane, so the CLI takes its inside-tmux branch against the private server.
-    InsideTmux,
-    /// `TMUX` and `TMUX_PANE` are removed, so the CLI takes its outside-tmux branch.
-    /// A `tmux` wrapper on the CLI's `PATH` pins every tmux call to the private
-    /// server's `-L` label.
-    OutsideTmux,
-}
-
-/// Per-invocation additions to the environment the harness gives the CLI.
-#[derive(Default)]
-struct CliOptions<'a> {
-    /// `XDG_CONFIG_HOME`, to inject an agent registry.
-    xdg: Option<&'a std::path::Path>,
-    /// A directory prepended to `PATH`, to interpose a fake `tmux`.
-    path_prefix: Option<&'a std::path::Path>,
-    /// Wait limit for the CLI process (default 60s).
-    timeout: Option<Duration>,
-    /// Inside-tmux mode only: remove `TMUX_PANE` and point `TMUX` at this session
-    /// of the private server, for a test whose subject is resolution without
-    /// `TMUX_PANE`.
-    caller_session_without_pane: Option<&'a str>,
-    /// The CLI's working directory (default: the test process's own).
-    cwd: Option<&'a std::path::Path>,
-    /// Inside-tmux mode only: point `TMUX_PANE` at this pane of the private server
-    /// and `TMUX` at its session, for a test whose calling pane is not the harness
-    /// pane.
-    caller_pane: Option<&'a str>,
-}
-
-/// Per-process counter for `tt-tests-<pid>-<n>` server labels.
-static NEXT_SERVER: AtomicUsize = AtomicUsize::new(0);
-
-/// A test-owned, config-isolated tmux server. Every integration test that talks to
-/// tmux holds exactly one, and every `tmux` or CLI call the test makes against a
-/// server goes through it.
-///
-/// - The server runs on its own socket, `-L tt-tests-<pid>-<n>`, started with
-///   `-f /dev/null` (no user configuration) and a first window of 280x82.
-/// - Its `TMUX_TMPDIR` is `<tmp>/tt-tests-<pid>-<n>` (`<tmp>` is `/tmp`, or the OS
-///   temp dir when `/tmp` is absent), and every tmux and CLI call runs with it.
-/// - Direct `tmux` calls run with `TMUX` and `TMUX_PANE` removed and the explicit
-///   label; CLI calls get the environment of the server's [`CliMode`].
-/// - `Drop` kills the server and removes its `TMUX_TMPDIR` only once the server no
-///   longer answers `has-session`. A `<tmp>/tt-tests-*` directory left after a run
-///   therefore names a server that may have leaked (socket label and `TMUX_TMPDIR`).
-///
-/// The struct is built before the first fallible step, so a failed startup still
-/// tears the server and directory down. It never touches the default or current
-/// server.
-struct IsolatedTmuxServer {
-    label: String,
-    tmpdir: std::path::PathBuf,
-    bin_dir: std::path::PathBuf,
-    mode: CliMode,
-    socket_path: String,
-    server_pid: String,
-    session_id: String,
-    pane: String,
-}
-
-#[cfg_attr(not(feature = "test-fixtures"), allow(dead_code))]
-impl IsolatedTmuxServer {
-    /// A private server whose CLI calls run inside tmux: `TMUX` names this server
-    /// and `TMUX_PANE` the harness pane.
-    fn start_inside() -> Self {
-        Self::start(CliMode::InsideTmux)
-    }
-
-    /// A private server whose CLI calls run outside tmux: `TMUX` and `TMUX_PANE` are
-    /// removed and a `PATH` wrapper pins tmux to this server.
-    fn start_outside() -> Self {
-        Self::start(CliMode::OutsideTmux)
-    }
-
-    fn start(mode: CliMode) -> Self {
-        let n = NEXT_SERVER.fetch_add(1, Ordering::SeqCst);
-        let label = format!("tt-tests-{}-{n}", std::process::id());
-        // A short base keeps the derived unix socket path under the OS limit (macOS's
-        // per-user temp dir plus `tmux-<uid>/<label>` can exceed it).
-        let base = std::path::Path::new("/tmp");
-        let base = if base.is_dir() {
-            base.to_path_buf()
-        } else {
-            std::env::temp_dir()
-        };
-        let tmpdir = base.join(&label);
-        let bin_dir = tmpdir.join("bin");
-
-        // Build the guard *before* the first fallible operation: if creating the temp
-        // dir or starting the server fails, `Drop` still kills the endpoint and removes
-        // the temp dir.
-        let mut server = Self {
-            label,
-            tmpdir,
-            bin_dir,
-            mode,
-            socket_path: String::new(),
-            server_pid: String::new(),
-            session_id: String::new(),
-            pane: String::new(),
-        };
-        std::fs::create_dir_all(&server.tmpdir).unwrap();
-        if mode == CliMode::OutsideTmux {
-            server.install_wrapper();
-        }
-        server.start_server();
-        server.read_context();
-        server
-    }
-
-    fn start_server(&self) {
-        let started = self.tmux(&[
-            "-f",
-            "/dev/null",
-            "new-session",
-            "-d",
-            "-s",
-            HARNESS_SESSION,
-            "-x",
-            SERVER_WIDTH,
-            "-y",
-            SERVER_HEIGHT,
-            "sleep",
-            "86400",
-        ]);
-        started.assert_success("start isolated tmux server");
-    }
-
-    fn read_context(&mut self) {
-        let target = format!("={HARNESS_SESSION}:");
-        let out = self.tmux(&[
-            "display-message",
-            "-p",
-            "-t",
-            &target,
-            "#{socket_path}\t#{pid}\t#{session_id}\t#{pane_id}",
-        ]);
-        out.assert_success("read isolated server context");
-        let fields: Vec<&str> = out.stdout.trim_end().split('\t').collect();
-        assert_eq!(
-            fields.len(),
-            4,
-            "unexpected server context: {:?}",
-            out.stdout
-        );
-        self.socket_path = fields[0].to_owned();
-        self.server_pid = fields[1].to_owned();
-        self.session_id = fields[2].trim_start_matches('$').to_owned();
-        self.pane = fields[3].to_owned();
-    }
-
-    /// The `-L` socket label, `tt-tests-<pid>-<n>`.
-    fn label(&self) -> &str {
-        &self.label
-    }
-
-    /// The server's `TMUX_TMPDIR`, `<tmp>/tt-tests-<pid>-<n>`.
-    fn tmpdir(&self) -> &std::path::Path {
-        &self.tmpdir
-    }
-
-    /// The server process id.
-    fn server_pid(&self) -> &str {
-        &self.server_pid
-    }
-
-    /// The pane the harness owns; the CLI's `TMUX_PANE` in inside-tmux mode.
-    fn pane(&self) -> &str {
-        &self.pane
-    }
-
-    /// The `TMUX` value naming this server and the harness session.
-    fn tmux_env(&self) -> String {
-        format!(
-            "{},{},{}",
-            self.socket_path, self.server_pid, self.session_id
-        )
-    }
-
-    /// The `TMUX` value naming this server and `session` (a session or pane target).
-    fn tmux_env_for_session(&self, session: &str) -> String {
-        let out = self.tmux(&["display-message", "-p", "-t", session, "#{session_id}"]);
-        out.assert_success("query session id");
-        format!(
-            "{},{},{}",
-            self.socket_path,
-            self.server_pid,
-            out.stdout.trim().trim_start_matches('$')
-        )
-    }
-
-    /// A `tmux` wrapper on the CLI's `PATH` that pins every call to this endpoint, so the
-    /// CLI under test uses the same explicit `-L` label as setup and teardown.
-    fn install_wrapper(&self) {
-        self.write_wrapper(None);
-    }
-
-    /// Rewrite the wrapper to inject a caller `TMUX`/`TMUX_PANE` context into every tmux
-    /// subprocess (the CLI itself keeps them removed). This reproduces the inside-tmux
-    /// caller environment for the session-creation path without making the CLI take the
-    /// inside-tmux branch.
-    fn install_wrapper_with_context(&self, tmux: &str, tmux_pane: &str) {
-        self.write_wrapper(Some((tmux, tmux_pane)));
-    }
-
-    fn write_wrapper(&self, context: Option<(&str, &str)>) {
-        let wrapper = match context {
-            Some((tmux, tmux_pane)) => format!(
-                "#!/bin/sh\nTMUX='{tmux}' TMUX_PANE='{tmux_pane}' exec '{}' -L '{}' \"$@\"\n",
-                real_tmux_path(),
-                self.label
-            ),
-            None => format!(
-                "#!/bin/sh\nexec '{}' -L '{}' \"$@\"\n",
-                real_tmux_path(),
-                self.label
-            ),
-        };
-        self.install_wrapper_script(&wrapper);
-    }
-
-    /// Replace the wrapper with an arbitrary script, for a test that needs to inject a
-    /// specific tmux failure while still pinning to this endpoint. Outside-tmux mode
-    /// only: inside-tmux mode puts no wrapper on the CLI's `PATH`.
-    fn install_wrapper_script(&self, script: &str) {
-        use std::os::unix::fs::PermissionsExt;
-
-        assert_eq!(
-            self.mode,
-            CliMode::OutsideTmux,
-            "the PATH tmux wrapper exists only in outside-tmux mode"
-        );
-        std::fs::create_dir_all(&self.bin_dir).unwrap();
-        let path = self.bin_dir.join("tmux");
-        std::fs::write(&path, script).unwrap();
-        let mut permissions = std::fs::metadata(&path).unwrap().permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&path, permissions).unwrap();
-    }
-
-    /// A `tmux` command addressed to this server by label, with its `TMUX_TMPDIR` and
-    /// the ambient `TMUX`/`TMUX_PANE` removed.
-    fn tmux_command(&self, args: &[&str]) -> Command {
-        let mut command = Command::new("tmux");
-        command
-            .args(["-L", &self.label])
-            .args(args)
-            .env_remove("TMUX")
-            .env_remove("TMUX_PANE")
-            .env("TMUX_TMPDIR", &self.tmpdir);
-        command
-    }
-
-    /// Run one tmux command against this server.
-    fn tmux(&self, args: &[&str]) -> CmdOutput {
-        let out = self
-            .tmux_command(args)
-            .output()
-            .unwrap_or_else(|e| panic!("failed to spawn tmux {args:?}: {e}"));
-        CmdOutput {
-            status: out.status.code().unwrap_or(-1),
-            stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
-            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
-        }
-    }
-
-    /// `program` with the environment the harness gives the CLI: this server's
-    /// `TMUX_TMPDIR`, and `TMUX`/`TMUX_PANE` set (inside-tmux mode) or removed
-    /// (outside-tmux mode, with the pinning wrapper first on `PATH`).
-    fn command_with_cli_env(&self, program: &str, options: &CliOptions<'_>) -> Command {
-        let mut path_dirs: Vec<String> = Vec::new();
-        if let Some(prefix) = options.path_prefix {
-            path_dirs.push(prefix.display().to_string());
-        }
-        let mut command = Command::new(program);
-        command.env("TMUX_TMPDIR", &self.tmpdir);
-        match self.mode {
-            CliMode::InsideTmux => match (options.caller_session_without_pane, options.caller_pane)
-            {
-                (Some(_), Some(_)) => {
-                    panic!("caller_session_without_pane and caller_pane are exclusive")
-                }
-                (Some(session), None) => {
-                    command
-                        .env("TMUX", self.tmux_env_for_session(session))
-                        .env_remove("TMUX_PANE");
-                }
-                (None, Some(pane)) => {
-                    command
-                        .env("TMUX", self.tmux_env_for_session(pane))
-                        .env("TMUX_PANE", pane);
-                }
-                (None, None) => {
-                    command
-                        .env("TMUX", self.tmux_env())
-                        .env("TMUX_PANE", &self.pane);
-                }
-            },
-            CliMode::OutsideTmux => {
-                assert!(
-                    options.caller_session_without_pane.is_none(),
-                    "resolution without TMUX_PANE needs inside-tmux mode"
-                );
-                assert!(
-                    options.caller_pane.is_none(),
-                    "a calling pane needs inside-tmux mode"
-                );
-                path_dirs.push(self.bin_dir.display().to_string());
-                command.env_remove("TMUX").env_remove("TMUX_PANE");
-            }
-        }
-        path_dirs.push(std::env::var("PATH").unwrap_or_default());
-        command.env("PATH", path_dirs.join(":"));
-        if let Some(xdg) = options.xdg {
-            command.env("XDG_CONFIG_HOME", xdg);
-        }
-        if let Some(cwd) = options.cwd {
-            command.current_dir(cwd);
-        }
-        command
-    }
-
-    /// Run `program` with the environment the harness gives the CLI.
-    fn run_with_cli_env(&self, program: &str, args: &[&str]) -> CmdOutput {
-        let out = self
-            .command_with_cli_env(program, &CliOptions::default())
-            .args(args)
-            .output()
-            .unwrap_or_else(|e| panic!("failed to spawn {program} {args:?}: {e}"));
-        CmdOutput {
-            status: out.status.code().unwrap_or(-1),
-            stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
-            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
-        }
-    }
-
-    fn run_cli(&self, args: &[&str], options: CliOptions<'_>) -> CmdOutput {
-        let child = self
-            .command_with_cli_env(BIN, &options)
-            .args(args)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap_or_else(|e| panic!("failed to spawn {BIN} {args:?}: {e}"));
-        wait_for_child(
-            child,
-            &format!("{BIN} {args:?}"),
-            options.timeout.unwrap_or(Duration::from_secs(60)),
-        )
-    }
-
-    fn cli(&self, args: &[&str]) -> CmdOutput {
-        self.run_cli(args, CliOptions::default())
-    }
-
-    fn cli_with_timeout(&self, args: &[&str], timeout: Duration) -> CmdOutput {
-        self.run_cli(
-            args,
-            CliOptions {
-                timeout: Some(timeout),
-                ..CliOptions::default()
-            },
-        )
-    }
-
-    /// Run the CLI against this server with an injected agent registry.
-    fn cli_env(&self, args: &[&str], xdg: &std::path::Path) -> CmdOutput {
-        self.run_cli(
-            args,
-            CliOptions {
-                xdg: Some(xdg),
-                ..CliOptions::default()
-            },
-        )
-    }
-
-    /// Run the CLI with `dir` prepended to `PATH`, so a test can interpose a fake
-    /// `tmux` on the command's tmux calls.
-    fn cli_env_path(
-        &self,
-        args: &[&str],
-        xdg: &std::path::Path,
-        dir: &std::path::Path,
-    ) -> CmdOutput {
-        self.run_cli(
-            args,
-            CliOptions {
-                xdg: Some(xdg),
-                path_prefix: Some(dir),
-                ..CliOptions::default()
-            },
-        )
-    }
-
-    /// Run the CLI without `TMUX_PANE`, with `TMUX` naming `session` of this server.
-    fn cli_without_pane(&self, args: &[&str], session: &str, timeout: Duration) -> CmdOutput {
-        self.run_cli(
-            args,
-            CliOptions {
-                timeout: Some(timeout),
-                caller_session_without_pane: Some(session),
-                ..CliOptions::default()
-            },
-        )
-    }
-
-    /// Run the CLI with `pane` as the calling pane: `TMUX_PANE` is `pane` and `TMUX`
-    /// names its session. `xdg`, when given, injects an agent registry.
-    fn cli_from_pane(&self, args: &[&str], pane: &str, xdg: Option<&std::path::Path>) -> CmdOutput {
-        self.run_cli(
-            args,
-            CliOptions {
-                xdg,
-                caller_pane: Some(pane),
-                ..CliOptions::default()
-            },
-        )
-    }
-
-    /// A core-library `TmuxInvocation` addressed to this server: `-L <label>`, with
-    /// this server's `TMUX_TMPDIR` and the ambient `TMUX`/`TMUX_PANE` removed, as
-    /// [`Self::tmux_command`] runs tmux.
-    fn core_invocation(&self) -> tmux_tools_core::TmuxInvocation {
-        tmux_tools_core::TmuxInvocation {
-            prefix: vec![
-                "env".to_owned(),
-                "-u".to_owned(),
-                "TMUX".to_owned(),
-                "-u".to_owned(),
-                "TMUX_PANE".to_owned(),
-                format!("TMUX_TMPDIR={}", self.tmpdir.display()),
-            ],
-            socket: Some(self.label.clone()),
-            tmux_bin: "tmux".to_owned(),
-        }
-    }
-
-    /// Whether the server still answers `has-session`.
-    fn answers(&self) -> bool {
-        self.tmux_command(&["has-session"])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .map(|status| status.success())
-            .unwrap_or(false)
-    }
-}
-
-/// Whether a process with this pid exists.
-fn process_exists(pid: &str) -> bool {
-    !pid.is_empty()
-        && Command::new("kill")
-            .args(["-0", pid])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .map(|status| status.success())
-            .unwrap_or(false)
-}
-
-impl Drop for IsolatedTmuxServer {
-    fn drop(&mut self) {
-        let _ = self
-            .tmux_command(&["kill-server"])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
-        // Remove the directory only once the server is gone, so a server that
-        // survives teardown keeps its `<tmp>/tt-tests-*` directory as a leak marker.
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while self.answers() || process_exists(&self.server_pid) {
-            if Instant::now() > deadline {
-                eprintln!(
-                    "WARNING: tmux test server -L {} (pid {}) survived teardown; leaving \
-                     TMUX_TMPDIR {} in place",
-                    self.label,
-                    self.server_pid,
-                    self.tmpdir.display()
-                );
-                return;
-            }
-            thread::sleep(Duration::from_millis(20));
-        }
-        let _ = std::fs::remove_dir_all(&self.tmpdir);
-    }
-}
-
-/// The absolute path of the real tmux, so an interposed fake `tmux` can delegate
-/// every subcommand except the one under test.
-fn real_tmux_path() -> String {
-    let output = Command::new("sh")
-        .args(["-c", "command -v tmux"])
-        .output()
-        .expect("failed to resolve tmux");
-    assert!(output.status.success(), "tmux is not on PATH");
-    String::from_utf8(output.stdout)
-        .expect("tmux path is UTF-8")
-        .trim()
-        .to_owned()
-}
-
-/// Resolve a pane id by registered `@tt-name` using tmux directly. Returns
-/// `None` if no such pane exists.
-fn pane_id_by_name(server: &IsolatedTmuxServer, name: &str) -> Option<String> {
-    let out = server.tmux(&["list-panes", "-a", "-F", "#{pane_id}\t#{@tt-name}"]);
-    if out.status != 0 {
-        return None;
-    }
-    for line in out.stdout.lines() {
-        if let Some((pane, tt_name)) = line.split_once('\t') {
-            if tt_name == name {
-                return Some(pane.to_owned());
-            }
-        }
-    }
-    None
-}
-
-/// Wait until a child shell prompt is settled enough to accept commands. We
-/// simply poll for the named pane to exist *and* render at least one line of
-/// output (typically the bash prompt).
-fn wait_for_pane_ready(server: &IsolatedTmuxServer, name: &str, timeout: Duration) {
-    let started = Instant::now();
-    while started.elapsed() < timeout {
-        if let Some(pane) = pane_id_by_name(server, name) {
-            let cap = server.tmux(&["capture-pane", "-t", &pane, "-p"]);
-            if cap.status == 0 && !cap.stdout.trim().is_empty() {
-                return;
-            }
-        }
-        thread::sleep(Duration::from_millis(100));
-    }
-    panic!("pane {name} did not become ready within {timeout:?}");
-}
-
-// ---------------------------------------------------------------------------
-// The private-server harness itself.
-// ---------------------------------------------------------------------------
-
-/// `<tmp>` for harness servers: `/tmp`, or the OS temp dir when `/tmp` is absent.
-fn harness_tmp_base() -> std::path::PathBuf {
-    let tmp = std::path::Path::new("/tmp");
-    if tmp.is_dir() {
-        tmp.to_path_buf()
-    } else {
-        std::env::temp_dir()
-    }
-}
 
 /// Assert the server's label is `tt-tests-<pid>-<n>` and its `TMUX_TMPDIR` is
 /// `<tmp>/<label>`.
@@ -4961,6 +4342,14 @@ args = []
         refusal["one_submission_delivery"].as_str(),
         Some("refused"),
         "the JSON field must report the refusal; payload: {}",
+        json_out.stdout
+    );
+    assert_host_tmux(&refusal, "prompt refusal");
+    assert_single_host_key(&json_out.stdout, "prompt refusal");
+    assert_host_state_null(&refusal, "prompt refusal");
+    assert!(
+        refusal.get("submit").is_none(),
+        "a refusal submits nothing, so it must carry no submit: {}",
         json_out.stdout
     );
     assert!(
@@ -9468,7 +8857,12 @@ fn status_not_in_tmux_output_is_unchanged_and_loads_no_registry() {
     for (format, expected) in [
         ("concise", "not in tmux\n"),
         ("raw", "not in tmux\n"),
-        ("json", "{\n  \"in_tmux\": false\n}\n"),
+        // ISSUE-261107-0921-02 adds `host` and `host_state`, and PRD-261109-2223-01
+        // P6.3 adds `host_word`; nothing else changes.
+        (
+            "json",
+            "{\n  \"host\": \"tmux\",\n  \"in_tmux\": false,\n  \"host_state\": null,\n  \"host_word\": null\n}\n",
+        ),
     ] {
         let out = server.cli_env(&["status", "--format", format], broken.path());
         out.assert_success(&format!("status --format {format} outside tmux"));
@@ -10044,13 +9438,18 @@ fn tiled_launch_raw_output_is_exactly_the_pane_id() {
     );
 }
 
-/// Acceptance: the core `rebalance` operation retiles a ragged window and returns the
-/// geometry tmux reports for it.
+/// Acceptance: the `rebalance` operation retiles a ragged window and returns the
+/// geometry tmux reports for it. The Host port is tested only through the CLI binary,
+/// so the window is marked and owned for the verb's window guard.
 #[test]
 fn core_rebalance_retiles_a_ragged_window_and_returns_its_measured_geometry() {
     let _serial = serial_guard();
     let server = IsolatedTmuxServer::start_inside();
     let window = window_of(&server, server.pane());
+    register_name_and_cwd(&server, server.pane(), "core-rebalance", &harness_cwd());
+    server
+        .tmux(&["set-option", "-w", "-t", &window, TILED_MARKER, "1"])
+        .assert_success("mark the window tiled");
     for split in [["-h", "70"], ["-h", "70"], ["-v", "20"]] {
         server
             .tmux(&[
@@ -10068,10 +9467,8 @@ fn core_rebalance_retiles_a_ragged_window_and_returns_its_measured_geometry() {
     }
     let ragged = window_rects(&server, &window);
 
-    let geometry = tmux_tools_core::with_invocation(server.core_invocation(), || {
-        tmux_tools_core::layout::rebalance(&window)
-    })
-    .expect("rebalance must succeed");
+    let out = rebalance_cli(&server, &window, "json");
+    let geometry = json_payload(&out, "rebalance must succeed");
 
     assert_ne!(
         window_rects(&server, &window),
@@ -10082,14 +9479,17 @@ fn core_rebalance_retiles_a_ragged_window_and_returns_its_measured_geometry() {
     let (measured_window, cols, rows) = tmux_landing(&server, server.pane());
     assert_eq!(
         (
-            geometry.window_id.clone(),
-            u64::from(geometry.min_pane_cols()),
-            u64::from(geometry.min_pane_rows())
+            geometry["window_id"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned(),
+            geometry["min_pane_cols"].as_u64().unwrap_or_default(),
+            geometry["min_pane_rows"].as_u64().unwrap_or_default()
         ),
         (measured_window, cols, rows),
         "rebalance must return the window id and minima tmux reports"
     );
-    assert_eq!(geometry.panes.len(), 4);
+    assert_eq!(window_rects(&server, &window).len(), 4);
 }
 
 /// Acceptance: `launch --help` and `spawn-agent --help` list `tile` and no longer
@@ -10879,7 +10279,10 @@ fn retiling_kill_output_is_unchanged_in_every_format() {
 
         let expected = match format {
             "concise" => format!("killed pane={pane} name={name}\n"),
-            "json" => format!("{{\"pane_id\":\"{pane}\",\"name\":\"{name}\",\"agent\":null}}\n"),
+            // ISSUE-261107-0921-02 adds `host`; nothing else changes.
+            "json" => format!(
+                "{{\"host\":\"tmux\",\"pane_id\":\"{pane}\",\"name\":\"{name}\",\"agent\":null}}\n"
+            ),
             _ => format!("{pane}\n"),
         };
         assert_eq!(out.stdout, expected, "kill --format {format} stdout");
@@ -10934,14 +10337,15 @@ fn kill_denials_in_a_marked_owned_window_are_unchanged_and_touch_nothing() {
     );
 }
 
-/// The core window guard names which guard failed: the marker, or ownership.
+/// The core window guard names which guard failed: the marker, or ownership. The Host
+/// port is tested only through the CLI binary, so the guard is read through
+/// `rebalance`: it succeeds when the guard holds and its refusal names the failed guard.
 #[test]
 fn core_window_guard_reports_which_guard_failed() {
-    use tmux_tools_core::layout::{window_guard, WindowGuard};
+    use tmux_tools_core::layout::WindowGuard;
 
     let _serial = serial_guard();
     let server = IsolatedTmuxServer::start_inside();
-    let cwd = harness_cwd();
     let mut one_owned = vec![FixturePane::Unregistered; 3];
     one_owned[2] = FixturePane::Owned;
     let cases = [
@@ -10965,10 +10369,16 @@ fn core_window_guard_reports_which_guard_failed() {
     ];
     for (fixture, expected) in cases {
         for target in [&fixture.window, &fixture.panes[0]] {
-            let guard = tmux_tools_core::with_invocation(server.core_invocation(), || {
-                window_guard(target, Some(&cwd))
-            })
-            .expect("the window guard must read the window");
+            let out = rebalance_cli(&server, target, "concise");
+            let guard = if out.status == 0 {
+                WindowGuard::Holds
+            } else if out.stderr.contains(": layout intent: ") {
+                WindowGuard::MarkerAbsent
+            } else if out.stderr.contains(": ownership: ") {
+                WindowGuard::NoOwnedPane
+            } else {
+                panic!("the window guard must read the window: {out:?}")
+            };
             assert_eq!(guard, expected, "window guard for {target}");
         }
     }
@@ -12366,4 +11776,1635 @@ fn rebalance_reports_not_below_floor_when_the_tiled_agent_pane_meets_its_surface
     );
 
     assert_rebalance_verdict(&server, &fixture, false);
+}
+
+// ---------------------------------------------------------------------------
+// ISSUE-261107-0921-02 — the `self` and `notify` verbs, exit 3 for an optional verb
+// or option a host lacks, and the `host`, `host_state` and `submit` JSON fields, on
+// tmux. A test-only capability override (`--features test-fixtures`) sets tmux
+// capabilities false for one invocation.
+// ---------------------------------------------------------------------------
+
+/// The test-only environment variable that sets the named tmux capabilities false.
+#[cfg(feature = "test-fixtures")]
+const CAPABILITIES_OFF: &str = "TMUX_TOOLS_TEST_CAPABILITIES_OFF";
+
+/// Run the CLI inside tmux with `env` added to its environment.
+fn cli_with_env(server: &IsolatedTmuxServer, args: &[&str], env: &[(&str, &str)]) -> CmdOutput {
+    server.run_cli(
+        args,
+        CliOptions {
+            env,
+            ..CliOptions::default()
+        },
+    )
+}
+
+/// Acceptance: `self --format json` in a pane `launch --name` created reports it driven,
+/// with its name and a null agent, as one exact JSON object.
+#[test]
+fn self_in_a_launched_pane_reports_it_driven_with_its_name() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    let launched = server.cli(&launch_args("selfie", &[]));
+    let pane = launched_pane_id(&launched, "launch --name selfie");
+
+    let out = server.cli_from_pane(&["self", "--format", "json"], &pane, None);
+
+    out.assert_success("self --format json in a launched pane");
+    assert_eq!(
+        out.stdout.trim(),
+        r#"{"host":"tmux","driven":true,"name":"selfie","agent":null,"team":null,"role":null,"parent":null}"#
+    );
+}
+
+/// Acceptance: `self --format json` in a pane `spawn-agent` created reports its agent.
+#[cfg(feature = "test-fixtures")]
+#[test]
+fn self_in_a_spawned_agent_pane_reports_its_name_and_agent() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    let config = fake_tui_agent_config();
+    let spawned = server.cli_env(
+        &[
+            "spawn-agent",
+            "tt-fake-tui",
+            "--bare",
+            "--name",
+            "self-agent",
+            "--format",
+            "json",
+        ],
+        config.xdg(),
+    );
+    let pane = launched_pane_id(&spawned, "spawn-agent --name self-agent");
+
+    let out = server.cli_from_pane(&["self", "--format", "json"], &pane, None);
+
+    out.assert_success("self --format json in a spawned pane");
+    assert_eq!(
+        out.stdout.trim(),
+        r#"{"host":"tmux","driven":true,"name":"self-agent","agent":"tt-fake-tui","team":null,"role":null,"parent":null}"#
+    );
+}
+
+/// Acceptance: in an unregistered pane `self` reports `driven: false` and `name: null`.
+#[test]
+fn self_in_an_unregistered_pane_reports_it_not_driven() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+
+    let out = server.cli(&["self", "--format", "json"]);
+
+    out.assert_success("self --format json in the unregistered harness pane");
+    assert_eq!(
+        out.stdout.trim(),
+        r#"{"host":"tmux","driven":false,"name":null,"agent":null,"team":null,"role":null,"parent":null}"#
+    );
+}
+
+/// Acceptance: without `$TMUX`, `self` reports `host: "tmux", driven: false`.
+#[test]
+fn self_outside_tmux_reports_host_tmux_not_driven() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_outside();
+
+    let out = server.cli(&["self", "--format", "json"]);
+
+    out.assert_success("self --format json outside tmux");
+    assert_eq!(
+        out.stdout.trim(),
+        r#"{"host":"tmux","driven":false,"name":null,"agent":null,"team":null,"role":null,"parent":null}"#
+    );
+}
+
+/// The session of the notify cases' pane, which an [`AttachedClient`] shows.
+const NOTIFY_SESSION: &str = "notify-client";
+
+/// The name registered on the notify cases' pane.
+const NOTIFY_NAME: &str = "notify-pane";
+
+/// The bytes tmux writes to the client tty for `notify --title T --body B`.
+const NOTIFY_T_B: &[u8] = b"\x1b]777;notify;T;B\x07";
+
+/// The prefix of every OSC 777 notify sequence.
+const NOTIFY_PREFIX: &[u8] = b"]777;notify;";
+
+/// Per-process counter for client output files and sentinels.
+static NEXT_CLIENT: AtomicUsize = AtomicUsize::new(0);
+
+/// A tmux client attached to one session of an [`IsolatedTmuxServer`] through a pty
+/// that `script` records: every byte tmux writes to the client's tty lands in a file in
+/// the server's `TMUX_TMPDIR`. Dropping it ends the client.
+struct AttachedClient {
+    child: std::process::Child,
+    output: std::path::PathBuf,
+}
+
+impl AttachedClient {
+    /// Attach a client to `session` and wait until tmux lists it.
+    fn attach(server: &IsolatedTmuxServer, session: &str) -> Self {
+        let n = NEXT_CLIENT.fetch_add(1, Ordering::SeqCst);
+        let output = server.tmpdir().join(format!("client-{n}.bin"));
+        let target = format!("={session}");
+        let mut command = Command::new("script");
+        #[cfg(target_os = "macos")]
+        command
+            .arg("-q")
+            .arg("-F")
+            .arg(&output)
+            .arg(real_tmux_path())
+            .args(["-L", server.label(), "attach-session", "-t", &target]);
+        #[cfg(not(target_os = "macos"))]
+        command
+            .args(["-q", "-f", "-c"])
+            .arg(format!(
+                "'{}' -L '{}' attach-session -t '{target}'",
+                real_tmux_path(),
+                server.label()
+            ))
+            .arg(&output);
+        let child = command
+            .env("TERM", "xterm-256color")
+            .env("TMUX_TMPDIR", server.tmpdir())
+            .env_remove("TMUX")
+            .env_remove("TMUX_PANE")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn script for an attached client");
+        let client = Self { child, output };
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let clients = server.tmux(&["list-clients", "-t", &target, "-F", "#{client_tty}"]);
+            if clients.status == 0 && !clients.stdout.trim().is_empty() {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "a client must attach to {session}: {clients:?}"
+            );
+            thread::sleep(Duration::from_millis(50));
+        }
+        client
+    }
+
+    /// Every byte written to the client's tty so far.
+    fn bytes(&self) -> Vec<u8> {
+        std::fs::read(&self.output).unwrap_or_default()
+    }
+
+    /// Wait until the client's tty bytes contain `needle`; returns them.
+    fn wait_for(&self, needle: &[u8], ctx: &str) -> Vec<u8> {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let bytes = self.bytes();
+            if contains(&bytes, needle) {
+                return bytes;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "{ctx}: the client's tty never received {:?}; it holds {:?}",
+                String::from_utf8_lossy(needle),
+                String::from_utf8_lossy(&bytes)
+            );
+            thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    /// Write a plain-text sentinel to the tty of `pane` and wait until the client shows
+    /// it; returns the client's tty bytes. Bytes written to the pane's tty earlier have
+    /// been processed by tmux once the sentinel arrives.
+    fn after_sentinel(&self, server: &IsolatedTmuxServer, pane: &str) -> Vec<u8> {
+        let sentinel = format!("TT-SENTINEL-{}", NEXT_CLIENT.fetch_add(1, Ordering::SeqCst));
+        write_to_pane_tty(server, pane, format!("\r\n{sentinel}\r\n").as_bytes());
+        self.wait_for(sentinel.as_bytes(), "sentinel")
+    }
+}
+
+impl Drop for AttachedClient {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// Whether `haystack` contains `needle`.
+fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack
+        .windows(needle.len())
+        .any(|window| window == needle)
+}
+
+/// Write `bytes` to the tty of `pane`, as an application running in it would.
+fn write_to_pane_tty(server: &IsolatedTmuxServer, pane: &str, bytes: &[u8]) {
+    use std::io::Write;
+    let tty = tmux_format(server, pane, "#{pane_tty}");
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&tty)
+        .and_then(|mut file| file.write_all(bytes))
+        .unwrap_or_else(|e| panic!("write to the tty {tty} of {pane}: {e}"));
+}
+
+/// A detached session [`NOTIFY_SESSION`] whose one pane is registered as
+/// [`NOTIFY_NAME`] and has `allow-passthrough` set to `passthrough`; returns the pane.
+fn notify_pane(server: &IsolatedTmuxServer, passthrough: &str) -> String {
+    let created = server.tmux(&[
+        "new-session",
+        "-d",
+        "-s",
+        NOTIFY_SESSION,
+        "-x",
+        "80",
+        "-y",
+        "24",
+        "-P",
+        "-F",
+        "#{pane_id}",
+        "sleep",
+        "600",
+    ]);
+    created.assert_success("create the notify session");
+    let pane = created.stdout.trim().to_owned();
+    server
+        .tmux(&[
+            "set-option",
+            "-p",
+            "-t",
+            &pane,
+            "allow-passthrough",
+            passthrough,
+        ])
+        .assert_success("set allow-passthrough");
+    server
+        .tmux(&["set-option", "-p", "-t", &pane, "@tt-name", NOTIFY_NAME])
+        .assert_success("register the notify pane");
+    pane
+}
+
+/// `notify --title T --body B --target <NOTIFY_NAME>`.
+fn notify_t_b(server: &IsolatedTmuxServer, env: &[(&str, &str)]) -> CmdOutput {
+    cli_with_env(
+        server,
+        &[
+            "notify",
+            "--title",
+            "T",
+            "--body",
+            "B",
+            "--target",
+            NOTIFY_NAME,
+        ],
+        env,
+    )
+}
+
+/// Acceptance: with `allow-passthrough on` and the pane in the current window of an
+/// attached client, `notify` puts exactly `ESC ]777;notify;T;B BEL` on the client's
+/// tty — no other BEL — and exits 0.
+#[test]
+fn notify_with_passthrough_on_reaches_the_attached_client() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    let pane = notify_pane(&server, "on");
+    let client = AttachedClient::attach(&server, NOTIFY_SESSION);
+
+    let out = notify_t_b(&server, &[]);
+
+    out.assert_success("notify with allow-passthrough on");
+    assert_eq!(
+        out.stderr, "",
+        "a delivered notify prints nothing on stderr"
+    );
+    client.wait_for(NOTIFY_T_B, "notify with allow-passthrough on");
+    let bytes = client.after_sentinel(&server, &pane);
+    assert_eq!(
+        bytes.iter().filter(|byte| **byte == 0x07).count(),
+        1,
+        "the only BEL on the client's tty must end the notify sequence: {:?}",
+        String::from_utf8_lossy(&bytes)
+    );
+}
+
+/// Acceptance: with `allow-passthrough off`, the sequence goes to the pane's tty and
+/// tmux does not pass it to the client's tty.
+#[test]
+fn notify_with_passthrough_off_leaves_the_client_tty_without_the_sequence() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    let pane = notify_pane(&server, "off");
+    let client = AttachedClient::attach(&server, NOTIFY_SESSION);
+
+    let out = notify_t_b(&server, &[]);
+
+    out.assert_success("notify with allow-passthrough off");
+    let bytes = client.after_sentinel(&server, &pane);
+    assert!(
+        !contains(&bytes, NOTIFY_PREFIX),
+        "allow-passthrough off must keep the sequence off the client's tty: {:?}",
+        String::from_utf8_lossy(&bytes)
+    );
+}
+
+/// Acceptance: a pane whose session has no attached client is not delivered to.
+#[test]
+fn notify_without_an_attached_client_is_not_delivered() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    notify_pane(&server, "on");
+
+    let out = notify_t_b(&server, &[]);
+
+    out.assert_success("notify without an attached client");
+    assert_eq!(out.stderr.trim_end(), "notify: not delivered on tmux");
+}
+
+/// Acceptance: with the override setting `notify` false, nothing reaches the client and
+/// the verb reports it not delivered, with exit 0.
+#[cfg(feature = "test-fixtures")]
+#[test]
+fn notify_without_the_notify_capability_is_not_delivered() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    let pane = notify_pane(&server, "on");
+    let client = AttachedClient::attach(&server, NOTIFY_SESSION);
+
+    let out = notify_t_b(&server, &[(CAPABILITIES_OFF, "notify")]);
+
+    out.assert_success("notify with the notify capability off");
+    assert_eq!(out.stderr.trim_end(), "notify: not delivered on tmux");
+    let bytes = client.after_sentinel(&server, &pane);
+    assert!(
+        !contains(&bytes, NOTIFY_PREFIX),
+        "a host without notify must write no notify sequence: {:?}",
+        String::from_utf8_lossy(&bytes)
+    );
+}
+
+/// Acceptance: without `--target` and with `TMUX_PANE` unset, `notify` exits 1 and
+/// names `TMUX_PANE`.
+#[test]
+fn notify_without_target_or_tmux_pane_exits_1_naming_tmux_pane() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+
+    let out = server.cli_without_pane(
+        &["notify", "--title", "T", "--body", "B"],
+        HARNESS_SESSION,
+        Duration::from_secs(30),
+    );
+
+    assert_eq!(out.status, 1, "stderr: {}", out.stderr);
+    assert!(
+        out.stderr.contains("TMUX_PANE"),
+        "the error must name TMUX_PANE: {}",
+        out.stderr
+    );
+}
+
+/// Acceptance: without `--target`, `notify` run in a pane (`TMUX_PANE`) delivers for it.
+#[test]
+fn notify_without_target_delivers_for_the_calling_pane() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    let pane = notify_pane(&server, "on");
+    let client = AttachedClient::attach(&server, NOTIFY_SESSION);
+
+    let out = server.cli_from_pane(&["notify", "--title", "T", "--body", "B"], &pane, None);
+
+    out.assert_success("notify from the calling pane");
+    client.wait_for(NOTIFY_T_B, "notify from the calling pane");
+}
+
+/// Acceptance: `;` in the title becomes `,`, and control bytes leave the body.
+#[test]
+fn notify_sanitises_the_title_and_body() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    notify_pane(&server, "on");
+    let client = AttachedClient::attach(&server, NOTIFY_SESSION);
+
+    let out = server.cli(&[
+        "notify",
+        "--title",
+        "a;b",
+        "--body",
+        "x\x1by\x07z\x7f\x01w",
+        "--target",
+        NOTIFY_NAME,
+    ]);
+
+    out.assert_success("notify with a control-laden body");
+    client.wait_for(b"\x1b]777;notify;a,b;xyzw\x07", "sanitised notify");
+}
+
+/// Assert `out` is the exit 3 refusal `unsupported: <feature> on tmux`.
+#[cfg(feature = "test-fixtures")]
+fn assert_unsupported(out: &CmdOutput, feature: &str, ctx: &str) {
+    assert_eq!(
+        out.status, 3,
+        "{ctx}: expected exit 3\n--- stdout ---\n{}\n--- stderr ---\n{}",
+        out.stdout, out.stderr
+    );
+    assert_eq!(
+        out.stderr.trim_end(),
+        format!("unsupported: {feature} on tmux"),
+        "{ctx}: stderr"
+    );
+}
+
+/// Acceptance: with the override setting `rebalance` false, `rebalance` exits 3 naming
+/// itself and leaves the window's layout unchanged.
+#[cfg(feature = "test-fixtures")]
+#[test]
+fn rebalance_without_the_rebalance_capability_exits_3_and_leaves_the_window() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    let fixture = ragged_owned_marked(&server);
+    let before = window_rects(&server, &fixture.window);
+
+    let out = cli_with_env(
+        &server,
+        &["rebalance", "--target", &fixture.window, "--format", "json"],
+        &[(CAPABILITIES_OFF, "rebalance")],
+    );
+
+    assert_unsupported(&out, "rebalance", "rebalance without rebalance");
+    assert_eq!(
+        window_rects(&server, &fixture.window),
+        before,
+        "an unsupported rebalance must leave the window's layout unchanged"
+    );
+}
+
+/// Run `args` with the capability override `off` and assert exit 3 naming `feature`,
+/// with no pane created.
+#[cfg(feature = "test-fixtures")]
+fn assert_unsupported_placement(
+    server: &IsolatedTmuxServer,
+    args: &[&str],
+    xdg: Option<&std::path::Path>,
+    off: &str,
+    feature: &str,
+) {
+    let before = all_pane_ids(server);
+    let out = server.run_cli(
+        args,
+        CliOptions {
+            xdg,
+            env: &[(CAPABILITIES_OFF, off)],
+            ..CliOptions::default()
+        },
+    );
+    let ctx = format!("{args:?} without {off}");
+    assert_unsupported(&out, feature, &ctx);
+    assert_eq!(
+        all_pane_ids(server),
+        before,
+        "{ctx}: no pane may be created"
+    );
+}
+
+/// Acceptance: `launch --split tile` without `tile` and `launch --size` without `size`
+/// exit 3 and create no pane.
+#[cfg(feature = "test-fixtures")]
+#[test]
+fn launch_split_tile_and_size_without_their_capabilities_exit_3_without_a_pane() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+
+    assert_unsupported_placement(
+        &server,
+        &["launch", "--cmd", "sleep 600", "--split", "tile"],
+        None,
+        "tile",
+        "--split tile",
+    );
+    assert_unsupported_placement(
+        &server,
+        &["launch", "--cmd", "sleep 600", "--size", "30"],
+        None,
+        "size",
+        "--size",
+    );
+}
+
+/// Acceptance: `spawn-agent --split tile` without `tile` and `spawn-agent --size`
+/// without `size` exit 3 and create no pane.
+#[cfg(feature = "test-fixtures")]
+#[test]
+fn spawn_agent_split_tile_and_size_without_their_capabilities_exit_3_without_a_pane() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    let config = fake_tui_agent_config();
+
+    assert_unsupported_placement(
+        &server,
+        &["spawn-agent", "tt-fake-tui", "--bare", "--split", "tile"],
+        Some(config.xdg()),
+        "tile",
+        "--split tile",
+    );
+    assert_unsupported_placement(
+        &server,
+        &["spawn-agent", "tt-fake-tui", "--bare", "--size", "30"],
+        Some(config.xdg()),
+        "size",
+        "--size",
+    );
+}
+
+/// A new window whose one pane is registered from the harness cwd, without
+/// `@tt-tiled`; returns `(pane, window)`.
+#[cfg(feature = "test-fixtures")]
+fn owned_untiled_window(server: &IsolatedTmuxServer, name: &str) -> (String, String) {
+    let pane = new_window_pane(server);
+    register_name_and_cwd(server, &pane, name, &harness_cwd());
+    let window = window_of(server, &pane);
+    assert!(
+        !tiled_marker_present(server, &window),
+        "fixture: no @tt-tiled"
+    );
+    (pane, window)
+}
+
+/// A flagless `launch` run in `pane` with `env`.
+#[cfg(feature = "test-fixtures")]
+fn flagless_launch_from(
+    server: &IsolatedTmuxServer,
+    pane: &str,
+    env: &[(&str, &str)],
+) -> CmdOutput {
+    server.run_cli(
+        &["launch", "--cmd", "sleep 600", "--format", "json"],
+        CliOptions {
+            caller_pane: Some(pane),
+            env,
+            ..CliOptions::default()
+        },
+    )
+}
+
+/// Acceptance: a flagless `launch` in a window holding an owned pane retiles it and
+/// sets `@tt-tiled` with `tile`; without `tile` it exits 0 silently, does not retile,
+/// and sets no `@tt-tiled`.
+#[cfg(feature = "test-fixtures")]
+#[test]
+fn flagless_launch_skips_the_automatic_tile_without_the_tile_capability() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+
+    let (pane, window) = owned_untiled_window(&server, "tile-on");
+    let out = flagless_launch_from(&server, &pane, &[]);
+    out.assert_success("flagless launch with tile");
+    assert!(
+        tiled_marker_present(&server, &window),
+        "with tile the launch must set @tt-tiled"
+    );
+    assert_retiled(&server, &window, "flagless launch with tile");
+
+    let (pane, window) = owned_untiled_window(&server, "tile-off");
+    let out = flagless_launch_from(&server, &pane, &[(CAPABILITIES_OFF, "tile")]);
+    out.assert_success("flagless launch without tile");
+    assert_eq!(out.stderr, "", "skipping the tile prints nothing on stderr");
+    assert_eq!(
+        window_rects(&server, &window).len(),
+        2,
+        "the pane must land"
+    );
+    assert!(
+        !tiled_marker_present(&server, &window),
+        "without tile the window must keep no @tt-tiled"
+    );
+    assert_not_retiled(&server, &window, "flagless launch without tile");
+}
+
+/// Acceptance (P2.1, P2.2): without `tile`, `kill` in a marked, owned window closes the
+/// pane without retiling and leaves the Layout intent record as it was.
+#[cfg(feature = "test-fixtures")]
+#[test]
+fn kill_without_the_tile_capability_closes_the_pane_without_retiling() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    let fixture = tiled_fixture(&server, &owned_panes(5), true);
+    let pane = &fixture.panes[0];
+
+    let out = cli_with_env(
+        &server,
+        &["kill", "--target", pane],
+        &[(CAPABILITIES_OFF, "tile")],
+    );
+    out.assert_success("kill without tile");
+    assert!(
+        !all_pane_ids(&server).contains(pane),
+        "kill without tile must remove the pane"
+    );
+    assert!(
+        tiled_marker_present(&server, &fixture.window),
+        "kill without tile must not touch @tt-tiled"
+    );
+    assert_not_retiled(&server, &fixture.window, "kill without tile");
+}
+
+/// Acceptance (P2.1): without `tile`, `launch --split h` into a marked window writes no
+/// Layout intent: `@tt-tiled` stays set, where with `tile` it is cleared.
+#[cfg(feature = "test-fixtures")]
+#[test]
+fn split_launch_without_the_tile_capability_writes_no_layout_intent() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+
+    for (env, kept) in [(vec![], false), (vec![(CAPABILITIES_OFF, "tile")], true)] {
+        let fixture = tiled_fixture(&server, &owned_panes(2), true);
+        let out = server.run_cli(
+            &["launch", "--cmd", "sleep 600", "--split", "h"],
+            CliOptions {
+                caller_pane: Some(&fixture.panes[0]),
+                env: &env,
+                ..CliOptions::default()
+            },
+        );
+        out.assert_success(&format!("launch --split h with {env:?}"));
+        assert_eq!(
+            window_rects(&server, &fixture.window).len(),
+            3,
+            "{env:?}: the pane must land in the caller's window"
+        );
+        assert_eq!(
+            tiled_marker_present(&server, &fixture.window),
+            kept,
+            "{env:?}: @tt-tiled after launch --split h"
+        );
+    }
+}
+
+/// Assert `payload` (a JSON object) has `host: "tmux"`.
+fn assert_host_tmux(payload: &serde_json::Value, ctx: &str) {
+    assert_eq!(
+        payload.get("host").and_then(|value| value.as_str()),
+        Some("tmux"),
+        "{ctx}: the JSON object must carry host \"tmux\": {payload}"
+    );
+}
+
+/// Assert `payload` has a `host_state` key whose value is `null`.
+fn assert_host_state_null(payload: &serde_json::Value, ctx: &str) {
+    assert!(
+        payload
+            .get("host_state")
+            .is_some_and(|value| value.is_null()),
+        "{ctx}: the JSON object must carry host_state null: {payload}"
+    );
+}
+
+/// Assert raw JSON `stdout` names the `host` key exactly once: parsing into
+/// `serde_json::Value` keeps only the last of duplicate keys and would hide a repeat.
+fn assert_single_host_key(stdout: &str, ctx: &str) {
+    assert_eq!(
+        stdout.matches("\"host\":").count(),
+        1,
+        "{ctx}: the JSON object must carry exactly one host key: {stdout}"
+    );
+}
+
+/// The parsed JSON object of a successful `args` run, with exactly one `host` key.
+fn json_of(server: &IsolatedTmuxServer, args: &[&str], ctx: &str) -> serde_json::Value {
+    let out = server.cli(args);
+    let payload = json_payload(&out, ctx);
+    assert!(
+        payload.is_object(),
+        "{ctx}: expected a JSON object: {payload}"
+    );
+    assert_single_host_key(&out.stdout, ctx);
+    payload
+}
+
+/// Acceptance: every object result of a verb with `--format json` carries
+/// `host: "tmux"`; `status`, `wait-idle` and `prompt` carry `host_state: null`, and
+/// `prompt` carries `submit: "assumed"`.
+#[test]
+fn every_json_object_result_carries_host_and_the_waiting_verbs_host_state() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    let name = "json-host";
+
+    let launched = json_of(
+        &server,
+        &[
+            "launch",
+            "--cmd",
+            "bash --norc --noprofile",
+            "--name",
+            name,
+            "--bare",
+            "--format",
+            "json",
+        ],
+        "launch",
+    );
+    assert_host_tmux(&launched, "launch");
+    wait_for_pane_ready(&server, name, Duration::from_secs(5));
+
+    for (verb, args) in [
+        ("send", vec!["send", "--target", name, "true", "--enter"]),
+        ("capture", vec!["capture", "--target", name]),
+        ("capture --all", vec!["capture", "--target", name, "--all"]),
+        (
+            "execute",
+            vec!["execute", "--target", name, "true", "--timeout", "10"],
+        ),
+        (
+            "execute --no-wait",
+            vec!["execute", "--target", name, "true", "--no-wait"],
+        ),
+        ("escape", vec!["escape", "--target", name]),
+        ("send-enter", vec!["send-enter", "--target", name]),
+        ("interrupt", vec!["interrupt", "--target", name]),
+        ("self", vec!["self"]),
+    ] {
+        let mut args = args;
+        args.extend(["--format", "json"]);
+        assert_host_tmux(&json_of(&server, &args, verb), verb);
+    }
+
+    let status = json_of(
+        &server,
+        &["status", "--target", name, "--format", "json"],
+        "status",
+    );
+    assert_host_tmux(&status, "status");
+    assert_host_state_null(&status, "status");
+
+    let waited = json_of(
+        &server,
+        &[
+            "wait-idle",
+            "--target",
+            name,
+            "--idle-seconds",
+            "0.5",
+            "--timeout",
+            "15",
+            "--format",
+            "json",
+        ],
+        "wait-idle",
+    );
+    assert_host_tmux(&waited, "wait-idle");
+    assert_host_state_null(&waited, "wait-idle");
+
+    let prompted = json_of(
+        &server,
+        &[
+            "prompt",
+            "--target",
+            name,
+            "echo prompted",
+            "--idle-seconds",
+            "0.5",
+            "--timeout",
+            "15",
+            "--format",
+            "json",
+        ],
+        "prompt",
+    );
+    assert_host_tmux(&prompted, "prompt");
+    assert_host_state_null(&prompted, "prompt");
+    assert_eq!(
+        prompted.get("submit").and_then(|value| value.as_str()),
+        Some("assumed"),
+        "prompt without submit_confirmation must report submit \"assumed\": {prompted}"
+    );
+
+    // `rebalance` needs a marked window holding an owned pane.
+    let fixture = tiled_fixture(&server, &owned_panes(2), true);
+    let rebalanced = json_of(
+        &server,
+        &["rebalance", "--target", &fixture.window, "--format", "json"],
+        "rebalance",
+    );
+    assert_host_tmux(&rebalanced, "rebalance");
+
+    let killed = json_of(
+        &server,
+        &["kill", "--target", name, "--format", "json"],
+        "kill",
+    );
+    assert_host_tmux(&killed, "kill");
+}
+
+/// Acceptance: `status --format json` outside tmux without `--target` carries `host`
+/// and a null `host_state`.
+#[test]
+fn status_json_outside_tmux_carries_host_and_a_null_host_state() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_outside();
+
+    let status = json_of(
+        &server,
+        &["status", "--format", "json"],
+        "status outside tmux",
+    );
+
+    assert_host_tmux(&status, "status outside tmux");
+    assert_host_state_null(&status, "status outside tmux");
+}
+
+/// Acceptance: `spawn-agent --format json` carries `host`.
+#[cfg(feature = "test-fixtures")]
+#[test]
+fn spawn_agent_json_carries_host() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    let config = fake_tui_agent_config();
+
+    let out = server.cli_env(
+        &["spawn-agent", "tt-fake-tui", "--bare", "--format", "json"],
+        config.xdg(),
+    );
+
+    assert_host_tmux(&json_payload(&out, "spawn-agent"), "spawn-agent");
+}
+
+/// Acceptance: `list --format json` is a top-level array whose every row carries
+/// `host: "tmux"` and `host_state: null`; with no rows it prints `[]`.
+#[test]
+fn list_json_rows_carry_host_and_host_state_and_an_empty_list_is_an_empty_array() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+
+    let empty = server.cli(&["list", "--session", "no-such-session", "--format", "json"]);
+    empty.assert_success("list of a session without panes");
+    assert_eq!(empty.stdout.trim(), "[]");
+
+    server
+        .cli(&launch_args("listed-a", &[]))
+        .assert_success("launch listed-a");
+    server
+        .cli(&launch_args("listed-b", &[]))
+        .assert_success("launch listed-b");
+    let listed = server.cli(&["list", "--all", "--format", "json"]);
+    let rows = json_payload(&listed, "list --all");
+    let rows = rows
+        .as_array()
+        .expect("list JSON must be a top-level array");
+    assert!(rows.len() >= 3, "list --all must show every pane: {rows:?}");
+    for row in rows {
+        assert_host_tmux(row, "list row");
+        assert_host_state_null(row, "list row");
+    }
+}
+
+// --- The contract suite's live Orca run (P10.2), opt-in -------------------------------
+
+#[cfg(feature = "test-fixtures")]
+#[path = "contract/orca.rs"]
+mod orca_contract;
+
+// --- The Herdr backend (PRD-261109-2223-01 P8): fake `hc`, and the opt-in private core
+
+#[path = "contract/herdr.rs"]
+mod herdr_contract;
+
+// --- P3 host selection and the P4.1 name check, on tmux (ISSUE-261107-0921-03) -------
+
+/// Acceptance: on tmux, `launch --name <v>` and `spawn-agent <agent> --name <v>` with
+/// an invalid name exit 1 with stderr exactly `invalid name: <v>`, and create no pane;
+/// `--name A.b_c-9` is accepted.
+#[cfg(feature = "test-fixtures")]
+#[test]
+fn an_invalid_name_fails_both_spawning_verbs_on_tmux_without_a_pane() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    let config = fake_tui_agent_config();
+    let before = all_pane_ids(&server);
+
+    for name in ["a/b", "..", ".", "a b", ""] {
+        let launched = server.cli(&["launch", "--name", name, "--cmd", "sleep 30"]);
+        assert_eq!(launched.status, 1, "launch --name {name:?}: {launched:?}");
+        assert_eq!(
+            launched.stderr,
+            format!("invalid name: {name}\n"),
+            "launch --name {name:?}"
+        );
+
+        let spawned = server.cli_env(
+            &["spawn-agent", "tt-fake-tui", "--bare", "--name", name],
+            config.xdg(),
+        );
+        assert_eq!(
+            spawned.status, 1,
+            "spawn-agent --name {name:?}: {spawned:?}"
+        );
+        assert_eq!(
+            spawned.stderr,
+            format!("invalid name: {name}\n"),
+            "spawn-agent --name {name:?}"
+        );
+    }
+    assert_eq!(
+        all_pane_ids(&server),
+        before,
+        "an invalid name must create no pane"
+    );
+
+    server
+        .cli(&["launch", "--name", "A.b_c-9", "--cmd", "sleep 30"])
+        .assert_success("launch --name A.b_c-9");
+    assert!(pane_id_by_name(&server, "A.b_c-9").is_some());
+}
+
+/// Acceptance: `TMUX_TOOLS_HOST=foo` fails any verb with exit 1, and stderr names both
+/// valid hosts.
+#[test]
+fn an_unknown_tmux_tools_host_fails_every_verb_naming_tmux_and_orca() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_inside();
+    for args in [
+        vec!["list"],
+        vec!["self", "--format", "json"],
+        vec!["status"],
+        vec!["launch", "--cmd", "true"],
+    ] {
+        let out = server.run_cli(
+            &args,
+            CliOptions {
+                env: &[("TMUX_TOOLS_HOST", "foo")],
+                ..CliOptions::default()
+            },
+        );
+        assert_eq!(out.status, 1, "{args:?} with TMUX_TOOLS_HOST=foo: {out:?}");
+        assert!(
+            out.stderr.contains("tmux") && out.stderr.contains("orca"),
+            "{args:?}: stderr must name tmux and orca: {}",
+            out.stderr
+        );
+    }
+}
+
+/// Acceptance: `$TMUX` wins over `ORCA_TERMINAL_HANDLE`, and `TMUX_TOOLS_HOST=tmux`
+/// wins over `ORCA_TERMINAL_HANDLE` alone.
+#[test]
+fn tmux_is_selected_over_orca_by_tmux_and_by_the_override() {
+    let _serial = serial_guard();
+    let inside = IsolatedTmuxServer::start_inside();
+    let both = inside.run_cli(
+        &["self", "--format", "json"],
+        CliOptions {
+            env: &[("ORCA_TERMINAL_HANDLE", "term_decoy")],
+            ..CliOptions::default()
+        },
+    );
+    both.assert_success("self with $TMUX and ORCA_TERMINAL_HANDLE");
+    assert_eq!(json_payload(&both, "self")["host"], "tmux");
+
+    let outside = IsolatedTmuxServer::start_outside();
+    let overridden = outside.run_cli(
+        &["self", "--format", "json"],
+        CliOptions {
+            env: &[
+                ("TMUX_TOOLS_HOST", "tmux"),
+                ("ORCA_TERMINAL_HANDLE", "term_decoy"),
+            ],
+            ..CliOptions::default()
+        },
+    );
+    overridden.assert_success("self with TMUX_TOOLS_HOST=tmux and ORCA_TERMINAL_HANDLE");
+    assert_eq!(json_payload(&overridden, "self")["host"], "tmux");
+}
+
+/// Acceptance: with only `ORCA_TERMINAL_HANDLE` set and no reachable Orca runtime (no
+/// `orca` on `PATH`), `list` exits 1 naming `orca` and the selection source, and no
+/// tmux pane or session is created.
+#[test]
+fn an_unreachable_orca_fails_list_naming_the_selection_source_without_falling_back() {
+    let _serial = serial_guard();
+    let server = IsolatedTmuxServer::start_outside();
+    let sessions = || {
+        server
+            .tmux(&["list-sessions", "-F", "#{session_id}"])
+            .stdout
+    };
+    let before_sessions = sessions();
+    let before_panes = all_pane_ids(&server);
+    let state = tempfile_dir("orca-unreachable");
+
+    let out = server.run_cli(
+        &["list"],
+        CliOptions {
+            env: &[
+                ("ORCA_TERMINAL_HANDLE", "term_decoy"),
+                ("XDG_STATE_HOME", state.to_str().unwrap()),
+            ],
+            ..CliOptions::default()
+        },
+    );
+
+    assert_eq!(out.status, 1, "list with an unreachable Orca: {out:?}");
+    assert!(
+        out.stderr.contains("orca") && out.stderr.contains("ORCA_TERMINAL_HANDLE"),
+        "stderr must name orca and ORCA_TERMINAL_HANDLE: {}",
+        out.stderr
+    );
+    assert_eq!(
+        sessions(),
+        before_sessions,
+        "no tmux session may be created"
+    );
+    assert_eq!(
+        all_pane_ids(&server),
+        before_panes,
+        "no tmux pane may be created"
+    );
+    let _ = std::fs::remove_dir_all(&state);
+}
+
+/// A fresh empty directory under the harness temp base.
+fn tempfile_dir(label: &str) -> std::path::PathBuf {
+    let dir = harness_tmp_base().join(format!(
+        "tt-{label}-{}-{}",
+        std::process::id(),
+        NEXT_SERVER.fetch_add(1, Ordering::SeqCst)
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+// The acceptance that every child of the default suite runs without the host-selection
+// variables and a real `orca` is `test_child_env::child_processes_see_no_host_selection_variables_and_no_orca`,
+// which runs in every test executable that includes that module.
+
+// --- Orca regressions against a fake `orca` CLI (default run, no real Orca) ---------
+
+/// A stand-in `orca` CLI first on the CLI's `PATH`, its pane state, and the run's
+/// registry. No real Orca runtime is reached.
+struct FakeOrca {
+    dir: std::path::PathBuf,
+}
+
+const FAKE_ORCA: &str = include_str!("contract/fake_orca.py");
+const FAKE_RUNTIME: &str = "fake-runtime";
+
+impl FakeOrca {
+    fn start(label: &str) -> FakeOrca {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile_dir(label);
+        std::fs::create_dir_all(dir.join("bin")).unwrap();
+        std::fs::create_dir_all(dir.join("state")).unwrap();
+        std::fs::create_dir_all(dir.join("config")).unwrap();
+        std::fs::create_dir_all(dir.join("work")).unwrap();
+        let orca = dir.join("bin/orca");
+        std::fs::write(&orca, FAKE_ORCA).unwrap();
+        std::fs::set_permissions(&orca, std::fs::Permissions::from_mode(0o755)).unwrap();
+        FakeOrca { dir }
+    }
+
+    fn registry(&self) -> std::path::PathBuf {
+        self.dir.join("state/tmux-tools/orca").join(FAKE_RUNTIME)
+    }
+
+    fn record(&self, name: &str) -> Option<serde_json::Value> {
+        let bytes = std::fs::read(self.registry().join(format!("{name}.json"))).ok()?;
+        Some(serde_json::from_slice(&bytes).unwrap())
+    }
+
+    fn log(&self) -> Vec<Vec<String>> {
+        std::fs::read_to_string(self.dir.join("log.jsonl"))
+            .unwrap_or_default()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
+    }
+
+    fn open_handles(&self) -> Vec<String> {
+        let state: serde_json::Value = std::fs::read(self.dir.join("state.json"))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .unwrap_or(serde_json::json!({"terminals": []}));
+        state["terminals"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|terminal| terminal["handle"].as_str().unwrap().to_owned())
+            .collect()
+    }
+
+    /// Run the CLI on Orca (selected by `ORCA_TERMINAL_HANDLE`) with `env` added.
+    fn cli(&self, args: &[&str], env: &[(&str, &str)]) -> CmdOutput {
+        let _ = sanitize_child_environment;
+        let path = format!(
+            "{}:{}",
+            self.dir.join("bin").display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        let mut command = Command::new(BIN);
+        command
+            .args(args)
+            .current_dir(self.dir.join("work"))
+            .env_remove("TMUX")
+            .env_remove("TMUX_PANE")
+            .env("PATH", path)
+            .env("ORCA_TERMINAL_HANDLE", "term_caller")
+            .env("ORCA_WORKTREE_ID", "fake-worktree")
+            .env("XDG_STATE_HOME", self.dir.join("state"))
+            .env("XDG_CONFIG_HOME", self.dir.join("config"))
+            .env("FAKE_ORCA_STATE", self.dir.join("state.json"))
+            .env("FAKE_ORCA_LOG", self.dir.join("log.jsonl"));
+        for (key, value) in env {
+            command.env(key, value);
+        }
+        let child = command
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn tmux-tools");
+        wait_for_child(
+            child,
+            &format!("tmux-tools {args:?}"),
+            Duration::from_secs(30),
+        )
+    }
+}
+
+impl Drop for FakeOrca {
+    fn drop(&mut self) {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(self.registry(), std::fs::Permissions::from_mode(0o755));
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+/// P3.1: a present but empty `TMUX_TOOLS_HOST` is an invalid value; it never selects
+/// a host.
+#[test]
+fn an_empty_tmux_tools_host_fails_naming_tmux_and_orca() {
+    let fake = FakeOrca::start("orca-empty-host");
+    for args in [vec!["list"], vec!["self", "--format", "json"]] {
+        let out = fake.cli(&args, &[("TMUX_TOOLS_HOST", "")]);
+        assert_eq!(out.status, 1, "{args:?} with TMUX_TOOLS_HOST=\"\": {out:?}");
+        assert!(
+            out.stderr.contains("tmux") && out.stderr.contains("orca"),
+            "{args:?}: stderr must name tmux and orca: {}",
+            out.stderr
+        );
+    }
+    assert!(
+        fake.log().is_empty(),
+        "no orca call may run: {:?}",
+        fake.log()
+    );
+}
+
+/// P4.1, P9.12: a valid leading-dot name is spawned, listed, resolved as a Target, and
+/// killed with its record.
+#[test]
+fn a_leading_dot_name_works_through_spawn_list_target_and_kill_on_orca() {
+    let fake = FakeOrca::start("orca-dot-name");
+    fake.cli(&["launch", "--name", ".hidden", "--cmd", "sleep 30"], &[])
+        .assert_success("launch --name .hidden");
+    let handle = fake.record(".hidden").expect("the record of .hidden")["handle"]
+        .as_str()
+        .expect("the record holds the handle")
+        .to_owned();
+
+    let rows = json_payload(&fake.cli(&["list", "--format", "json"], &[]), "list");
+    let names: Vec<&str> = rows
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|row| row["name"].as_str())
+        .collect();
+    assert_eq!(names, vec![".hidden"], "list shows .hidden: {rows}");
+
+    let status = json_payload(
+        &fake.cli(&["status", "--target", ".hidden", "--format", "json"], &[]),
+        "status --target .hidden",
+    );
+    assert_eq!(status["pane_id"], handle.as_str(), "{status}");
+
+    fake.cli(&["kill", "--target", ".hidden"], &[])
+        .assert_success("kill --target .hidden");
+    assert!(fake.open_handles().is_empty(), "the pane is closed");
+    assert!(fake.record(".hidden").is_none(), "the record is deleted");
+}
+
+/// P4.4–P4.5: a record whose handle a concurrent spawn writes after the pane list was
+/// taken is never judged dead against that list.
+#[test]
+fn reconciliation_keeps_the_record_of_a_concurrently_spawned_pane() {
+    let fake = FakeOrca::start("orca-race");
+    let out = fake.cli(
+        &["list", "--format", "json"],
+        &[("FAKE_ORCA_ON_LIST_SPAWN", "c-race")],
+    );
+    out.assert_success("list during a concurrent spawn");
+    let record = fake
+        .record("c-race")
+        .expect("the concurrent spawn's record must survive the reconciliation");
+    let handle = record["handle"].as_str().unwrap().to_owned();
+    assert_eq!(fake.open_handles(), vec![handle.clone()]);
+
+    let rows = json_payload(&fake.cli(&["list", "--format", "json"], &[]), "list");
+    assert_eq!(rows[0]["name"], "c-race", "{rows}");
+    assert_eq!(rows[0]["status"], "running", "{rows}");
+    assert_eq!(rows[0]["pane"], handle.as_str(), "{rows}");
+}
+
+/// P3.4: an installed Orca CLI whose runtime is unreachable fails every verb naming
+/// the host and the selection source, whichever orca call comes first.
+#[test]
+fn an_unreachable_orca_runtime_names_the_host_and_the_selection_source() {
+    let fake = FakeOrca::start("orca-runtime-down");
+    for args in [
+        vec!["list"],
+        vec!["list", "--format", "json"],
+        vec!["status", "--format", "json"],
+        vec!["self", "--format", "json"],
+        vec!["capture", "--target", "term_x"],
+        vec!["send", "--target", "term_x", "hi"],
+        vec!["kill", "--target", "term_x", "--any"],
+        vec!["launch", "--name", "c-down", "--cmd", "sleep 30"],
+    ] {
+        let out = fake.cli(&args, &[("FAKE_ORCA_UNAVAILABLE", "1")]);
+        assert_eq!(out.status, 1, "{args:?} with the runtime down: {out:?}");
+        assert!(
+            out.stderr.contains("orca") && out.stderr.contains("ORCA_TERMINAL_HANDLE"),
+            "{args:?}: stderr must name orca and ORCA_TERMINAL_HANDLE: {}",
+            out.stderr
+        );
+    }
+}
+
+/// P4.4: when the handle cannot be written, the reservation is released only after
+/// the pane is closed; a failed close keeps it and reports the pane.
+#[test]
+fn a_failed_handle_write_releases_the_reservation_only_after_a_close() {
+    let fake = FakeOrca::start("orca-write-fails");
+    let kept = fake.cli(
+        &["launch", "--name", "c-keep", "--cmd", "sleep 30"],
+        &[
+            ("FAKE_ORCA_LOCK_REGISTRY", "1"),
+            ("FAKE_ORCA_CLOSE_FAIL", "1"),
+        ],
+    );
+    assert_eq!(kept.status, 1, "{kept:?}");
+    let handle = fake.open_handles().pop().expect("the pane stays open");
+    assert!(
+        kept.stderr.contains(&handle) && kept.stderr.contains("could not close"),
+        "stderr names the unresolved pane and the close failure: {}",
+        kept.stderr
+    );
+    let reservation = fake.record("c-keep").expect("the reservation stays");
+    assert!(reservation["handle"].is_null(), "{reservation}");
+
+    let closed = fake.cli(
+        &["launch", "--name", "c-close", "--cmd", "sleep 30"],
+        &[("FAKE_ORCA_LOCK_REGISTRY", "1")],
+    );
+    assert_eq!(closed.status, 1, "{closed:?}");
+    assert_eq!(fake.open_handles(), vec![handle], "the new pane is closed");
+    assert!(
+        fake.record("c-close").is_none(),
+        "its reservation is released"
+    );
+}
+
+/// `list --format json` on Orca reads `worktree ps` once and needs no `terminal show`
+/// for listed panes.
+#[test]
+fn list_json_on_orca_reads_worktree_ps_once() {
+    let fake = FakeOrca::start("orca-list-ps");
+    for name in ["c-one", "c-two", "c-three"] {
+        fake.cli(&["launch", "--name", name, "--cmd", "sleep 30"], &[])
+            .assert_success(&format!("launch {name}"));
+    }
+    let _ = std::fs::remove_file(fake.dir.join("log.jsonl"));
+    let rows = json_payload(&fake.cli(&["list", "--format", "json"], &[]), "list");
+    assert_eq!(rows.as_array().unwrap().len(), 3, "{rows}");
+    let log = fake.log();
+    let count = |path: &[&str]| {
+        log.iter()
+            .filter(|call| call.len() >= path.len() && call[..path.len()] == *path)
+            .count()
+    };
+    assert_eq!(count(&["worktree", "ps"]), 1, "{log:?}");
+    assert_eq!(count(&["terminal", "show"]), 0, "{log:?}");
+}
+
+impl FakeOrca {
+    fn write_agents_toml(&self, contents: &str) {
+        std::fs::create_dir_all(self.dir.join("config/tmux-tools")).unwrap();
+        std::fs::write(self.dir.join("config/tmux-tools/agents.toml"), contents).unwrap();
+    }
+
+    /// The `--command` of every `terminal create` and `terminal split` call.
+    fn pane_commands(&self) -> Vec<String> {
+        self.log()
+            .iter()
+            .filter(|call| {
+                call.len() >= 2
+                    && call[0] == "terminal"
+                    && (call[1] == "create" || call[1] == "split")
+            })
+            .filter_map(|call| {
+                let at = call.iter().position(|arg| arg == "--command")?;
+                call.get(at + 1).cloned()
+            })
+            .collect()
+    }
+}
+
+/// PRD-261108-0447-01 P9.1: on Orca, an agent whose binary basename is `claude` starts
+/// through the Launcher; `orca claude-teams` is never used (P9.3), and the Pane
+/// registration, `agent`, and Surface stay as before.
+#[test]
+fn spawn_agent_claude_on_orca_starts_claude_through_the_launcher() {
+    let fake = FakeOrca::start("orca-spawn-claude");
+    fake.cli(&["spawn-agent", "claude", "--name", "lead"], &[])
+        .assert_success("spawn-agent claude --name lead");
+
+    let tmux_tools = std::fs::canonicalize(BIN).unwrap();
+    let work = std::fs::canonicalize(fake.dir.join("work")).unwrap();
+    assert_eq!(
+        fake.pane_commands(),
+        vec![format!(
+            "cd -- '{}' && '{}' 'claude-teams' '--claude' 'claude' '--' '--settings' '{{\"env\":{{\"CLAUDE_CODE_NO_FLICKER\":\"0\"}}}}' '--permission-mode' 'plan'",
+            work.display(),
+            tmux_tools.display()
+        )],
+        "{:?}",
+        fake.log()
+    );
+    assert!(
+        !fake
+            .log()
+            .iter()
+            .any(|call| call.iter().any(|arg| arg == "claude-teams")),
+        "no orca claude-teams call: {:?}",
+        fake.log()
+    );
+
+    let rows = json_payload(&fake.cli(&["list", "--format", "json"], &[]), "list");
+    let rows = rows.as_array().unwrap();
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0]["name"], "lead", "{rows:?}");
+    assert_eq!(rows[0]["agent"], "claude", "{rows:?}");
+    let record = fake.record("lead").expect("the record of lead");
+    assert_eq!(record["surface"], "rich", "{record}");
+    assert_eq!(record["agent"], "claude", "{record}");
+}
+
+/// P9.1: the trigger is the binary basename, not the agent name; any other binary
+/// runs its own argv on Orca.
+#[test]
+fn spawn_agent_on_orca_keeps_the_pane_command_of_a_binary_not_named_claude() {
+    let fake = FakeOrca::start("orca-spawn-other");
+    fake.write_agents_toml(
+        r#"
+[claude]
+binary = "/opt/tools/claude-wrapper"
+
+[claude.access.default]
+args = ["--x"]
+"#,
+    );
+    fake.cli(&["spawn-agent", "claude", "--name", "lead"], &[])
+        .assert_success("spawn-agent claude with a wrapper binary");
+    let work = std::fs::canonicalize(fake.dir.join("work")).unwrap();
+    assert_eq!(
+        fake.pane_commands(),
+        vec![format!(
+            "cd -- '{}' && '/opt/tools/claude-wrapper' '--settings' '{{\"env\":{{\"CLAUDE_CODE_NO_FLICKER\":\"0\"}}}}' '--x'",
+            work.display()
+        )],
+        "{:?}",
+        fake.log()
+    );
+}
+
+/// Orca --cwd fix and Orca cwd default: an Orca pane's shell starts in the worktree
+/// root, not in the caller's cwd, so a relative `--cwd` is made absolute against the
+/// caller's cwd before the pane command `cd`s to it, as tmux resolves it. An absolute
+/// `--cwd` is kept. With no `--cwd`, `spawn-agent` and `launch` `cd` to the caller's
+/// directory, where tmux starts the pane.
+#[test]
+fn spawn_agent_on_orca_cds_to_a_relative_cwd_resolved_against_the_caller() {
+    let fake = FakeOrca::start("orca-spawn-cwd");
+    fake.write_agents_toml(
+        r#"
+[ttpwd]
+binary = "/opt/tools/pwd-agent"
+
+[ttpwd.access.default]
+args = []
+"#,
+    );
+    let work = std::fs::canonicalize(fake.dir.join("work")).unwrap();
+    std::fs::create_dir_all(work.join("sub dir")).unwrap();
+    fake.cli(
+        &["spawn-agent", "ttpwd", "--name", "rel", "--cwd", "sub dir"],
+        &[],
+    )
+    .assert_success("spawn-agent --cwd <relative>");
+    fake.cli(
+        &[
+            "spawn-agent",
+            "ttpwd",
+            "--name",
+            "abs",
+            "--cwd",
+            "/opt/elsewhere",
+        ],
+        &[],
+    )
+    .assert_success("spawn-agent --cwd <absolute>");
+    fake.cli(&["spawn-agent", "ttpwd", "--name", "none"], &[])
+        .assert_success("spawn-agent without --cwd");
+    // A logical $PWD through a symlink that names the caller's directory is kept, so
+    // the pane's `cd` resolves `..` against it as a tmux pane would.
+    let link = fake.dir.join("link");
+    std::os::unix::fs::symlink(&work, &link).unwrap();
+    let link_str = link.display().to_string();
+    fake.cli(
+        &["spawn-agent", "ttpwd", "--name", "logical", "--cwd", "../x"],
+        &[("PWD", link_str.as_str())],
+    )
+    .assert_success("spawn-agent --cwd ../x with a symlinked PWD");
+    fake.cli(
+        &["spawn-agent", "ttpwd", "--name", "logical-none"],
+        &[("PWD", link_str.as_str())],
+    )
+    .assert_success("spawn-agent without --cwd and a symlinked PWD");
+    fake.cli(&["launch", "--name", "l-none", "--cmd", "sleep 30"], &[])
+        .assert_success("launch");
+    fake.cli(
+        &["launch", "--name", "l-bare", "--cmd", "sleep 30", "--bare"],
+        &[],
+    )
+    .assert_success("launch --bare");
+
+    assert_eq!(
+        fake.pane_commands(),
+        vec![
+            format!(
+                "cd -- '{}' && '/opt/tools/pwd-agent'",
+                work.join("sub dir").display()
+            ),
+            "cd -- '/opt/elsewhere' && '/opt/tools/pwd-agent'".to_owned(),
+            format!("cd -- '{}' && '/opt/tools/pwd-agent'", work.display()),
+            format!("cd -- '{link_str}/../x' && '/opt/tools/pwd-agent'"),
+            format!("cd -- '{link_str}' && '/opt/tools/pwd-agent'"),
+            format!("cd -- '{}' && eval 'sleep 30'", work.display()),
+            format!("cd -- '{}' && eval 'exec sleep 30'", work.display()),
+        ],
+        "{:?}",
+        fake.log()
+    );
+}
+
+/// Orca cwd default: every part of a `launch --cmd` with a top-level `&` starts in the
+/// caller's directory under a POSIX `sh`, as on tmux; the `cd` is not moved into the
+/// background job.
+#[test]
+fn launch_on_orca_runs_a_backgrounded_cmd_in_the_caller_directory() {
+    let fake = FakeOrca::start("orca-launch-amp");
+    let work = std::fs::canonicalize(fake.dir.join("work")).unwrap();
+    fake.cli(
+        &[
+            "launch",
+            "--name",
+            "l-amp",
+            "--cmd",
+            "pwd -P > one.txt & pwd -P > two.txt",
+        ],
+        &[],
+    )
+    .assert_success("launch with a top-level &");
+    let command = fake.pane_commands().pop().expect("the pane command");
+    // Orca starts the pane's shell elsewhere (the worktree root); `/` stands in for it.
+    let out = Command::new("sh")
+        .args(["-c", &format!("{command}; wait")])
+        .current_dir("/")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    for file in ["one.txt", "two.txt"] {
+        assert_eq!(
+            std::fs::read_to_string(work.join(file))
+                .unwrap_or_default()
+                .trim(),
+            work.display().to_string(),
+            "{file} from {command}"
+        );
+    }
+}
+
+/// Lead decision of ISSUE-261108-2323-02: an `orca` call that exits 0 without a JSON
+/// answer is retried, at most 5 attempts in total (Orca cwd default release), before
+/// the existing error.
+#[test]
+fn list_on_orca_retries_an_empty_terminal_list_answer() {
+    let fake = FakeOrca::start("orca-empty-answer");
+    fake.cli(&["launch", "--name", "c-one", "--cmd", "sleep 30"], &[])
+        .assert_success("launch c-one");
+
+    let _ = std::fs::remove_file(fake.dir.join("log.jsonl"));
+    let rows = json_payload(
+        &fake.cli(
+            &["list", "--format", "json"],
+            &[("FAKE_ORCA_EMPTY_LISTS", "4")],
+        ),
+        "list after four empty answers",
+    );
+    assert_eq!(rows[0]["name"], "c-one", "{rows}");
+
+    let state = fake.dir.join("state.json");
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&state).unwrap()).unwrap();
+    value["empty_lists"] = serde_json::json!(0);
+    std::fs::write(&state, serde_json::to_vec(&value).unwrap()).unwrap();
+    let _ = std::fs::remove_file(fake.dir.join("log.jsonl"));
+    let out = fake.cli(
+        &["list", "--format", "json"],
+        &[("FAKE_ORCA_EMPTY_LISTS", "1000")],
+    );
+    assert_eq!(out.status, 1, "{out:?}");
+    assert!(
+        out.stderr
+            .contains("orca terminal list exited 0 without a JSON answer"),
+        "{}",
+        out.stderr
+    );
+    let lists = fake
+        .log()
+        .iter()
+        .filter(|call| call.len() >= 2 && call[0] == "terminal" && call[1] == "list")
+        .count();
+    assert_eq!(lists, 5, "at most 5 attempts: {:?}", fake.log());
+}
+
+/// PRD-261108-0447-01 P9.1/P9.2: the trigger is the binary basename, not the agent
+/// name; on tmux an agent whose binary basename is not `claude` runs its own argv.
+#[cfg(feature = "test-fixtures")]
+#[test]
+fn spawn_agent_on_tmux_keeps_the_pane_command_of_a_binary_not_named_claude() {
+    let _serial = serial_guard();
+
+    if Command::new("tmux").arg("-V").output().is_err() {
+        eprintln!("SKIP: tmux not on PATH");
+        return;
+    }
+
+    let server = IsolatedTmuxServer::start_inside();
+    let config = AgentsConfig::new();
+    std::fs::create_dir_all(config.xdg().join("bin")).unwrap();
+    let argv_file = config.xdg().join("argv.txt");
+    let claude = config.write_executable(
+        "bin/claude-wrapper",
+        &format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$0\" \"$@\" > '{}'\nexec sleep 30\n",
+            argv_file.display()
+        ),
+    );
+    config.write_agents_toml(&format!("[claude]\nbinary = \"{}\"\n", claude.display()));
+
+    let name = format!("tmux-lead-{}", std::process::id());
+    server
+        .cli_env(
+            &["spawn-agent", "claude", "--split", "v", "--name", &name],
+            config.xdg(),
+        )
+        .assert_success("spawn-agent claude with a wrapper binary on tmux");
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !argv_file.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "the wrapper binary never started"
+        );
+        thread::sleep(Duration::from_millis(50));
+    }
+    thread::sleep(Duration::from_millis(100));
+    assert_eq!(
+        std::fs::read_to_string(&argv_file).unwrap(),
+        format!(
+            "{}\n--settings\n{{\"env\":{{\"CLAUDE_CODE_NO_FLICKER\":\"0\"}}}}\n--permission-mode\nplan\n",
+            claude.display()
+        ),
+    );
+    let start = pane_option(&server, &name, "pane_start_command");
+    assert!(
+        start.starts_with(&format!(
+            "\"('{}' '--settings' '{{\\\"env\\\":{{\\\"CLAUDE_CODE_NO_FLICKER\\\":\\\"0\\\"}}}}' '--permission-mode' 'plan'); exec ",
+            claude.display()
+        )),
+        "{start}"
+    );
+    server
+        .cli(&["kill", "--target", &name])
+        .assert_success("kill the pane");
 }

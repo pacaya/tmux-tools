@@ -1,7 +1,12 @@
 [package]
 name = "tmux-tools-core"
-version = "0.3.0"
+version = "0.8.0"
 edition = "2021"
+
+[features]
+# Compiles the test-only capability override (`host::TEST_CAPABILITIES_OFF`). The
+# `tmux-tools` package's `test-fixtures` feature enables it; a normal build omits it.
+test-fixtures = []
 
 [dependencies]
 anyhow = "1"
@@ -13,6 +18,7 @@ strip-ansi-escapes = "0.2"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 toml = "0.8"
 dirs = "5"
+sha2 = "0.10"
 tokio = { version = "1", features = ["full"] }
 
 [target.'cfg(unix)'.dependencies]

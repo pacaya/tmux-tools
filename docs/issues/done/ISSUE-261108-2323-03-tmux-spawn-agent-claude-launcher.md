@@ -1,0 +1,117 @@
+---
+id: ISSUE-261108-2323-03
+kind: issue
+category: enhancement
+status: done
+claimed_by: implement-issue@agentmac
+claimed_at: 2026-11-09T16:06:30Z
+brief_contract: agent-brief.v3
+context: tmux-tools
+summary: on tmux, spawn-agent claude starts Claude through tmux-tools claude-teams, so a driven Leader's teammates are tmux-tools panes
+terms: [Pane registration, Surface, Keep-alive wrap, Team, Leader, Teammate pane, Launcher, Parent]
+contract:
+  schema: planning-contracts.record.v1
+  clauses:
+    - id: acceptance
+      heading: Agent Brief
+  references:
+    - relation: requires
+      repository: tmux-tools
+      record: PRD-261108-0447-01
+      clause: p8-output
+    - relation: requires
+      repository: tmux-tools
+      record: PRD-261108-0447-01
+      clause: p9-spawn-agent
+    - relation: requires
+      repository: tmux-tools
+      record: PRD-261108-0447-01
+      clause: p11-rollout
+    - relation: requires
+      repository: tmux-tools
+      record: PRD-261108-0447-01
+      clause: contracts
+    - relation: requires
+      repository: tmux-tools
+      record: PRD-261108-0447-01
+      clause: verification
+    - relation: requires
+      repository: tmux-tools
+      record: PRD-261107-0825-01
+      clause: p10-tests
+    - relation: requires
+      repository: claude
+      record: PRD-261108-0235-01
+      clause: p9-rollout
+    - relation: implementation_after
+      repository: tmux-tools
+      record: ISSUE-261108-2323-02
+    - relation: runtime_dependency
+      repository: claude
+      record: ISSUE-261109-0201-02
+    - relation: runtime_dependency
+      repository: claude
+      record: ISSUE-261109-0201-04
+---
+
+## Agent Brief
+
+**Outcome and scope:** Step 3 of `PRD-261108-0447-01` P11: on tmux, `spawn-agent claude --name lead` starts Claude through the Launcher, with the same outcome as on Orca: teammate `lead.tm1` with `team` and `parent: "lead"`, and `prompt`, `wait-idle`, and `kill` work on `lead`.
+
+**Required sources:** `tmux-tools:PRD-261108-0447-01` — P8.4, and P8.5 except its Orca live check (Leader verbs); P9.1, P9.2 (the pane command of P9.1, extended to tmux); P11.3, P11.4 (release conditions, minor bump); `## Contracts` item "Pane command of `spawn-agent claude` on Orca" (the same command on tmux by P9.2); `## Verification and release` items 4, 5 (tmux run). `tmux-tools:PRD-261107-0825-01` — P10.1, P10.4 (tmux contract suite, no leaked pane). `claude:PRD-261108-0235-01` — P9 rollout steps 2 (hooks) and 3 (text and scripts) (release condition).
+
+**Current observable:** On tmux, `spawn-agent claude --name lead` starts the profile's `claude` binary directly in the pane, so a teammate of that session is not a tmux-tools pane.
+
+**Required change:**
+- On tmux, for an Agent profile whose binary basename is `claude`, `spawn-agent` runs the pane command of P9.1 inside the normal tmux Keep-alive wrap. Pane registration, `agent`, and Surface stay as today.
+- Bump the minor version.
+- Approved contracts: `PRD-261108-0447-01` `## Contracts` — Pane command of `spawn-agent claude` on Orca, applied to tmux by P9.2.
+
+**Acceptance:**
+- [ ] Given the isolated tmux server and a fake `claude` that starts one teammate through the Shim, when `spawn-agent claude --name lead` runs, then the `lead` pane command is `<canonical tmux-tools path> claude-teams --claude <binary> -- <claude args>` inside the tmux Keep-alive wrap, where `<binary>` is the program and the args are those that `spawn-agent` started before this change, and `list --format json` shows `lead` with `agent: "claude"` and the same Surface that `spawn-agent claude --name lead` gave before this change, and `lead.tm1` with `team` and `parent: "lead"`.
+- [ ] On that Leader, `prompt --target lead` and `wait-idle --target lead` give the same result as for the same fake `claude` started without the Launcher; `kill --target lead` closes `lead` and removes its row from `list --format json`. The run closes `lead.tm1` itself and ends with no leaked pane.
+- [ ] Given a profile whose binary basename is not `claude`, the `spawn-agent` pane command is unchanged.
+
+**Verification and release:** The default `cargo test --workspace --features test-fixtures` run passes. Release only when the P11.3 conditions hold: step 2 (`ISSUE-261108-2323-02`) is released, and harness `PRD-261108-0235-01` rollout steps 2 (`claude:ISSUE-261109-0201-02`, hooks) and 3 (`claude:ISSUE-261109-0201-04`, text and scripts) are released. Rollback is reverting the release.
+
+**Out of scope:** Orca behavior (`ISSUE-261108-2323-02`); Launcher, Shim, and Team behavior (`ISSUE-261108-2323-01`); harness hook, skill, and `cl` alias changes (repository `claude`).
+
+## Context Pack — canonical at claim (2026-11-09T16:06:30Z)
+
+**Contract approval:** `review-20261109T160502Z` · canonical · revision check complete
+
+**Issue binding:** `tmux-tools:ISSUE-261108-2323-03` · revision `582ad713d3594e79bd309bc8728c1f978c5c723a` · sha256 `3a14cc11b7375e0fd5a0e47f52c28cfebbc5e6fbdf93d256a38987c23872359f` · `objects/3a14cc11b7375e0fd5a0e47f52c28cfebbc5e6fbdf93d256a38987c23872359f.md`
+
+**Required source objects:**
+- `claude:PRD-261108-0235-01#p9-rollout` · revision `6b2af70a54233220b6a389721c65d74690e851e7` · sha256 `d28505da2679649af7ca1fec3ffa56ff9e4a25f571f3c7af1ddc06fc0f9c0163` · `objects/d28505da2679649af7ca1fec3ffa56ff9e4a25f571f3c7af1ddc06fc0f9c0163.md`
+- `tmux-tools:PRD-261107-0825-01#p10-tests` · revision `582ad713d3594e79bd309bc8728c1f978c5c723a` · sha256 `a28eb660fd94942cad51db5869d5ba74757bff5b2ac3317f6e44699676aa3fcb` · `objects/a28eb660fd94942cad51db5869d5ba74757bff5b2ac3317f6e44699676aa3fcb.md`
+- `tmux-tools:PRD-261108-0447-01#contracts` · revision `582ad713d3594e79bd309bc8728c1f978c5c723a` · sha256 `241363a4efd4189d9f149e8f5d0f3844771647554109b145a8554dc26e37d12c` · `objects/241363a4efd4189d9f149e8f5d0f3844771647554109b145a8554dc26e37d12c.md`
+- `tmux-tools:PRD-261108-0447-01#p11-rollout` · revision `582ad713d3594e79bd309bc8728c1f978c5c723a` · sha256 `0b02e86d01691d885cc6a2bc74fb665fb56bb225bfef79e30a8fbf136bfa416f` · `objects/0b02e86d01691d885cc6a2bc74fb665fb56bb225bfef79e30a8fbf136bfa416f.md`
+- `tmux-tools:PRD-261108-0447-01#p8-output` · revision `582ad713d3594e79bd309bc8728c1f978c5c723a` · sha256 `02f668ee1a94c80c0a7b4728ebffec6a91308e700cdb1e50fe0857d4397eb97c` · `objects/02f668ee1a94c80c0a7b4728ebffec6a91308e700cdb1e50fe0857d4397eb97c.md`
+- `tmux-tools:PRD-261108-0447-01#p9-spawn-agent` · revision `582ad713d3594e79bd309bc8728c1f978c5c723a` · sha256 `491e059f74bb88b21be83ba2fcb07852f44d8dbb401da1357567f7e582075fc4` · `objects/491e059f74bb88b21be83ba2fcb07852f44d8dbb401da1357567f7e582075fc4.md`
+- `tmux-tools:PRD-261108-0447-01#verification` · revision `582ad713d3594e79bd309bc8728c1f978c5c723a` · sha256 `cdd232cbaf94d96badc6fd16204581849e9c8ba39c37ad685d7b70a573a032fa` · `objects/cdd232cbaf94d96badc6fd16204581849e9c8ba39c37ad685d7b70a573a032fa.md`
+
+**Bundle manifest:** `.planning-contracts/bundles/ISSUE-261108-2323-03/manifest.json`
+
+**Test seam:** `tmux-tools spawn-agent` on the isolated tmux server with a fake `claude` and the Shim (`pane_start_command`, `list --format json`, `prompt`, `wait-idle`, `kill`).
+
+## Code Review
+
+Review: `issue-261108-2323-03-code-review-20261109-163247.md` — Outcome: ACCEPTED
+
+Scope proposal (unfixed, OWNER: maintainer):
+- CODEX-1 — Leader registration race. On tmux, placement starts the pane command before `register()` writes `@tt-name` (`core/src/layout.rs`); on Orca the record handle is written after create (`core/src/host/orca.rs`). A Shim `split-window` inside that window registers the teammate as `team-<id>.tm<k>` with `parent: null`. Pre-existing on both hosts; this diff adds no new ordering. CHANGE: write the tmux registration in the same tmux command list as the split, and give the Shim a bounded re-read of the Leader registration while the Team is young (needed on Orca). OWNER: maintainer.
+
+## Resolution
+
+- Commit: `feat: on tmux, spawn-agent claude starts Claude through tmux-tools claude-teams, so a driven Leader's teammates are tmux-tools panes (ISSUE-261108-2323-03)`
+- Route: `claude — deepseek-suspended` (code-primary; Opus, effort medium) for the implementation and the one correction batch.
+- TDD: red-green at `spawn-agent` on the isolated tmux server with a fake `claude` and the Shim.
+- Review: Claude + Codex; 1 finding (L1 weak no-leak assertion) fixed in one correction batch and verified by both reviewers; CODEX-1 recorded as a maintainer scope proposal. Outcome ACCEPTED.
+- Suite: `cargo test --workspace --features test-fixtures` 488 passed, `cargo test --workspace` 355 passed, 0 failed.
+- Date: 2026-11-09
+
+## Triage Notes
+
+- 2026-11-09: dispatch readiness passed; `needs-triage` → `ready-for-agent`. `implementation_after` `ISSUE-261108-2323-02` is `done` (installed `tmux-tools` 0.6.2). Release conditions (P11.3) hold: harness `claude:ISSUE-261109-0201-02` and `-04` are `done`.
+- The existing test `spawn_agent_claude_on_tmux_runs_the_binary_directly` asserts the step-2 tmux behavior; this issue's first acceptance item replaces it.

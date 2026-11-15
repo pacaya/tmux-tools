@@ -386,6 +386,18 @@ fn join_reader(
 }
 
 fn command_for(user_args: &[&str]) -> Command {
+    // PRD-261108-0447-01 P3.4: inside a team on tmux, the real tmux of the Team record,
+    // by its absolute path and server socket; never `tmux` through `PATH`, never `$TMUX`.
+    if let Some(endpoint) = crate::team::tmux_endpoint() {
+        let mut command = Command::new(&endpoint.path);
+        command
+            .arg("-S")
+            .arg(&endpoint.socket)
+            .args(user_args)
+            .env_remove("TMUX")
+            .env_remove("TMUX_PANE");
+        return command;
+    }
     let invocation = resolve_invocation();
     let mut command = if invocation.prefix.is_empty() {
         Command::new(&invocation.tmux_bin)

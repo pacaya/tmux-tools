@@ -7,6 +7,12 @@
       "path": ".",
       "planning_roots": ["docs"],
       "external_planning_roots": []
+    },
+    {
+      "id": "claude",
+      "path": "../../ai/claude",
+      "planning_roots": ["docs"],
+      "external_planning_roots": []
     }
   ]
 }

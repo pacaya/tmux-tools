@@ -3,7 +3,7 @@ members = [".", "core"]
 
 [package]
 name = "tmux-tools"
-version = "0.3.0"
+version = "0.8.0"
 edition = "2021"
 
 [features]
@@ -11,7 +11,8 @@ edition = "2021"
 # a feature so a normal `cargo build` / `cargo install` never ships it. Run the
 # suite that exercises it with the documented test command
 # (`cargo test --workspace --features test-fixtures`).
-test-fixtures = []
+# It also compiles the core's test-only capability override.
+test-fixtures = ["tmux-tools-core/test-fixtures"]
 # Builds `tt-vendor-smoke`, the manually-run P8 smoke that drives the live
 # claude/codex/dsh binaries. It never runs under `cargo test`; run it with
 # `cargo run --features vendor-smoke --bin tt-vendor-smoke`.
@@ -24,6 +25,11 @@ path = "src/main.rs"
 [[bin]]
 name = "tt-fake-tui"
 path = "src/bin/tt-fake-tui.rs"
+required-features = ["test-fixtures"]
+
+[[bin]]
+name = "tt-fixture"
+path = "src/bin/tt-fixture.rs"
 required-features = ["test-fixtures"]
 
 [[bin]]
@@ -42,6 +48,12 @@ xxhash-rust = { version = "0.8", features = ["xxh3"] }
 toml = "0.8"
 dirs = "5"
 tmux-tools-core = { path = "core" }
+libc = "0.2"
 
 [dev-dependencies]
 serde_json = "1"
+
+# The Launcher hashes the Claude binary (hundreds of MB) at every start; an
+# unoptimized SHA-256 makes a debug build take seconds for it.
+[profile.dev.package.sha2]
+opt-level = 3

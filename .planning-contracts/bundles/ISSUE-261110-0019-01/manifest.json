@@ -1,0 +1,73 @@
+{
+  "approval_id": "review-20261110T095509Z",
+  "approval_object": "approval.json",
+  "approval_sha256": "511d1aa50e47056a16f86cb32b66863942df36112a720c4f20903831f7365651",
+  "entries": [
+    {
+      "approved_revision": "a2d73d646b8a87fb2864caa3b7a017d8c7f42cdf",
+      "bytes": 10968,
+      "object": "objects/8eb1dcafc72ce4354b7c95d7b3fb6e8e4d83e5b48f4d5f65620ce7bf4f8abf9f.md",
+      "origin": {
+        "path": "docs/issues/ISSUE-261110-0019-01-claude-rich-classic-scroll.md",
+        "repository": "tmux-tools",
+        "revision": "ae18a0bd70cb9411fe2825309d90b33c57bb93f0"
+      },
+      "role": "issue",
+      "sha256": "8eb1dcafc72ce4354b7c95d7b3fb6e8e4d83e5b48f4d5f65620ce7bf4f8abf9f",
+      "target": "tmux-tools:ISSUE-261110-0019-01"
+    },
+    {
+      "approved_revision": "04b9a45e539824f0ea203998bc36e59af64396cd",
+      "bytes": 2047,
+      "object": "objects/3a975c52416451effe1e72d26d03992af00f4e9d32677dfde5847d3508784ccc.md",
+      "origin": {
+        "path": "docs/adr/260919-0146-01-agent-surfaces.md",
+        "repository": "tmux-tools",
+        "revision": "ae18a0bd70cb9411fe2825309d90b33c57bb93f0"
+      },
+      "role": "source",
+      "sha256": "3a975c52416451effe1e72d26d03992af00f4e9d32677dfde5847d3508784ccc",
+      "target": "tmux-tools:ADR-260919-0146-01#claude-rich-launch"
+    },
+    {
+      "approved_revision": "04b9a45e539824f0ea203998bc36e59af64396cd",
+      "bytes": 661,
+      "object": "objects/e073a2a24ce3b5d9f9a1da38858e4f693c2f3ed2ce9a45c7698f024c39ca8bb2.md",
+      "origin": {
+        "path": "docs/prd/PRD-260918-0323-01-agent-surfaces-and-pane-io.md",
+        "repository": "tmux-tools",
+        "revision": "ae18a0bd70cb9411fe2825309d90b33c57bb93f0"
+      },
+      "role": "source",
+      "sha256": "e073a2a24ce3b5d9f9a1da38858e4f693c2f3ed2ce9a45c7698f024c39ca8bb2",
+      "target": "tmux-tools:PRD-260918-0323-01#p8-smoke"
+    },
+    {
+      "approved_revision": "04b9a45e539824f0ea203998bc36e59af64396cd",
+      "bytes": 1135,
+      "object": "objects/a28eb660fd94942cad51db5869d5ba74757bff5b2ac3317f6e44699676aa3fcb.md",
+      "origin": {
+        "path": "docs/prd/PRD-261107-0825-01-host-backends-and-orca.md",
+        "repository": "tmux-tools",
+        "revision": "ae18a0bd70cb9411fe2825309d90b33c57bb93f0"
+      },
+      "role": "source",
+      "sha256": "a28eb660fd94942cad51db5869d5ba74757bff5b2ac3317f6e44699676aa3fcb",
+      "target": "tmux-tools:PRD-261107-0825-01#p10-tests"
+    },
+    {
+      "approved_revision": "04b9a45e539824f0ea203998bc36e59af64396cd",
+      "bytes": 2510,
+      "object": "objects/16c605a4a5c69459aa491661c76fc4bea358946393d5482093ab186588d012d3.md",
+      "origin": {
+        "path": "docs/prd/PRD-261109-2223-01-herdr-backend.md",
+        "repository": "tmux-tools",
+        "revision": "ae18a0bd70cb9411fe2825309d90b33c57bb93f0"
+      },
+      "role": "source",
+      "sha256": "16c605a4a5c69459aa491661c76fc4bea358946393d5482093ab186588d012d3",
+      "target": "tmux-tools:PRD-261109-2223-01#p5-io"
+    }
+  ],
+  "schema": "planning-contracts.bundle.v1"
+}

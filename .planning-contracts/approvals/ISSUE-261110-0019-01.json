@@ -1,0 +1,57 @@
+{
+  "approval_id": "review-20261110T095509Z",
+  "impact_disposition": {
+    "checked_revisions": [
+      {
+        "revision": "04b9a45e539824f0ea203998bc36e59af64396cd",
+        "sha256": "3a975c52416451effe1e72d26d03992af00f4e9d32677dfde5847d3508784ccc",
+        "target": "tmux-tools:ADR-260919-0146-01#claude-rich-launch"
+      },
+      {
+        "revision": "04b9a45e539824f0ea203998bc36e59af64396cd",
+        "sha256": "e073a2a24ce3b5d9f9a1da38858e4f693c2f3ed2ce9a45c7698f024c39ca8bb2",
+        "target": "tmux-tools:PRD-260918-0323-01#p8-smoke"
+      },
+      {
+        "revision": "04b9a45e539824f0ea203998bc36e59af64396cd",
+        "sha256": "a28eb660fd94942cad51db5869d5ba74757bff5b2ac3317f6e44699676aa3fcb",
+        "target": "tmux-tools:PRD-261107-0825-01#p10-tests"
+      },
+      {
+        "revision": "04b9a45e539824f0ea203998bc36e59af64396cd",
+        "sha256": "16c605a4a5c69459aa491661c76fc4bea358946393d5482093ab186588d012d3",
+        "target": "tmux-tools:PRD-261109-2223-01#p5-io"
+      }
+    ],
+    "status": "accepted"
+  },
+  "issue": {
+    "revision": "a2d73d646b8a87fb2864caa3b7a017d8c7f42cdf",
+    "sha256": "8eb1dcafc72ce4354b7c95d7b3fb6e8e4d83e5b48f4d5f65620ce7bf4f8abf9f",
+    "target": "tmux-tools:ISSUE-261110-0019-01"
+  },
+  "resolution_mode": "canonical",
+  "schema": "planning-contracts.revision.v2",
+  "sources": [
+    {
+      "revision": "04b9a45e539824f0ea203998bc36e59af64396cd",
+      "sha256": "3a975c52416451effe1e72d26d03992af00f4e9d32677dfde5847d3508784ccc",
+      "target": "tmux-tools:ADR-260919-0146-01#claude-rich-launch"
+    },
+    {
+      "revision": "04b9a45e539824f0ea203998bc36e59af64396cd",
+      "sha256": "e073a2a24ce3b5d9f9a1da38858e4f693c2f3ed2ce9a45c7698f024c39ca8bb2",
+      "target": "tmux-tools:PRD-260918-0323-01#p8-smoke"
+    },
+    {
+      "revision": "04b9a45e539824f0ea203998bc36e59af64396cd",
+      "sha256": "a28eb660fd94942cad51db5869d5ba74757bff5b2ac3317f6e44699676aa3fcb",
+      "target": "tmux-tools:PRD-261107-0825-01#p10-tests"
+    },
+    {
+      "revision": "04b9a45e539824f0ea203998bc36e59af64396cd",
+      "sha256": "16c605a4a5c69459aa491661c76fc4bea358946393d5482093ab186588d012d3",
+      "target": "tmux-tools:PRD-261109-2223-01#p5-io"
+    }
+  ]
+}

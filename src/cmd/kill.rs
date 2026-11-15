@@ -6,7 +6,10 @@ use tmux_tools_core::{
     layout, target,
 };
 
-use crate::{cmd::safety, CommonArgs};
+use crate::{
+    cmd::{hosted, safety},
+    CommonArgs,
+};
 
 const VERB: &str = "kill";
 
@@ -55,7 +58,7 @@ pub fn run(args: &KillArgs) -> Result<()> {
                 name: registered.name.as_deref(),
                 agent: registered.agent.as_deref(),
             };
-            println!("{}", serde_json::to_string(&output)?);
+            println!("{}", serde_json::to_string(&hosted(&output))?);
         }
         Format::Raw => println!("{pane}"),
     }

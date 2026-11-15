@@ -1,11 +1,14 @@
 pub mod agents;
 pub mod format;
+pub mod host;
 pub mod idle;
 pub mod layout;
 pub mod names;
-pub mod stream;
+pub mod registry;
+mod stream;
 pub mod target;
-pub mod tmux;
+pub mod team;
+#[cfg(test)]
+mod test_child_env;
 
-pub use crate::tmux::{set_global_invocation, with_invocation, TmuxInvocation};
 pub use format::Format;

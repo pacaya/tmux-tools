@@ -3,7 +3,9 @@ id: ADR-260919-0146-01
 status: accepted
 contract:
   schema: planning-contracts.record.v1
-  clauses: []
+  clauses:
+    - id: claude-rich-launch
+      heading: Claude rich surface launch
   references: []
 ---
 
@@ -46,7 +48,7 @@ one valid default and one valid pre-surface rendering (`normalize_surfaces`). An
 without surfaces loads as one surface built from its agent-level readiness fields; that surface is
 both its pre-surface rendering and its default, so a pre-surface `agents.toml` continues to load.
 
-Built-ins: `claude` ships `rich` (today's launch, the pre-surface rendering and default) and `flat`
+Built-ins: `claude` ships `rich` (its own interface, the pre-surface rendering and default; launch arguments per `## Claude rich surface launch`) and `flat`
 (`--ax-screen-reader`); `codex`, `cursor` and `agy` each ship a single `default` surface carrying
 today's readiness fields. No built-in surface ships validated `ready_regex`/`busy_regex` for a flat
 rendering, bracketed-paste capability, a quit hazard, or resume syntax yet — those come from
@@ -66,6 +68,17 @@ compile a resolved surface's patterns once and classify each poll. When the clas
 — no patterns, no surface, or `Unknown` — they fall back to idle detection; a `Busy` classification
 suppresses it.
 
+## Claude rich surface launch
+
+1. The built-in `claude` `rich` surface has the launch arguments `--settings` `{"env":{"CLAUDE_CODE_NO_FLICKER":"0"}}` (two argv items). A pane started on it shows Claude's own interface in classic scroll mode on every host. The proof is `#{alternate_on}` `0` on tmux, `how: history` from `hc read --json` on Herdr, and on Orca (which reports no alternate-screen state) both argv items in the `claude` process command line of the pane.
+2. `rich` stays the name, the `default_surface`, and the `pre_surface_rendering` of `claude`. The `flat` surface and the default-surface promotion rule do not change.
+3. `CONTEXT.md` **Rich surface** and **Flat surface** are reworded so that full screen does not separate them: a rich surface shows the agent's own interface (prompt, status line, footer) and can be full screen (`dsh --profile tui`) or not (`claude` `rich`); a flat surface is a reduced rendering without that interface and is never full screen.
+4. The P8 smoke (`tt-vendor-smoke`) launches the `claude` `rich` surface, fails when the pane is on the alternate screen, measures the `rich` declarations (bracketed paste, quit hazard, resume) against the current `claude`, and re-stamps its `validated_version`. The built-in `rich` surface declares no `ready_regex`/`busy_regex`, so the smoke notes that and does not fail on it.
+5. README states the `rich` launch arguments, and that a `CLAUDE_CODE_NO_FLICKER=1` user setting does not apply to panes that `spawn-agent claude` starts on `rich`.
+6. Out of scope: Claude sessions that tmux-tools does not start with a surface (a human `claude`, and agent-team teammates that Claude Code starts). They keep the user setting.
+
+Reason: Claude is full screen only when `CLAUDE_CODE_NO_FLICKER=1` is set. A full-screen pane has no tmux scrollback, and Herdr reads it as `how: stitched`, where the History mark does not find the reply. The user settings file overrides the process environment, so the override goes through `--settings`, which merges with the user settings.
+
 ## Evidence
 
 - P2 and P3 of `PRD-260918-0323-01`, the binding requirement text
@@ -74,6 +87,7 @@ suppresses it.
   `docs/handoff/agent-surfaces-pane-io-2026-09-18-0004.md` — `claude` default `alternate_on=1`,
   `claude --ax-screen-reader` `alternate_on=0`; `dsh --profile tui` `alternate_on=1`,
   `dsh --profile dshline` `alternate_on=0`.
+- Live probe, claude 2.1.322, 2026-11-10, user settings with `CLAUDE_CODE_NO_FLICKER=1`: plain `claude` and `env CLAUDE_CODE_NO_FLICKER=0 claude` give `alternate_on=1`; `claude --settings '{"env":{"CLAUDE_CODE_NO_FLICKER":"0"}}'` gives `alternate_on=0` with the user status line still drawn. In a private hc core, the full-screen pane reads `how: stitched` and the classic pane reads `how: history`.
 - `ISSUE-260918-0525-02` acceptance items 1–9 are covered by the CLI-seam integration tests in
   `tests/integration.rs` (fixture-backed), the truth-table unit tests in `core/src/idle.rs`, and the
   built-in registry tests in `core/src/agents/builtin.rs`.

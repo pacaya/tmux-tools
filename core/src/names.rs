@@ -2,55 +2,25 @@
 
 use anyhow::{anyhow, Result};
 
-use crate::tmux;
+use crate::host::{self, RegistrationKey};
 
-// Keys are exposed both as `pub const &str` (for normal use) and via
-// macro_rules! aliases (for use inside `concat!`, which only accepts literals).
-// Keep both arms in sync.
-macro_rules! key_name {
-    () => {
-        "@tt-name"
-    };
-}
-macro_rules! key_agent {
-    () => {
-        "@tt-agent"
-    };
-}
-macro_rules! key_access {
-    () => {
-        "@tt-access"
-    };
-}
-macro_rules! key_launched_at {
-    () => {
-        "@tt-launched-at"
-    };
-}
-macro_rules! key_cwd {
-    () => {
-        "@tt-cwd"
-    };
-}
-macro_rules! key_surface {
-    () => {
-        "@tt-surface"
-    };
-}
-macro_rules! key_surface_unvalidated {
-    () => {
-        "@tt-surface-unvalidated"
-    };
-}
-pub const KEY_NAME: &str = key_name!();
-pub const KEY_AGENT: &str = key_agent!();
-pub const KEY_ACCESS: &str = key_access!();
-pub const KEY_LAUNCHED_AT: &str = key_launched_at!();
-pub const KEY_CWD: &str = key_cwd!();
-pub const KEY_SURFACE: &str = key_surface!();
-pub const KEY_SURFACE_UNVALIDATED: &str = key_surface_unvalidated!();
+// The Pane registration fields, as the Host port names them. Each backend stores them
+// its own way (on tmux, as `@tt-*` pane options).
+pub const KEY_NAME: RegistrationKey = RegistrationKey::Name;
+pub const KEY_AGENT: RegistrationKey = RegistrationKey::Agent;
+pub const KEY_ACCESS: RegistrationKey = RegistrationKey::Access;
+pub const KEY_LAUNCHED_AT: RegistrationKey = RegistrationKey::LaunchedAt;
+pub const KEY_CWD: RegistrationKey = RegistrationKey::Cwd;
+pub const KEY_SURFACE: RegistrationKey = RegistrationKey::Surface;
+pub const KEY_SURFACE_UNVALIDATED: RegistrationKey = RegistrationKey::SurfaceUnvalidated;
+pub const KEY_PARENT: RegistrationKey = RegistrationKey::Parent;
+pub const KEY_TEAM: RegistrationKey = RegistrationKey::Team;
+pub const KEY_SHIM_ID: RegistrationKey = RegistrationKey::ShimId;
+pub const KEY_TITLE: RegistrationKey = RegistrationKey::Title;
+pub const KEY_CLAUDE_AGENT_NAME: RegistrationKey = RegistrationKey::ClaudeAgentName;
+pub const KEY_CLAUDE_TEAM_NAME: RegistrationKey = RegistrationKey::ClaudeTeamName;
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Registered {
     pub name: Option<String>,
     pub agent: Option<String>,
@@ -62,6 +32,18 @@ pub struct Registered {
     pub surface: Option<String>,
     /// Whether caller-supplied trailing arguments left the recorded surface unvalidated.
     pub surface_unvalidated: bool,
+    /// The name of the tmux-tools pane this pane was created from (PRD-261108-0447-01 P7).
+    pub parent: Option<String>,
+    /// The team id of a Teammate pane (P6.4).
+    pub team: Option<String>,
+    /// The Shim id of a Teammate pane (P6.4).
+    pub shim_id: Option<String>,
+    /// Display data (P6.4); never resolves a Target.
+    pub title: Option<String>,
+    /// Display data (P6.4); never resolves a Target.
+    pub claude_agent_name: Option<String>,
+    /// Display data (P6.4); never resolves a Target.
+    pub claude_team_name: Option<String>,
 }
 
 /// The single ownership rule: is this pane ours?
@@ -83,15 +65,11 @@ pub fn pane_is_owned(registered: &Registered, current_cwd: Option<&str>) -> bool
     registered_by_us && cwd_matches
 }
 
-pub fn get(pane_id: &str, key: &str) -> Result<Option<String>> {
-    let format = format!("#{{{key}}}");
-    let args = ["display", "-p", "-t", pane_id, format.as_str()];
-    let value = tmux::run_checked(&args)?.trim().to_owned();
-
-    Ok((!value.is_empty()).then_some(value))
+pub fn get(pane_id: &str, key: RegistrationKey) -> Result<Option<String>> {
+    host::current().read_registration_value(pane_id, key)
 }
 
-pub fn set(pane_id: &str, key: &str, value: &str) -> Result<()> {
+pub fn set(pane_id: &str, key: RegistrationKey, value: &str) -> Result<()> {
     if key == KEY_NAME {
         let existing = list_panes_with_name(value)?;
         for other in &existing {
@@ -103,10 +81,7 @@ pub fn set(pane_id: &str, key: &str, value: &str) -> Result<()> {
         }
     }
 
-    let args = ["set-option", "-p", "-t", pane_id, key, value];
-    tmux::run_checked(&args)?;
-
-    Ok(())
+    host::current().write_registration_value(pane_id, key, value)
 }
 
 /// The stem of a derived `@tt-name` when the command yields no usable word.
@@ -195,101 +170,53 @@ fn random_suffix() -> String {
     hex[..DERIVED_NAME_SUFFIX_LEN].to_owned()
 }
 
-pub fn unset(pane_id: &str, key: &str) -> Result<()> {
-    let args = ["set-option", "-p", "-u", "-t", pane_id, key];
-    tmux::run_checked(&args)?;
-
-    Ok(())
+pub fn unset(pane_id: &str, key: RegistrationKey) -> Result<()> {
+    host::current().clear_registration_value(pane_id, key)
 }
 
 pub fn find_pane_by_name(name: &str) -> Result<Option<String>> {
-    let pane_ids = list_panes_with_name(name)?;
+    host::current().find_registered(name)
+}
 
-    match pane_ids.len() {
-        0 => Ok(None),
-        1 => Ok(Some(pane_ids.into_iter().next().unwrap())),
-        _ => Err(anyhow!(
-            "name '{}' resolves to multiple panes: {}; use a pane id (%N) explicitly",
-            name,
-            pane_ids.join(", ")
-        )),
+/// A `--name` value that P4.1 rejects. The CLI prints it as `invalid name: <name>`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InvalidName(pub String);
+
+impl std::fmt::Display for InvalidName {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "invalid name: {}", self.0)
+    }
+}
+
+impl std::error::Error for InvalidName {}
+
+/// P4.1: a pane name matches `[A-Za-z0-9._-]+` and is neither `.` nor `..`. Checked
+/// on every host before any pane or record is created.
+pub fn validate_name(name: &str) -> Result<()> {
+    let valid = !name.is_empty()
+        && name != "."
+        && name != ".."
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'));
+    if valid {
+        Ok(())
+    } else {
+        Err(InvalidName(name.to_owned()).into())
     }
 }
 
 fn list_panes_with_name(name: &str) -> Result<Vec<String>> {
-    let format = format!("#{{pane_id}}\t#{{{}}}", KEY_NAME);
-    let args = ["list-panes", "-a", "-F", format.as_str()];
-    let panes = tmux::run_checked(&args)?;
-
-    Ok(parse_panes_with_name(&panes, name))
-}
-
-fn parse_panes_with_name(output: &str, name: &str) -> Vec<String> {
-    let mut matches = Vec::new();
-    for line in output.lines() {
-        if let Some((pane_id, pane_name)) = line.split_once('\t') {
-            if pane_name == name {
-                matches.push(pane_id.to_owned());
-            }
-        }
-    }
-    matches
+    Ok(host::current()
+        .pane_names()?
+        .into_iter()
+        .filter(|(_, pane_name)| pane_name == name)
+        .map(|(pane_id, _)| pane_id)
+        .collect())
 }
 
 pub fn read(pane_id: &str) -> Result<Registered> {
-    const FIELD_SEP: char = '\x1f';
-    const FORMAT: &str = concat!(
-        "#{",
-        key_name!(),
-        "}\x1f",
-        "#{",
-        key_agent!(),
-        "}\x1f",
-        "#{",
-        key_access!(),
-        "}\x1f",
-        "#{",
-        key_launched_at!(),
-        "}\x1f",
-        "#{",
-        key_cwd!(),
-        "}\x1f",
-        "#{",
-        key_surface!(),
-        "}\x1f",
-        "#{",
-        key_surface_unvalidated!(),
-        "}",
-    );
-    let raw = tmux::run_checked(&["display-message", "-p", "-t", pane_id, FORMAT])?;
-    let line = raw.trim_end_matches('\n');
-    let mut parts = line.splitn(7, FIELD_SEP);
-    let name = parts.next().and_then(non_empty_owned);
-    let agent = parts.next().and_then(non_empty_owned);
-    let access = parts.next().and_then(non_empty_owned);
-    let launched_at = parts.next().and_then(non_empty_owned);
-    let cwd = parts.next().and_then(non_empty_owned);
-    let surface = parts.next().and_then(non_empty_owned);
-    let surface_unvalidated = parts.next().is_some_and(truthy);
-    Ok(Registered {
-        name,
-        agent,
-        access,
-        launched_at,
-        cwd,
-        surface,
-        surface_unvalidated,
-    })
-}
-
-fn truthy(value: &str) -> bool {
-    let value = value.trim();
-    value == "1" || value.eq_ignore_ascii_case("true")
-}
-
-fn non_empty_owned(s: &str) -> Option<String> {
-    let trimmed = s.trim();
-    (!trimmed.is_empty()).then(|| trimmed.to_owned())
+    host::current().read_registration(pane_id)
 }
 
 #[cfg(test)]
@@ -297,41 +224,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parse_returns_empty_when_no_matches() {
-        let output = "%1\tfoo\n%2\tbar\n";
-        let matches = parse_panes_with_name(output, "baz");
-        assert!(matches.is_empty());
-    }
-
-    #[test]
-    fn parse_returns_single_match() {
-        let output = "%1\tfoo\n%2\tbar\n%3\tbaz\n";
-        let matches = parse_panes_with_name(output, "bar");
-        assert_eq!(matches, vec!["%2".to_owned()]);
-    }
-
-    #[test]
-    fn parse_returns_all_matches_for_duplicates() {
-        let output = "%1\tdup\n%2\tother\n%3\tdup\n%4\tdup\n";
-        let matches = parse_panes_with_name(output, "dup");
-        assert_eq!(
-            matches,
-            vec!["%1".to_owned(), "%3".to_owned(), "%4".to_owned()]
-        );
-    }
-
-    #[test]
-    fn parse_skips_lines_without_tab() {
-        let output = "no-tab-line\n%1\tname\n";
-        let matches = parse_panes_with_name(output, "name");
-        assert_eq!(matches, vec!["%1".to_owned()]);
-    }
-
-    #[test]
-    fn parse_skips_panes_with_empty_names_when_searching_non_empty() {
-        let output = "%1\t\n%2\tname\n%3\t\n";
-        let matches = parse_panes_with_name(output, "name");
-        assert_eq!(matches, vec!["%2".to_owned()]);
+    fn validate_name_applies_the_p4_1_character_set() {
+        for bad in ["a/b", "..", ".", "a b", "", "é", "a:b"] {
+            let error = validate_name(bad).unwrap_err();
+            assert_eq!(error.to_string(), format!("invalid name: {bad}"));
+        }
+        for good in ["A.b_c-9", "x", ".hidden", "a..b"] {
+            validate_name(good).unwrap();
+        }
     }
 
     #[test]
@@ -402,12 +302,6 @@ mod tests {
         assert!(suffixes.len() > 32, "suffixes must be random: {suffixes:?}");
     }
 
-    #[test]
-    fn parse_handles_empty_output() {
-        let matches = parse_panes_with_name("", "anything");
-        assert!(matches.is_empty());
-    }
-
     fn registration(name: Option<&str>, agent: Option<&str>, cwd: Option<&str>) -> Registered {
         Registered {
             name: name.map(str::to_owned),
@@ -417,6 +311,7 @@ mod tests {
             cwd: cwd.map(str::to_owned),
             surface: None,
             surface_unvalidated: false,
+            ..Registered::default()
         }
     }
 

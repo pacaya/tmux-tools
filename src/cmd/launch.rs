@@ -1,13 +1,16 @@
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use clap::Args;
 use serde::Serialize;
+use std::path::PathBuf;
 use tmux_tools_core::{
     format::Format,
+    host,
     layout::{self, Destination, Landing, Registration, Split, WindowReport},
     names,
 };
 
 use crate::{
+    cmd::{hosted, spawn_agent::shell_quote},
     util::{load_registry_for_floors, rfc3339_utc_now},
     CommonArgs,
 };
@@ -91,9 +94,10 @@ pub(crate) fn concise_window_fields(window: &WindowReport) -> String {
     )
 }
 
-/// Warn on stderr, once, when the pane was gone before its window was measured.
+/// Warn on stderr, once, when the pane was gone before its window was measured. A host
+/// without `tile` measures no window, so it never warns.
 pub(crate) fn warn_if_unmeasured(landing: &Landing) {
-    if landing.window.is_none() {
+    if landing.window.is_none() && !host::current().creates_registered() {
         eprintln!(
             "warning: pane {} no longer exists; window geometry not measured",
             landing.pane_id
@@ -102,13 +106,22 @@ pub(crate) fn warn_if_unmeasured(landing: &Landing) {
 }
 
 pub fn run(args: &LaunchArgs) -> Result<()> {
-    let cmd_for_tmux = if args.bare {
-        args.cmd.clone()
-    } else {
-        wrap_keep_open(&args.cmd)
+    if let Some(name) = &args.name {
+        names::validate_name(name)?;
+    }
+    require_placement_options(args.split, args.size.is_some())?;
+    let cmd_for_tmux = keep_alive(&args.cmd, args.bare);
+    // tmux starts the pane in the caller's directory; on Orca the pane command `cd`s
+    // there. The free-form `--cmd` runs through `eval` after the `cd`, so a top-level
+    // `&` in it cannot move the `cd` into a background job: every part of it, and the
+    // login shell that stays, starts in the caller's directory on any POSIX shell.
+    let cmd_for_tmux = match caller_dir_prefix() {
+        Some(prefix) => format!("{prefix} eval {}", shell_quote(&cmd_for_tmux)),
+        None => cmd_for_tmux,
     };
     let launched_at = rfc3339_utc_now()?;
     let cwd = invoking_cwd();
+    let parent = crate::cmd::self_::calling_pane_name()?;
     // Loaded before the pane exists: the verdict needs it, and its warnings belong to
     // this invocation whether or not placement succeeds.
     let registry = load_registry_for_floors();
@@ -123,11 +136,26 @@ pub fn run(args: &LaunchArgs) -> Result<()> {
             launched_at: &launched_at,
             cwd: cwd.as_deref(),
             agent: None,
+            parent: parent.as_deref(),
+            team: None,
         },
         &registry,
     )?;
 
     render_output(args, &landing, &launched_at)
+}
+
+/// The optional placement options of the spawning verbs: `--split tile` needs `tile`
+/// and `--size` needs `size`. On a host without one, exit 3 before any other step.
+pub(crate) fn require_placement_options(split: Option<Split>, size: bool) -> Result<()> {
+    let capabilities = host::current().capabilities();
+    if split == Some(Split::Tile) {
+        host::require(capabilities.tile, "--split tile")?;
+    }
+    if size {
+        host::require(capabilities.size, "--size")?;
+    }
+    Ok(())
 }
 
 /// The placement destination the spawning verbs' shared flags ask for.
@@ -150,6 +178,93 @@ pub(crate) fn invoking_cwd() -> Option<String> {
     std::env::current_dir()
         .ok()
         .map(|cwd| cwd.to_string_lossy().into_owned())
+}
+
+/// The caller's directory as tmux starts a client's new pane in it: the logical `$PWD`
+/// when it is absolute and names the same directory as the physical cwd, else the
+/// physical cwd. A shell `cd` then resolves `..` against the logical path, as on tmux.
+pub(crate) fn caller_dir() -> Result<PathBuf> {
+    use std::os::unix::fs::MetadataExt;
+    let physical = std::env::current_dir()
+        .map_err(|error| anyhow!("--cwd: cannot read the current directory: {error}"))?;
+    let logical = std::env::var_os("PWD").map(PathBuf::from).filter(|pwd| {
+        pwd.is_absolute()
+            && match (std::fs::metadata(pwd), std::fs::metadata(&physical)) {
+                (Ok(a), Ok(b)) => a.dev() == b.dev() && a.ino() == b.ino(),
+                _ => false,
+            }
+    });
+    Ok(logical.unwrap_or(physical))
+}
+
+/// The pane command prefix that starts the command in `dir`. `cd --` makes the next
+/// argument a positional path even if it starts with `-`.
+pub(crate) fn cd_prefix(dir: &str) -> String {
+    format!("cd -- {} &&", shell_quote(dir))
+}
+
+/// The prefix of a pane command spawned without a directory. tmux starts a client's
+/// new pane in the caller's directory, so a tmux pane command has none. An Orca pane's
+/// shell starts in the worktree root, so on Orca the command `cd`s to the caller's
+/// directory. When that directory is unreadable or not UTF-8, there is no prefix and
+/// the pane starts where Orca starts it.
+pub(crate) fn caller_dir_prefix() -> Option<String> {
+    if host::current().pane_starts_in_caller_dir() {
+        return None;
+    }
+    let dir = caller_dir().ok()?;
+    Some(cd_prefix(dir.to_str()?))
+}
+
+/// The Keep-alive wrap of `cmd` on the current host, or `cmd` bare. On Orca the login
+/// shell that runs `--command` stays after the command exits, which is the wrap;
+/// `--bare` runs `exec <cmd>` so the pane closes with it (P9.9). On tmux and Herdr the
+/// wrap keeps a shell after the command (PRD-261109-2223-01 P7.5).
+pub(crate) fn keep_alive(cmd: &str, bare: bool) -> String {
+    match (host::current().shell_stays_after_command(), bare) {
+        (true, true) => format!("exec {cmd}"),
+        (true, false) => cmd.to_owned(),
+        (false, true) => cmd.to_owned(),
+        (false, false) => wrap_keep_open(cmd),
+    }
+}
+
+/// The `--format json` object of a spawning verb for the new pane `pane`. On a host
+/// that measures no window the keys it has no source for are `null`, so every host
+/// gives the same keys (P9.13); on Herdr `window_id` is the pane's `herdr.tab` label
+/// or `null` (PRD-261109-2223-01 P7.3).
+pub(crate) fn spawn_json<T: Serialize>(output: &T, pane: &str) -> Result<String> {
+    let host = host::current();
+    if !host.creates_registered() {
+        return Ok(serde_json::to_string(&hosted(output))?);
+    }
+    let window_id = if host.host() == host::Host::Herdr {
+        host.describe_pane(Some(pane))?
+            .summary
+            .ok()
+            .map(|summary| summary.window_name)
+            .filter(|tab| !tab.is_empty())
+    } else {
+        None
+    };
+    let mut value = serde_json::to_value(hosted(output))?;
+    {
+        if let Some(object) = value.as_object_mut() {
+            for key in [
+                "relocated",
+                "window_id",
+                "min_pane_cols",
+                "min_pane_rows",
+                "below_floor",
+            ] {
+                object.insert(key.to_owned(), serde_json::Value::Null);
+            }
+            if let Some(tab) = window_id {
+                object.insert("window_id".to_owned(), serde_json::Value::String(tab));
+            }
+        }
+    }
+    Ok(serde_json::to_string(&value)?)
 }
 
 /// Wrap a command so the pane survives its exit by `exec`-ing into a fallback
@@ -190,7 +305,7 @@ fn render_output(args: &LaunchArgs, landing: &Landing, launched_at: &str) -> Res
                 relocated: landing.relocated,
                 window: WindowJson::of(landing),
             };
-            println!("{}", serde_json::to_string(&output)?);
+            println!("{}", spawn_json(&output, &landing.pane_id)?);
         }
     }
 
