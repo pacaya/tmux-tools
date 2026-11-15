@@ -198,7 +198,7 @@ The Herdr run needs the maintainer's Herdr window, with the Herdr core started f
 
 ### P9 — Rollout and release
 
-1. Each slice ships as its own minor release, after its P7 suite and P8 live run pass.
+1. Each slice ships as its own minor release, after its P7 suite and P8 live run pass. Before the release, the slice merges `origin/development` into its branch and takes the next minor version above the version there, so it never reuses the version of another release (such as ISSUE-261114-0707-02).
 2. Each release adds to the README host section: `claude-teams` sets up a Team on that host, where teammates appear (Herdr: in the Leader's tab, placed by Herdr; Rex: right of the Leader, then below the newest teammate), and that on Herdr a teammate terminal is removed when it exits 0.
 3. The `cl` alias does not change.
 
@@ -220,7 +220,7 @@ The Herdr run needs the maintainer's Herdr window, with the Herdr core started f
 
 ### External contracts
 
-- **Environment `TT_HOST`** (changed) — accepted values `tmux`, `orca`, `herdr`, `rex`; the invalid-value error names all four. The Launcher's child environment sets `TT_HOST=<selected host>`.
+- **Environment `TT_HOST`** (changed) — accepted values `tmux`, `orca`, plus `herdr` (Herdr slice) and `rex` (Rex slice); the invalid-value error names every value accepted at that time (after the Herdr slice: `tmux`, `orca`, `herdr`). The Launcher's child environment sets `TT_HOST=<selected host>`.
 - **`claude-teams` fail-open reasons** (changed) — added: `HC_TERMINAL_ID is unset` (Herdr), `REX_BLOCK is unset` (Rex); removed per slice: `no teammate shim on herdr`, `no teammate shim on rex`. Line format unchanged: `claude-teams: no team: <reason>; starting claude without teammate panes`.
 - **Teammate pane environment** (changed) — the Shim drops `-e` settings of `HC_TERMINAL_ID` and `HC_SCOPE` on Herdr and of `REX_BLOCK`, `REX_SESSION`, `REX_SERVER` on Rex; each teammate has its host's own values.
 - **Herdr Teammate terminal** (changed) — created by `hc run --bg --outlive-parent --no-notify --rm --name <hc name> --cwd <cwd>` with the `tt.*` registration labels (PRD-261109-2223-01 P4.1, including `tt.team`, `tt.parent`, `tt.shim_id`) and the split target's `herdr.space` and `herdr.tab` labels.
