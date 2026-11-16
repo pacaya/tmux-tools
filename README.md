@@ -33,7 +33,7 @@ $ tmux-tools prompt --target codex-helper "explain src/main.rs" --idle-seconds 3
 
 Most pane verbs accept `--target <name|id>`, `--format concise|json|raw`, `--session NAME`, and `--window NAME`. Defaults: `--format concise`, `--idle-seconds 2.0`, `--ready-stable-seconds 2.0`, `--timeout 120.0`.
 
-Every verb runs on the selected host, tmux, Orca or Herdr (see "Hosts"). Every `--format json` object carries `host`; `list --format json` rows carry `host` and `host_state`. On every host a `--name` value must match `[A-Za-z0-9._-]+` and must not be `.` or `..`; any other value exits 1 with `invalid name: <name>` and creates no pane. An optional verb or option the host lacks (`rebalance`, `--split tile`, `--size`; on Orca and Herdr also `--session` and `--window`) exits 3 with `unsupported: <verb> on <host>`.
+Every verb runs on the selected host, tmux, Orca, Rex or Herdr (see "Hosts"). Every `--format json` object carries `host`; `list --format json` rows carry `host` and `host_state`. On every host a `--name` value must match `[A-Za-z0-9._-]+` and must not be `.` or `..`; any other value exits 1 with `invalid name: <name>` and creates no pane. An optional verb or option the host lacks (`rebalance`, `--split tile`, `--size`; on Orca, Rex and Herdr also `--session` and `--window`) exits 3 with `unsupported: <verb> on <host>`.
 
 | Verb | Signature | Notes |
 | --- | --- | --- |
@@ -59,7 +59,7 @@ Every verb runs on the selected host, tmux, Orca or Herdr (see "Hosts"). Every `
 
 ### Host selection: `TMUX_TOOLS_HOST`
 
-`TMUX_TOOLS_HOST=tmux|orca|herdr` selects the host explicitly; any other value fails every verb with exit 1 and names the valid values (`tmux`, `orca`, `herdr`). Unset, the first match selects: `$TMUX` set → tmux; `ORCA_TERMINAL_HANDLE` set → orca; `HC_TERMINAL_ID` set → herdr; otherwise tmux, with the Managed session outside tmux as before. When the selected host's CLI or runtime is unreachable, the verb exits 1 and names the host and what selected it; it never falls back to another host.
+`TMUX_TOOLS_HOST=tmux|orca|rex|herdr` selects the host explicitly; any other value fails every verb with exit 1 and names the valid values (`tmux`, `orca`, `rex`, `herdr`). Unset, the first match selects: `$TMUX` set → tmux; `ORCA_TERMINAL_HANDLE` set → orca; `REX_BLOCK` set → rex; `HC_TERMINAL_ID` set → herdr; otherwise tmux, with the Managed session outside tmux as before. When the selected host's CLI or runtime is unreachable, the verb exits 1 and names the host and what selected it; it never falls back to another host.
 
 ### Agent profiles
 
@@ -326,7 +326,7 @@ On `wait-idle` timeout, concise output starts with `reason=timed_out duration=<s
 
 ## Hosts
 
-tmux-tools drives the panes of one host per invocation through a pane-level Host port: tmux, Orca through the `orca` CLI, or Herdr through the herdr-core `hc` CLI. The tmux backend keeps every behaviour described in this README.
+tmux-tools drives the panes of one host per invocation through a pane-level Host port: tmux, Orca through the `orca` CLI, Rex through the `rex` CLI, or Herdr through the herdr-core `hc` CLI. The tmux backend keeps every behaviour described in this README.
 
 ### Orca
 
@@ -367,6 +367,41 @@ Limits on Herdr:
 - **`send` types only a fixed character set.** `hc keys` sends one key per character. The typeable set is space, `a`–`z`, `A`–`Z`, `0`–`9`, and `` ' , - . / ; = [ \ ] ` ``. `hc keys` cannot type any other character, including `! " # $ % & ( ) * + : < > ? @ ^ _ { | } ~`. Every argument is checked before anything is sent: a character outside the set exits 1 with `cannot type on herdr: U+<XXXX>`, and a key name with no `hc keys` name exits 1 with `cannot type on herdr: <argument>`; nothing is sent then. Only when `hc keys` still rejects a key during the send can part of the input be sent. `send-enter` sends `enter`, `escape` sends `esc`, and `interrupt` sends the surface's `interrupt_key` this way (never `hc interrupt`).
 - **One-submission delivery is guaranteed only for a pane with Host state.** `hc send` wraps the text in bracketed paste when the program has mode 2004 on, and writes it raw otherwise; hc does not report the mode. Delivery is guaranteed for a pane whose Host state is not `null` (the program reports OSC 7501). A multi-line prompt to any other pane is refused before anything is sent; other prompts to it are sent with delivery `unavailable`.
 - **A full-screen pane gives its whole read.** The History mark is one `hc read --lines 1000000` before submission; the `prompt` result is the read after settle from the first line that differs from the mark read. When the read after settle reports `how: stitched` or `how: screen` (a full-screen program), the result is that whole read and does not start at the mark. Completeness is true only when both reads report `how: history` and the first changed line is at least the number of lines of the mark read minus `rows`, so output that only appends after the mark read is complete. `capture --all` prints the no-scrollback notice when its read reports `how: screen`.
+
+### Rex
+
+Rex blocks are driven through the `rex` CLI. Every `rex` call passes `--autostart=false`, so tmux-tools never starts a Rex server, and passes `-S "$REX_SERVER"` when `REX_SERVER` is set.
+
+**Selection.** Rex is selected by `TMUX_TOOLS_HOST=rex`, or, with `TMUX_TOOLS_HOST` unset, by `REX_BLOCK` when neither `$TMUX` nor `ORCA_TERMINAL_HANDLE` is set; under tmux the host stays tmux unless `TMUX_TOOLS_HOST=rex`. When `rex` is not on `PATH` or `rex server status --json` fails, the verb exits 1 and names `rex` and what selected it; it never falls back to another host. The calling pane is always the block named by `REX_BLOCK` (never `$TMUX` or `TMUX_PANE`, also when a stale `TMUX_PANE` is set); without it, `self` and every verb that acts on the calling pane without `--target` exit 1 and name `REX_BLOCK`. A Target is a tmux-tools pane name or a block id `block:<uuid>`; a registered name wins, and a value is used as a block id only when no registered name matches it.
+
+**Placement.** The session of a new block is, first match, the `--target` block's session, `REX_SESSION`, or `TMUX_TOOLS_REX_SESSION` (a Rex session id). When none gives a session, the spawn exits 1, names `REX_SESSION` and `TMUX_TOOLS_REX_SESSION`, and creates nothing.
+
+- No `--split`, and `--split window`, run `rex run -s <session>`, which opens a new Rex window (a tab in the Rex app) in that session.
+- `--split h` runs `rex split --split=right` and `--split v` runs `rex split --split=below`, with `-b <anchor>`: the `--target` block, else the calling block. When neither exists, the spawn exits 1, names `REX_BLOCK`, and creates nothing.
+- Every create passes `--focus=false`, so focus does not change, `--label` with the first 128 characters of the pane name (a Rex label holds at most 128 characters; pane names keep no length limit), `--cwd`, and `--json`, and never `--keep-open`.
+- `--split tile`, `--size`, `--session`, `--window` and `rebalance` exit 3 with no side effect; the automatic tile after a spawn is skipped.
+
+**Pane record.** Rex cannot store custom data on a block, so each pane's registration is a Pane record at `${XDG_STATE_HOME:-$HOME/.local/state}/tmux-tools/rex/<instance_id>/<name>.json`, where `instance_id` comes from `rex server status --json` and the record's `handle` is the block id. Name validation, reservation, the 120-second spawn timeout and Ownership work as on Orca. The block label is for display only and never resolves a Target. A record whose block is missing from a complete listing is dead; when `rex ls --json` or a `rex block ls -s <session> --json` call fails, the listing is incomplete and `list` prints `list incomplete: rex` on stderr. When a create gives no block id and did not fail definitely (a timeout, an unexpected exit, unparseable output), the spawn adopts the one block of the target session whose label is the name's first 128 characters, when no live record holds that block and no other record or reservation shares those 128 characters; otherwise it exits 1 with `spawn outcome unknown: <name> (session <session id>)` and keeps the reservation. A create that exits 3 or 4 has failed and frees the name. Creation is never repeated.
+
+**Servers and the `server-address` sweep check.** Each server directory `rex/<instance_id>/` holds the file `server-address`: the `REX_SERVER` value, or `unset` when `REX_SERVER` is not set. The directory is published atomically from a temporary `rex/.init-<random>/` directory; an `.init-` directory older than 120 seconds is deleted. tmux-tools deletes another server directory only after one `rex server status --json` against its stored address (with `-S <address>`, or for `unset` without `-S` and without `REX_SERVER`, so it reaches the default server) with a 2-second timeout fails, times out, or reports a different `instance_id`, or when the directory has no readable `server-address`. A server you reach both with `REX_SERVER` unset and with its explicit address uses one directory.
+
+**Verbs.**
+
+- `capture` runs `rex capture -b <block>` in text format; `--lines 0` gives the last `rows` lines (`rex block call -b <block> size`), and the no-scrollback notice fires when `rex block call -b <block> modes` reports the alternate screen on.
+- `send` writes xterm bytes through `rex send -b <block>`: key names become the bytes tmux's key output produces (cursor keys use application-mode bytes when the block has mode 1 on), and other arguments are sent as literal text. `send-enter` sends `\r`, `escape` sends `\x1b`, and `interrupt` sends the surface's `interrupt_key` the same way.
+- Host state (`host_state`) comes from the `rex block call -b <block> program_status` record with the newest `updated_at`: `idle`, `working`, `blocked` and `done` map to themselves, `error` maps to `blocked`, and no record maps to `null`. `status --format json` reports `host_word` as that record's `state`, or `null`.
+- `prompt` pastes the text with `rex api call block.event` (event type `paste`) and then sends Enter with `rex send-key -b <block> enter`. `submit` is `confirmed` when the Host state before the send was not `working` and a `program_status` record newer than the send reports `working`, `done` or `blocked` (a raw `error` record confirms); otherwise `accepted`. Only a record newer than the send ends the settle step.
+- `list` rows: `pane` is the block id, `session` the Rex session id, `status` is `running`, `dead` or `unknown`, and rows have no `window` key. In `status`, `spawn-agent` and `launch`, `window` is the Rex window id. Every other JSON key with no Rex source is `null`.
+- `kill` runs `rex block close <block>` (a block that is already gone counts as closed), then deletes the record. `launch` keeps the shell after the command; `--bare` lets the block close when the command exits.
+- `self --format json` reports `host: "rex"`; `driven` is true when a live record holds `REX_BLOCK`.
+- `notify` exits 0 and prints `notify: not delivered on rex` on stderr.
+- `claude-teams` has no teammate shim on Rex: it fails open with `claude-teams: no team: no teammate shim on rex; starting claude without teammate panes`.
+
+Limits on Rex:
+
+- **Delivery is guaranteed only with bracketed paste on.** One-submission delivery is guaranteed when `modes` reports mode 2004 on before the send. A multi-line prompt to a block without mode 2004 on is refused before anything is sent; other prompts to such a block are sent with delivery `unavailable`.
+- **`prompt` needs API revision 12.** When `api_revision` from `rex server status --json` is below 12, `prompt` exits 1 before anything is sent with `rex api revision <n> is older than 12`. Other verbs keep working.
+- **Rex drops the oldest scrollback silently.** Once a block's scrollback is full, Rex drops its oldest line for each new line. The History mark is a full capture before submission, and the `prompt` result starts at the first line that differs from it. Completeness is true only when the mark capture and the capture after settle were both taken with the alternate screen off and the same width, and the first changed line is at least the mark capture's line count minus `rows`. Otherwise (a full scrollback, a width change, the alternate screen) the result is the last `rows` lines of the capture after settle, with `complete: false`, and does not start at the History mark.
 
 ## Claude teams
 
@@ -484,6 +519,29 @@ pane through `spawn-agent claude`; it sends a key name and literal text, and a m
 Claude with guaranteed delivery. It keeps these terminals for 30 seconds so you can check the Herdr
 window, then kills them, also on failure, and ends by asserting that neither `tmux-tools list` nor
 `hc ls --all --json` shows one of them.
+
+The default run never reaches a Rex server either: the Rex tests drive a fake `rex`, and child
+processes get no `REX_*` variables and no `rex` on `PATH`. With `TT_TEST_REX=1` and `rex` on `PATH`,
+the Rex contract suite runs against a private server (`rex server run --listen unix://<dir>/s.sock`)
+with its own registry; at the end, also on failure, it stops that server and deletes `<dir>`. It never
+reaches the default server:
+
+```sh
+TT_TEST_REX=1 cargo test --features test-fixtures --test integration rex_private_server_contract_suite -- --nocapture
+```
+
+The live Rex run uses the default Rex server and your registry, so start it from a plain Rex terminal
+(no `$TMUX`, `REX_BLOCK` set) on the default server, with `claude` on `PATH`:
+
+```sh
+TMUX_TOOLS_LIVE_REX=1 cargo test --features test-fixtures --test integration rex_live_contract_suite -- --nocapture
+```
+
+It starts a `--split v` block beside the calling block and a Claude pane through `spawn-agent
+claude` in the calling session; it sends literal text and a key name, waits for Claude's Host state,
+and sends a multi-line prompt to Claude with guaranteed delivery. It then kills these blocks, also on
+failure, and ends by asserting that neither `tmux-tools list` nor the Rex block listing shows one of
+them.
 
 The live vendor surfaces are validated separately, by a manual smoke that never runs under
 `cargo test` (it drives the real `claude`, `codex` and `dsh` binaries):

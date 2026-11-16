@@ -5,7 +5,9 @@
 //! `PATH`, [`rex_private_server_contract_suite`] runs the required verbs against a
 //! private server it starts (`rex server run --listen unix://<dir>/s.sock …`) and, also
 //! on failure, stops that server and deletes `<dir>` (P8.3). It never reaches the
-//! default server.
+//! default server. With `TMUX_TOOLS_LIVE_REX=1`, [`rex_live_contract_suite`] runs the
+//! P8.4 cases on the default server from the calling plain Rex terminal and closes every
+//! block it created (P8.6).
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -2389,4 +2391,484 @@ fn rex_private_server_contract_suite() {
     assert!(!after.status.success(), "the private server is stopped");
     assert_eq!(default_server_listing(&rex), default_before);
     assert_eq!(operator_registry(), registry_before);
+}
+
+// --- P8.4, P8.6: the opt-in live run on the default server ------------------------------
+
+/// The opt-in switch of the live run (PRD-261112-2108-01 `## Contracts`, P8.4).
+const LIVE_SWITCH: &str = "TMUX_TOOLS_LIVE_REX";
+
+/// The calling plain Rex terminal's variables that the live run passes on (P2.2, P2.3,
+/// P3.1); the suite removes them from its own environment when it loads.
+const LIVE_REX_VARS: [&str; 4] = [
+    "REX_BLOCK",
+    "REX_SESSION",
+    "REX_SERVER",
+    "TMUX_TOOLS_REX_SESSION",
+];
+
+/// The `claude` of the original `PATH`; a missing one fails the opt-in run.
+fn live_claude() -> PathBuf {
+    original_environment()
+        .get("PATH")
+        .map(String::as_str)
+        .unwrap_or_default()
+        .split(':')
+        .map(|entry| Path::new(entry).join("claude"))
+        .find(|candidate| candidate.is_file())
+        .unwrap_or_else(|| panic!("{LIVE_SWITCH}=1 needs `claude` on PATH"))
+}
+
+/// One live run on the default Rex server, from the calling plain Rex terminal. Every
+/// CLI and `rex` call gets that terminal's `REX_*` variables and the original `PATH`,
+/// never `TMUX` or `TMUX_PANE`. Each block the run creates carries one of the
+/// run-unique names of [`LiveRun::n`] as its label (P3.4); `Drop` kills the run's
+/// names, then closes every block id the run recorded (whatever the block listing
+/// gives), and then every listed block that carries such a label, also on failure,
+/// and never another block (P8.6).
+struct LiveRun {
+    rex: PathBuf,
+    dir: PathBuf,
+    tag: String,
+    caller: String,
+    session: String,
+    names: std::cell::RefCell<Vec<String>>,
+    created: std::cell::RefCell<Vec<String>>,
+}
+
+impl LiveRun {
+    fn start() -> LiveRun {
+        let original = original_environment();
+        assert!(
+            !original.contains_key("TMUX"),
+            "{LIVE_SWITCH}=1 runs from a plain Rex terminal: unset TMUX"
+        );
+        let caller = original
+            .get("REX_BLOCK")
+            .cloned()
+            .unwrap_or_else(|| panic!("{LIVE_SWITCH}=1 runs from a Rex terminal: REX_BLOCK"));
+        let rex = original
+            .get("PATH")
+            .map(String::as_str)
+            .unwrap_or_default()
+            .split(':')
+            .map(|entry| Path::new(entry).join("rex"))
+            .find(|candidate| candidate.is_file())
+            .unwrap_or_else(|| panic!("{LIVE_SWITCH}=1 needs `rex` on PATH"));
+        let millis = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        let tag = format!("{:x}", (millis ^ u64::from(std::process::id())) & 0xff_ffff);
+        let dir = tempfile_dir("rex-live");
+        for sub in ["config/tmux-tools", "bin"] {
+            std::fs::create_dir_all(dir.join(sub)).unwrap();
+        }
+        write_executable(&dir.join("bin/hexecho.py"), HEXECHO);
+        // A block need not carry the original `PATH`: the built-in `claude` runs by the
+        // absolute path of the original `PATH`'s `claude`.
+        std::fs::write(
+            dir.join("config/tmux-tools/agents.toml"),
+            format!("[claude]\nbinary = \"{}\"\n", live_claude().display()),
+        )
+        .unwrap();
+        let mut run = LiveRun {
+            rex,
+            dir,
+            tag,
+            caller,
+            session: String::new(),
+            names: std::cell::RefCell::new(Vec::new()),
+            created: std::cell::RefCell::new(Vec::new()),
+        };
+        run.session = run
+            .all_blocks()
+            .into_iter()
+            .find(|(_, block)| block["block_id"] == run.caller.as_str())
+            .map(|(session, _)| session)
+            .unwrap_or_else(|| panic!("the default server lists no block {}", run.caller));
+        run
+    }
+
+    /// The run-unique tmux-tools name for `role`, recorded for the teardown.
+    fn n(&self, role: &str) -> String {
+        let name = format!("tt.live{}.{role}", self.tag);
+        self.names.borrow_mut().push(name.clone());
+        name
+    }
+
+    /// The calling terminal's Rex: its `REX_*` variables, the original `PATH`, no
+    /// `TMUX`, and none of the calling Claude session's variables.
+    fn env(&self, command: &mut Command) {
+        let original = original_environment();
+        for key in claude_session_vars() {
+            command.env_remove(key);
+        }
+        command
+            .env_remove("TMUX")
+            .env_remove("TMUX_PANE")
+            .env("PATH", original.get("PATH").cloned().unwrap_or_default());
+        for key in LIVE_REX_VARS {
+            match original.get(key) {
+                Some(value) => command.env(key, value),
+                None => command.env_remove(key),
+            };
+        }
+    }
+
+    /// The real `rex` as the backend calls it: `--autostart=false`, and `-S
+    /// "$REX_SERVER"` when the calling terminal sets it (P2.3).
+    fn rex(&self, args: &[&str]) -> std::process::Output {
+        let mut command = Command::new(&self.rex);
+        self.env(&mut command);
+        command.arg("--autostart=false");
+        if let Some(address) = original_environment().get("REX_SERVER") {
+            command.args(["-S", address]);
+        }
+        command
+            .args(args)
+            .stdin(Stdio::null())
+            .output()
+            .expect("run rex")
+    }
+
+    fn rex_json(&self, args: &[&str]) -> Value {
+        let out = self.rex(args);
+        serde_json::from_slice(&out.stdout).unwrap_or_else(|_| panic!("rex {args:?}: {out:?}"))
+    }
+
+    /// Every block of every session, with its session id: `rex ls --json`, then `rex
+    /// block ls -s <session> --json` for each session.
+    fn all_blocks(&self) -> Vec<(String, Value)> {
+        let sessions = self.rex_json(&["ls", "--json"])["sessions"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        let mut blocks = Vec::new();
+        for session in sessions {
+            let Some(id) = session["session_id"].as_str() else {
+                continue;
+            };
+            for block in self.rex_json(&["block", "ls", "-s", id, "--json"])["blocks"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+            {
+                blocks.push((id.to_owned(), block));
+            }
+        }
+        blocks
+    }
+
+    /// The listed blocks the run created: by block id, or by a label that is a name of
+    /// this run.
+    fn own_blocks(&self) -> Vec<(String, Value)> {
+        let names = self.names.borrow().clone();
+        let created = self.created.borrow().clone();
+        self.all_blocks()
+            .into_iter()
+            .filter(|(_, block)| {
+                block["block_id"]
+                    .as_str()
+                    .is_some_and(|id| created.iter().any(|own| own == id))
+                    || block["label"]
+                        .as_str()
+                        .is_some_and(|label| names.iter().any(|own| own == label))
+            })
+            .collect()
+    }
+
+    /// The CLI from the repository root (a directory Claude already trusts), with the
+    /// operator's registry (`XDG_STATE_HOME` as inherited) and the run's agent config.
+    fn cli(&self, args: &[&str]) -> CmdOutput {
+        let mut command = Command::new(BIN);
+        self.env(&mut command);
+        let child = command
+            .args(args)
+            .current_dir(env!("CARGO_MANIFEST_DIR"))
+            .env("SHELL", "/bin/sh")
+            .env("XDG_CONFIG_HOME", self.dir.join("config"))
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        wait_for_child(
+            child,
+            &format!("tmux-tools {args:?}"),
+            Duration::from_secs(180),
+        )
+    }
+
+    /// The created block's id from a spawn's JSON result, recorded for the teardown.
+    fn pane_of(&self, out: &CmdOutput, ctx: &str) -> String {
+        let pane = json_payload(out, ctx)["pane_id"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{ctx}: pane_id: {out:?}"))
+            .to_owned();
+        self.created.borrow_mut().push(pane.clone());
+        pane
+    }
+
+    /// The listed block `id` and its session.
+    fn block(&self, id: &str) -> (String, Value) {
+        self.all_blocks()
+            .into_iter()
+            .find(|(_, block)| block["block_id"] == id)
+            .unwrap_or_else(|| panic!("the default server lists no block {id}"))
+    }
+
+    /// Wait until the raw echo in `block` has received the bytes `hex`, whatever reads
+    /// they arrived in.
+    fn wait_hex(&self, block: &str, hex: &str) {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            let capture =
+                String::from_utf8_lossy(&self.rex(&["capture", "-b", block]).stdout).into_owned();
+            let received: String = capture
+                .lines()
+                .filter_map(|line| line.trim().strip_prefix("HEX "))
+                .collect();
+            if received.contains(hex) {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "{block} never received {hex}: {capture}"
+            );
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+
+    /// Wait until `block`'s capture contains `text`.
+    fn wait_capture(&self, block: &str, text: &str) {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            let capture =
+                String::from_utf8_lossy(&self.rex(&["capture", "-b", block]).stdout).into_owned();
+            if capture.contains(text) {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "{block} never showed {text:?}: {capture}"
+            );
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+}
+
+impl Drop for LiveRun {
+    fn drop(&mut self) {
+        // Best effort: a panic here during an unwind would abort, so each step is
+        // caught, and the leak assertion of the test body is the check.
+        let names = self.names.borrow().clone();
+        for name in &names {
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                self.cli(&["kill", "--target", name, "--any"])
+            }));
+        }
+        // Close every recorded block id first, independently of any listing result;
+        // then, as an extra pass, every listed block with a run label (a create whose
+        // id is unknown). Never the caller's block.
+        let close = |id: &str| {
+            if id != self.caller {
+                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    self.rex(&["block", "close", id])
+                }));
+            }
+        };
+        let created = self.created.borrow().clone();
+        for id in &created {
+            close(id);
+        }
+        let listed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.own_blocks()))
+            .unwrap_or_default();
+        for (_, block) in listed {
+            if let Some(id) = block["block_id"].as_str() {
+                if !created.iter().any(|own| own == id) {
+                    close(id);
+                }
+            }
+        }
+        // `list` reconciles the records of blocks closed above.
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.cli(&["list", "--format", "json"])
+        }));
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+/// P8.4: the contract suite on the default Rex server, from a plain Rex terminal (no
+/// `$TMUX`, `REX_BLOCK` set): a `--split v` block beside the caller, a key send and a
+/// literal send, a Claude agent pane with Host state, and a multi-line prompt to the
+/// Claude pane with guaranteed delivery (P6.4). New blocks go to the caller's session
+/// (P3.1). P8.6: the run kills every block it created, also on failure, and ends by
+/// asserting that neither `tmux-tools list` nor the Rex block listing shows one.
+/// Opt-in with `TMUX_TOOLS_LIVE_REX=1`.
+#[test]
+fn rex_live_contract_suite() {
+    if original_environment().get(LIVE_SWITCH).map(String::as_str) != Some("1") {
+        return;
+    }
+    let run = LiveRun::start();
+
+    // The run reaches the default server: the server the calling terminal selects is
+    // the one `rex` reaches without `-S` and without `REX_SERVER`.
+    let selected = run.rex_json(&["server", "status", "--json"]);
+    let default = Command::new(&run.rex)
+        .args(["--autostart=false", "server", "status", "--json"])
+        .env_remove("REX_SERVER")
+        .stdin(Stdio::null())
+        .output()
+        .expect("run rex server status");
+    let default: Value = serde_json::from_slice(&default.stdout)
+        .unwrap_or_else(|_| panic!("rex server status on the default server: {default:?}"));
+    assert_eq!(
+        selected["instance_id"], default["instance_id"],
+        "{LIVE_SWITCH}=1 runs on the default server: {selected} vs {default}"
+    );
+    let (_, caller_block) = run.block(&run.caller);
+    let caller_window = caller_block["window_id"].clone();
+    println!(
+        "P8.4 live run {}: server {} caller {} session {} window {caller_window}",
+        run.tag, selected["instance_id"], run.caller, run.session
+    );
+
+    let report = json_payload(&run.cli(&["self", "--format", "json"]), "self");
+    assert_eq!(report["host"], "rex", "{report}");
+    let status = json_payload(&run.cli(&["status", "--format", "json"]), "status");
+    assert_eq!(status["pane_id"], run.caller.as_str(), "{status}");
+
+    // A `--split v` block beside the caller: in the caller's session and window, with
+    // the pane name as its label (P3.1, P3.3, P3.4).
+    let split_name = run.n("v");
+    let hexecho = run.dir.join("bin/hexecho.py").display().to_string();
+    let split = run.pane_of(
+        &run.cli(&[
+            "launch",
+            "--split",
+            "v",
+            "--bare",
+            "--name",
+            &split_name,
+            "--cmd",
+            &hexecho,
+            "--format",
+            "json",
+        ]),
+        "launch --split v",
+    );
+    let (session, block) = run.block(&split);
+    assert_eq!(session, run.session, "{block}");
+    assert_eq!(block["window_id"], caller_window, "{block}");
+    assert_eq!(block["label"], split_name.as_str(), "{block}");
+    println!("P8.4 --split v block {split} ({split_name}) is beside the caller: ok");
+
+    // A literal send and a key send (P5.3).
+    run.wait_capture(&split, "HEXECHO READY");
+    run.cli(&["send", "--target", &split_name, "Hi"])
+        .assert_success("send literal");
+    run.wait_hex(&split, "4869");
+    run.cli(&["send", "--target", &split_name, "Up"])
+        .assert_success("send key");
+    run.wait_hex(&split, "48691b5b41");
+    println!("P8.4 literal and key send: ok");
+
+    // A Claude agent pane with Host state (P6.2), in the caller's session (P3.1).
+    let claude_name = run.n("claude");
+    let claude = run.pane_of(
+        &run.cli(&[
+            "spawn-agent",
+            "claude",
+            "--name",
+            &claude_name,
+            "--format",
+            "json",
+        ]),
+        "spawn-agent claude",
+    );
+    let (session, block) = run.block(&claude);
+    assert_eq!(session, run.session, "{block}");
+    let deadline = Instant::now() + Duration::from_secs(90);
+    loop {
+        let status = json_payload(
+            &run.cli(&["status", "--target", &claude_name, "--format", "json"]),
+            "status claude",
+        );
+        if matches!(status["host_state"].as_str(), Some("idle" | "done")) {
+            assert!(status["host_word"].is_string(), "{status}");
+            println!(
+                "P8.4 Claude pane {claude} ({claude_name}) reports Host state {} ({}): ok",
+                status["host_state"], status["host_word"]
+            );
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "Claude never reported a Host state: {status}"
+        );
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    std::thread::sleep(Duration::from_secs(1));
+
+    // A multi-line prompt to the Claude pane: guaranteed delivery (P6.4). The run-unique
+    // token is a sum that only Claude's reply prints.
+    let seed = u64::from(std::process::id());
+    let addend = 141_421_u64;
+    let token = (seed + addend).to_string();
+    let prompt = format!(
+        "Reply with only the decimal sum of {seed} and {addend}.\nDigits only, no other text."
+    );
+    let result = json_payload(
+        &run.cli(&[
+            "prompt",
+            "--target",
+            &claude_name,
+            "--timeout",
+            "120",
+            "--format",
+            "json",
+            &prompt,
+        ]),
+        "prompt claude",
+    );
+    assert_eq!(result["host"], "rex", "{result}");
+    assert_eq!(result["one_submission_delivery"], "guaranteed", "{result}");
+    assert_eq!(result["submit"], "confirmed", "{result}");
+    assert!(
+        result["output_since_prompt"]
+            .as_str()
+            .is_some_and(|output| output.contains(&token)),
+        "the reply token {token}: {result}"
+    );
+    println!("P8.4 multi-line prompt to Claude, guaranteed delivery, reply {token}: ok");
+
+    // P8.6: kill every created block, then neither `tmux-tools list` nor the Rex block
+    // listing shows one.
+    let names = run.names.borrow().clone();
+    for name in &names {
+        run.cli(&["kill", "--target", name, "--any"])
+            .assert_success(&format!("kill {name}"));
+    }
+    let rows = json_payload(&run.cli(&["list", "--format", "json"]), "final list");
+    let listed: Vec<&Value> = rows
+        .as_array()
+        .map(|rows| {
+            rows.iter()
+                .filter(|row| {
+                    row["name"]
+                        .as_str()
+                        .is_some_and(|name| names.iter().any(|own| own == name))
+                        || row["pane"]
+                            .as_str()
+                            .is_some_and(|pane| run.created.borrow().iter().any(|own| own == pane))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    assert!(listed.is_empty(), "tmux-tools list shows {listed:?}");
+    let left = run.own_blocks();
+    assert!(left.is_empty(), "the Rex block listing shows {left:?}");
+    println!("P8.6 teardown: no block of the run is left: ok");
 }

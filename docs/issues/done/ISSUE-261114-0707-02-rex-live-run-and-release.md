@@ -2,7 +2,7 @@
 id: ISSUE-261114-0707-02
 kind: issue
 category: enhancement
-status: in-progress
+status: done
 claimed_by: implement-issue@agentmac
 claimed_at: 2026-11-16T01:56:47Z
 brief_contract: agent-brief.v3
@@ -112,16 +112,21 @@ contract:
 
 **Test seam:** the CLI binary driven by `tests/integration.rs` (PRD-261112-2108-01 P8.1) with `TMUX_TOOLS_LIVE_REX=1`; `tmux-tools --version`; `README.md`
 
-## Repair Notes
+## Code Review
 
-- kind: repairable
-- Prior attempt: claimed_by `implement-issue@agentmac`, claimed_at `2026-11-15T09:36:28Z`; session ended for context size during the maintainer visual check.
-- WIP: branch `wip/ISSUE-261114-0707-02-20261116T015443Z`, commit `77175f293e70b1c8c11cbb45ef957a7b10d74196` (`Cargo.lock`, `Cargo.toml`, `README.md`, `core/Cargo.toml`, `tests/contract/rex.rs`).
-- Review file: `issue-261114-0707-02-code-review-20261115-095134.md`; outcome ACCEPTED (M1/CODEX-1 fixed, Codex recheck VERIFIED_FIXED).
-- Counts: correction episodes 1; no-progress 0.
-- Visual check answers from the prior attempt: (1) `tt-check-split-v` block below `tt-live-runner`: yes. (2) `tt-check-claude` in a new tab of its own: yes. (3) focused tab/block unchanged, no focus taken: unknown, maintainer not present when the blocks opened (reports that tmux panes often take focus). (4) Rex shows a program state (idle) for the Claude block: not answered.
-- 0.9.0 is not installed.
-- Resume phase: maintainer visual check of the live run (before release).
-- Remaining required outcome: rerun the live check blocks for checks 1–4 with the maintainer watching. Before opening them, stop with `BLOCKED: maintainer check — ready to open the check blocks; reply go`; open them only after "go"; then ask checks 1–4. Install 0.9.0 only after a confirming answer to all four checks, then finish release per the Agent Brief.
+Review: `issue-261114-0707-02-code-review-20261115-095134.md` — Outcome: ACCEPTED
 
 ## Triage Notes
+
+- 2026-11-16 Release check: on the release revision (0.9.0, this issue's implementation commit), `TT_TEST_REX=1` (42 passed) and `TMUX_TOOLS_LIVE_REX=1` (1 passed) ran from a plain Rex terminal on the default server; the maintainer confirmed P9.2 checks 1–4 in the Rex app (Claude block state `idle`, shown on hover); post-check `tmux-tools list` and Rex block listing showed no block of the runs or the visual check.
+
+## Resolution
+
+- **Commit:** `feat: the Rex backend passes a live run in a plain Rex terminal, the maintainer confirms it in the Rex app, and it ships as 0.9.0 with a README Rex section (ISSUE-261114-0707-02)`
+- **Route:** `claude — deepseek-suspended` (test code, README, and version change; correction batch on the same route).
+- **TDD:** not recorded by the first attempt; acceptance is the opt-in live run output, the README, and `tmux-tools --version`.
+- **Review:** dual review (Claude + Codex), 1 finding (M1, CODEX-1) `VERIFIED_FIXED` after 1 correction batch — Outcome: ACCEPTED.
+- **Repair attempts:** 1 — the first attempt (claimed 2026-11-15T09:36:28Z) ended for context size during the maintainer visual check; resumed from WIP `77175f2`, reran both Rex runs and the visual check.
+- **Suite:** PASS — `cargo test --workspace --features test-fixtures` 383 passed; the 4 Orca live-run failures come from this session's stale `TT_TEAM` (`team not found`) and pass (6/6) with `TT_TEAM`/`TT_HOST` unset; clippy `-D warnings` and `cargo fmt --check` clean. `TT_TEST_REX=1` and `TMUX_TOOLS_LIVE_REX=1` passed in the Rex terminal.
+- **Release:** 0.9.0 installed with `cargo install --path .`; `tmux-tools --version` reports 0.9.0.
+- **Date:** 2026-11-16 (UTC)
