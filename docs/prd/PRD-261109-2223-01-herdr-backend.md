@@ -133,7 +133,7 @@ Under Herdr, panes that `tmux-tools` creates are invisible in the Herdr window a
 ### P3 — Placement and visibility
 
 1. A new terminal shows in the Herdr window only through the labels `herdr.space` and `herdr.tab`. Their source, first match: with `--target`, the target terminal's labels; with `HC_TERMINAL_ID` set, the calling terminal's labels; otherwise `TMUX_TOOLS_HERDR_SPACE` and `TMUX_TOOLS_HERDR_TAB`. When no source gives a space, the terminal gets neither label and stays hidden.
-2. `--split h` and `--split v` set both `herdr.space` and `herdr.tab`, so the terminal joins that tab; Herdr chooses its position and the split direction has no effect. No `--split`, and `--split window`, set only `herdr.space`, so Herdr opens a new tab.
+2. `--split h` and `--split v` set both `herdr.space` and `herdr.tab`, so the terminal joins that tab; Herdr chooses its position and the split direction has no effect. No `--split`, and `--split window`, set `herdr.space` and a `herdr.tab` with a new tab id that tmux-tools makes up and that no other terminal carries, so Herdr opens a new tab; a later `--split h` or `--split v` whose label source is this terminal joins that tab.
 3. `--split tile`, `--size`, `--session`, `--window`, and `rebalance` exit 3 with the PRD-261107-0825-01 P5.3 messages and no side effect. The automatic tile after a spawn is skipped (P5.4).
 4. The terminal starts with `hc run --bg --outlive-parent --no-notify --name <hc name> --cwd <cwd>` plus its labels (P3.1, P4.1), so its name and registration exist when it is created. Herdr creates through the port's `create_registered` path, not the create-then-name path of `layout::place`, and measures no geometry. `--rm` is never used.
 
@@ -208,7 +208,7 @@ Under Herdr, panes that `tmux-tools` creates are invisible in the Herdr window a
 - **`TMUX_TOOLS_HOST`** — `tmux` | `orca` | `herdr` (P2.1).
 - **Detection order** — P2.2.
 - **`TMUX_TOOLS_HERDR_SPACE`, `TMUX_TOOLS_HERDR_TAB`** — Herdr space id and tab id for new terminals when no `--target` and no `HC_TERMINAL_ID` (P3.1).
-- **hc terminal fields written by this tool** — `--name tt-<16 lowercase hex of SHA-256(name)>`; labels `herdr.space`, `herdr.tab` (P3), `where=<name>`, and the `tt.*` labels; flags `--outlive-parent --no-notify`.
+- **hc terminal fields written by this tool** — `--name tt-<16 lowercase hex of SHA-256(name)>`; labels `herdr.space`, `herdr.tab` (P3; a create with no `--split` or with `--split window` writes a new `herdr.tab` id that tmux-tools makes up, P3.2), `where=<name>`, and the `tt.*` labels; flags `--outlive-parent --no-notify`.
 - **JSON results on Herdr** — `host: "herdr"`; `list` rows per P7.3 (no `window` key); `window` in `status`, `spawn-agent`, `launch` is the `herdr.tab` label or `null`; keys with no Herdr source are `null`.
 - **`status --format json`** — adds `host_word: string | null` on every host; always `null` on tmux and Orca.
 - **`self --format json`** — `host` adds `"herdr"`; `driven` per P7.2.
