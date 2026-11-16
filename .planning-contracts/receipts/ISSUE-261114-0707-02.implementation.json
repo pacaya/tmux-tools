@@ -1,0 +1,67 @@
+{
+  "issue": {
+    "revision": "43c3126b9dfabfef13857aa1607b528e83b66504",
+    "sha256": "6c57945063f553bf1b3acbe1ea21205856f7d35457ac812ed0be5abfa84ef0bf",
+    "target": "tmux-tools:ISSUE-261114-0707-02"
+  },
+  "receipt_id": "impl-20261116T033557Z",
+  "resolution_mode": "canonical",
+  "schema": "planning-contracts.implementation-receipt.v2",
+  "sources": [
+    {
+      "revision": "eb2ebc61205769b3349eabb7244302005e20ae6c",
+      "sha256": "a28eb660fd94942cad51db5869d5ba74757bff5b2ac3317f6e44699676aa3fcb",
+      "target": "tmux-tools:PRD-261107-0825-01#p10-tests"
+    },
+    {
+      "revision": "eb2ebc61205769b3349eabb7244302005e20ae6c",
+      "sha256": "11c1bde745db73543c46e8c39386237b4d3a237006ae47b1908f506ccfeea039",
+      "target": "tmux-tools:PRD-261112-2108-01#contracts"
+    },
+    {
+      "revision": "eb2ebc61205769b3349eabb7244302005e20ae6c",
+      "sha256": "2a349aa253b443e118dbe430906dcf4689a80b2da6781053765291de7c965bad",
+      "target": "tmux-tools:PRD-261112-2108-01#p2-selection"
+    },
+    {
+      "revision": "eb2ebc61205769b3349eabb7244302005e20ae6c",
+      "sha256": "2762ef21e9d3d5948ecf560a5c8a2ddf5c111ff562da601f2d2985703bcbbc7c",
+      "target": "tmux-tools:PRD-261112-2108-01#p3-placement"
+    },
+    {
+      "revision": "eb2ebc61205769b3349eabb7244302005e20ae6c",
+      "sha256": "21b2c9c7820f2ddbdde9b6c386bff5e4b594d4f7e94d5794a33efc95594733d2",
+      "target": "tmux-tools:PRD-261112-2108-01#p4-registration"
+    },
+    {
+      "revision": "eb2ebc61205769b3349eabb7244302005e20ae6c",
+      "sha256": "2b189784c6126af38379e9469ac9f448d2bbceb04d32645f0ca4c5c0243b3b1a",
+      "target": "tmux-tools:PRD-261112-2108-01#p5-io"
+    },
+    {
+      "revision": "eb2ebc61205769b3349eabb7244302005e20ae6c",
+      "sha256": "7960ff054e8830a43ee5e12594d7ca8a8bc4f079cc003f6287d7d15a1da696bc",
+      "target": "tmux-tools:PRD-261112-2108-01#p6-state"
+    },
+    {
+      "revision": "eb2ebc61205769b3349eabb7244302005e20ae6c",
+      "sha256": "5652f6b9f74d50f277f5f91367903f1ac1cbe24df00cdbf6701de9a522f5897f",
+      "target": "tmux-tools:PRD-261112-2108-01#p7-other-verbs"
+    },
+    {
+      "revision": "eb2ebc61205769b3349eabb7244302005e20ae6c",
+      "sha256": "f7102c0030dc591e4e076dd53421ebefc580298b4f3d957455311ea547996684",
+      "target": "tmux-tools:PRD-261112-2108-01#p8-tests"
+    },
+    {
+      "revision": "eb2ebc61205769b3349eabb7244302005e20ae6c",
+      "sha256": "4d0234f606cd1cfe25dce65d9dc2a00eec246b0831608dc0192d8fac8d24e147",
+      "target": "tmux-tools:PRD-261112-2108-01#p9-rollout"
+    },
+    {
+      "revision": "eb2ebc61205769b3349eabb7244302005e20ae6c",
+      "sha256": "0c28ec664ce373454aaea445c69984a4f1ede7b79a3f46312bba799ea27a7ccb",
+      "target": "tmux-tools:PRD-261112-2108-01#verification"
+    }
+  ]
+}
