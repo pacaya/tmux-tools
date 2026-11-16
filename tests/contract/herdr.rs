@@ -265,11 +265,27 @@ fn an_unreachable_herdr_names_the_host_and_the_selection_source() {
     );
 }
 
+/// Acceptance (PRD-261115-0921-01 P2.1): inside a team, `TT_HOST=bogus` fails every
+/// verb with exit 1, and the error names `tmux`, `orca`, and `herdr` as the valid values.
+#[test]
+fn an_invalid_tt_host_names_tmux_orca_and_herdr() {
+    let fake = FakeHc::with_caller("herdr-tt-host", json!({}));
+    for args in [&["list"][..], &["self", "--format", "json"][..]] {
+        let out = fake.cli_with(args, &[("TT_TEAM", "0a1b2c3d"), ("TT_HOST", "bogus")], &[]);
+        assert_eq!(out.status, 1, "{args:?}: {out:?}");
+        assert!(
+            out.stderr.contains("valid values are tmux, orca and herdr"),
+            "{args:?}: {}",
+            out.stderr
+        );
+    }
+}
+
 // --- P3: placement ---------------------------------------------------------------------
 
 /// Acceptance: `launch --split v --name A.b` runs one `hc run` with the P3.4 flags,
-/// the hc name, and the labels of the calling terminal's space and tab; with no
-/// `--split` only the space. `--rm` is never used.
+/// the hc name, and the labels of the calling terminal's space and tab. `--rm` is
+/// never used. (No `--split`: [`a_new_tab_create_makes_up_a_tab_id_that_a_later_split_joins`].)
 #[test]
 fn launch_places_the_terminal_in_the_callers_space_and_tab() {
     let fake = FakeHc::with_caller("herdr-place", json!({"herdr.space": "S", "herdr.tab": "T"}));
@@ -293,16 +309,80 @@ fn launch_places_the_terminal_in_the_callers_space_and_tab() {
     for label in ["herdr.space=S", "herdr.tab=T", "where=A.b", "tt.name=A.b"] {
         assert!(labels.contains(&label.to_owned()), "{label}: {labels:?}");
     }
+}
+
+/// The one `herdr.tab=` value in the labels of one logged `hc run`.
+fn tab_label(run: &[String]) -> String {
+    let tabs: Vec<String> = labels_of(run)
+        .into_iter()
+        .filter_map(|label| label.strip_prefix("herdr.tab=").map(str::to_owned))
+        .collect();
+    assert_eq!(tabs.len(), 1, "exactly one herdr.tab label: {run:?}");
+    tabs.into_iter().next().unwrap()
+}
+
+/// Acceptance (P3.2, P7.3): from a calling terminal with `herdr.space` = S, `launch`
+/// with no `--split` and with `--split window` each sets `herdr.space` = S and a
+/// `herdr.tab` that no other terminal carries; each `launch --format json` reports that
+/// tab as `window_id`; a later `launch --split v --target <first terminal>` joins the
+/// first terminal's tab.
+#[test]
+fn a_new_tab_create_makes_up_a_tab_id_that_a_later_split_joins() {
+    let fake = FakeHc::with_caller(
+        "herdr-new-tab",
+        json!({"herdr.space": "S", "herdr.tab": "T"}),
+    );
+    let other = fake.add_terminal(json!({"labels": {"herdr.space": "S", "herdr.tab": "T2"}}));
+    let mut made_up = Vec::new();
+    for (name, extra) in [("n.one", &[][..]), ("n.two", &["--split", "window"][..])] {
+        fake.clear_log();
+        let mut args = vec![
+            "launch", "--name", name, "--cmd", "sleep 30", "--format", "json",
+        ];
+        args.extend_from_slice(extra);
+        let out = fake.cli(&args);
+        out.assert_success("launch in a new tab");
+        let runs = fake.calls("run");
+        assert_eq!(runs.len(), 1, "{runs:?}");
+        let labels = labels_of(&runs[0]);
+        assert!(labels.contains(&"herdr.space=S".to_owned()), "{labels:?}");
+        let tab = tab_label(&runs[0]);
+        let report = json_payload(&out, "launch --format json");
+        assert_eq!(report["window_id"].as_str(), Some(tab.as_str()), "{report}");
+        let pane = report["pane_id"].as_str().expect("pane_id").to_owned();
+        made_up.push((pane, tab));
+    }
+    let (first, first_tab) = made_up[0].clone();
+    let (second, second_tab) = made_up[1].clone();
+    // No other terminal carries either made-up tab.
+    for terminal in fake.state()["terminals"].as_array().unwrap() {
+        let address = terminal["address"].as_str().unwrap();
+        let tab = terminal["labels"]["herdr.tab"].as_str();
+        if address != first {
+            assert_ne!(tab, Some(first_tab.as_str()), "{terminal}");
+        }
+        if address != second {
+            assert_ne!(tab, Some(second_tab.as_str()), "{terminal}");
+        }
+    }
+    assert!(
+        !["T", "T2", ""].contains(&first_tab.as_str()),
+        "{first_tab}"
+    );
+    assert_ne!(first_tab, second_tab);
+    assert_ne!(other, first);
 
     fake.clear_log();
-    fake.cli(&["launch", "--name", "c.d", "--cmd", "sleep 30"])
-        .assert_success("launch without --split");
-    let labels = labels_of(&fake.calls("run")[0]);
-    assert!(labels.contains(&"herdr.space=S".to_owned()), "{labels:?}");
+    fake.cli(&[
+        "launch", "--split", "v", "--target", &first, "--name", "n.three", "--cmd", "sleep 30",
+    ])
+    .assert_success("launch --split v --target <first terminal>");
+    let run = &fake.calls("run")[0];
     assert!(
-        !labels.iter().any(|label| label.starts_with("herdr.tab=")),
-        "{labels:?}"
+        labels_of(run).contains(&"herdr.space=S".to_owned()),
+        "{run:?}"
     );
+    assert_eq!(tab_label(run), first_tab, "{run:?}");
 }
 
 /// P3.1: with `--target`, the target's labels; with no calling terminal, the
@@ -1028,40 +1108,63 @@ fn notify_is_not_delivered_on_herdr() {
 const FAKE_CLAUDE: &str = r#"#!/bin/sh
 if [ "$1" = "--version" ]; then echo "2.1.319 (Claude Code)"; exit 0; fi
 printf '%s\n' "$@" > "$FAKE_CLAUDE_ARGS"
+printf '%s\n' "${TT_HOST-}" > "$FAKE_CLAUDE_ARGS.host"
 exit 0
 "#;
 
-/// Acceptance (P7.7): `claude-teams` on Herdr fails open with `no teammate shim on
-/// herdr`, starts Claude with in-process teammates, and creates no team directory;
-/// `spawn-agent claude` runs the Launcher command in its `hc run`.
+/// Acceptance (PRD-261115-0921-01 P2): `claude-teams` in a Herdr terminal sets up a
+/// Team: no `claude-teams: no team` line, Claude gets `--teammate-mode tmux`, and
+/// `TT_HOST=herdr`; with `HC_TERMINAL_ID` unset (`TMUX_TOOLS_HOST=herdr`) it fails open
+/// with `HC_TERMINAL_ID is unset` and in-process teammates, and creates no team
+/// directory. `spawn-agent claude` runs the Launcher command in its `hc run`.
 #[test]
-fn claude_teams_fails_open_on_herdr_and_spawn_agent_claude_uses_the_launcher() {
+fn claude_teams_sets_up_a_team_on_herdr_and_spawn_agent_claude_uses_the_launcher() {
     let fake = FakeHc::with_caller("herdr-claude", json!({}));
     write_executable(&fake.dir.join("bin/claude"), FAKE_CLAUDE);
     let args_file = fake.dir.join("claude-args");
     let args_file_str = args_file.display().to_string();
+    let teams = fake.dir.join("state/tmux-tools/teams");
+    let no_team_dir = || !teams.exists() || std::fs::read_dir(&teams).unwrap().next().is_none();
+
+    let unset = fake.cli_with(
+        &["claude-teams"],
+        &[
+            ("FAKE_CLAUDE_ARGS", args_file_str.as_str()),
+            ("TMUX_TOOLS_HOST", "herdr"),
+        ],
+        &["HC_TERMINAL_ID"],
+    );
+    unset.assert_success("claude-teams on herdr without HC_TERMINAL_ID");
+    assert_eq!(
+        unset.stderr,
+        "claude-teams: no team: HC_TERMINAL_ID is unset; starting claude without teammate panes\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&args_file).unwrap(),
+        "--teammate-mode\nin-process\n"
+    );
+    assert!(no_team_dir(), "no team directory");
+
     let out = fake.cli_with(
         &["claude-teams"],
         &[("FAKE_CLAUDE_ARGS", args_file_str.as_str())],
         &[],
     );
     out.assert_success("claude-teams on herdr");
-    assert_eq!(
-        out.stderr,
-        "claude-teams: no team: no teammate shim on herdr; starting claude without teammate panes\n"
+    assert!(
+        !out.stderr.contains("claude-teams: no team"),
+        "{}",
+        out.stderr
     );
     assert_eq!(
         std::fs::read_to_string(&args_file).unwrap(),
-        "--teammate-mode\nin-process\n"
+        "--teammate-mode\ntmux\n"
     );
-    assert!(
-        !fake.dir.join("state/tmux-tools/teams").exists()
-            || std::fs::read_dir(fake.dir.join("state/tmux-tools/teams"))
-                .unwrap()
-                .next()
-                .is_none(),
-        "no team directory"
+    assert_eq!(
+        std::fs::read_to_string(format!("{args_file_str}.host")).unwrap(),
+        "herdr\n"
     );
+    assert!(no_team_dir(), "the clean exit removed the team directory");
 
     fake.clear_log();
     fake.cli(&["spawn-agent", "claude", "--name", "lead"])
@@ -1833,21 +1936,51 @@ fn herdr_private_core_contract_suite() {
     assert_eq!(terminal["labels"]["herdr.tab"], "T", "{terminal}");
     assert_eq!(terminal["labels"]["where"], "tt.v", "{terminal}");
     assert_eq!(terminal["labels"]["tt.name"], "tt.v", "{terminal}");
-    let tab = core.pane_of(
+    // No --split: a new tab with a made-up `herdr.tab`, reported as `window_id`, that
+    // a later `--split v` from that terminal joins (P3.2, P7.3).
+    let tab_launch = core.cli(&[
+        "launch",
+        "--name",
+        "tt.tab",
+        "--cmd",
+        "sleep 600",
+        "--format",
+        "json",
+    ]);
+    let tab = core.pane_of(&tab_launch, "launch");
+    let terminal = core.get(&tab);
+    assert_eq!(terminal["labels"]["herdr.space"], "S", "{terminal}");
+    let made_up = terminal["labels"]["herdr.tab"]
+        .as_str()
+        .expect("a made-up herdr.tab")
+        .to_owned();
+    assert!(!made_up.is_empty() && made_up != "T", "{terminal}");
+    assert_eq!(
+        json_payload(&tab_launch, "launch")["window_id"].as_str(),
+        Some(made_up.as_str())
+    );
+    let joined = core.pane_of(
         &core.cli(&[
             "launch",
+            "--split",
+            "v",
+            "--target",
+            &tab,
             "--name",
-            "tt.tab",
+            "tt.tab.v",
             "--cmd",
             "sleep 600",
             "--format",
             "json",
         ]),
-        "launch",
+        "launch --split v --target <new tab>",
     );
-    let terminal = core.get(&tab);
-    assert_eq!(terminal["labels"]["herdr.space"], "S", "{terminal}");
-    assert!(terminal["labels"].get("herdr.tab").is_none(), "{terminal}");
+    let terminal = core.get(&joined);
+    assert_eq!(
+        terminal["labels"]["herdr.tab"].as_str(),
+        Some(made_up.as_str()),
+        "{terminal}"
+    );
 
     // A duplicate live name (P4.2) and the exit-3 options (P3.3).
     let dup = core.cli(&["launch", "--name", "tt.v", "--cmd", "true"]);
@@ -2031,7 +2164,9 @@ fn herdr_private_core_contract_suite() {
     .assert_success("respawn dead");
 
     // kill every created terminal (P7.4), then nothing created is left (P8.5).
-    for name in ["tt.v", "tt.tab", "tt.echo", "tt.sh", "tt.agent", "tt.dead"] {
+    for name in [
+        "tt.v", "tt.tab", "tt.tab.v", "tt.echo", "tt.sh", "tt.agent", "tt.dead",
+    ] {
         core.cli(&["kill", "--target", name, "--any"])
             .assert_success(&format!("kill {name}"));
     }
@@ -2336,7 +2471,11 @@ fn herdr_live_contract_suite() {
         space.as_deref(),
         "{terminal}"
     );
-    assert!(terminal["labels"].get("herdr.tab").is_none(), "{terminal}");
+    let made_up = terminal["labels"]["herdr.tab"].as_str();
+    assert!(
+        made_up.is_some_and(|made_up| !made_up.is_empty()) && made_up != tab.as_deref(),
+        "a made-up herdr.tab that differs from the caller's tab: {terminal}"
+    );
     println!("P8.4 no-split terminal {new_tab} ({tab_name}) opens a new tab: ok");
 
     // A Claude agent pane with Host state (P6.2).

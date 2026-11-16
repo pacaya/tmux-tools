@@ -154,10 +154,13 @@ fn set_up(claude: ClaudeBinary) -> std::result::Result<Started, String> {
                 .ok_or_else(|| format!("{} is unset", host::ORCA_TERMINAL_HANDLE))?;
             (handle, None)
         }
-        // PRD-261109-2223-01 P7.7: Herdr has no teammate shim, so Claude starts with
-        // in-process teammates.
-        Host::Herdr => return Err("no teammate shim on herdr".to_owned()),
-        // PRD-261112-2108-01 P7.6: neither has Rex.
+        // PRD-261115-0921-01 P2.2: the Leader handle on Herdr is `HC_TERMINAL_ID`.
+        Host::Herdr => {
+            let handle = non_empty_env(host::HC_TERMINAL_ID)
+                .ok_or_else(|| format!("{} is unset", host::HC_TERMINAL_ID))?;
+            (handle, None)
+        }
+        // PRD-261112-2108-01 P7.6: Rex has no teammate shim.
         Host::Rex => return Err("no teammate shim on rex".to_owned()),
     };
     let server_id = port

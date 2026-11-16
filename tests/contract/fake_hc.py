@@ -5,11 +5,22 @@ tests (PRD-261109-2223-01 P8.2). It never reaches a real core.
 Its terminals live in the JSON file FAKE_HC_STATE:
 {"next": <n>, "terminals": [{"address", "name", "cwd", "argv", "labels", "state",
 "status", "status_ms", "turn", "rows", "lines", "how", "complete", "keys",
-"sent", "on_send"}]}. `hc get` reports the terminal's `rows` (default 24).
+"sent", "on_send", "rm", "visible"}]}. `hc get` reports the terminal's `rows` (default 24).
+`run` records `--rm` as `rm`. A terminal with `visible` (set by a test) answers
+`read --lines 0` with its last `visible` lines and `read --lines <n>` with its last `n`
+lines; without it every read answers all its lines.
 
 - FAKE_HC_LOG: append each call's argv as one JSON line.
 - FAKE_HC_DOWN=1: `server status` fails.
 - FAKE_HC_REJECT_KEYS=<a,b>: `keys` rejects these key names as `invalid_params`.
+- FAKE_HC_EXEC=1: `run` starts the terminal's command with `sh -c` in the background,
+  in its own session, with `HC_TERMINAL_ID` set to the new address. When the command
+  exits, the next call finds its exit status: exit 0 of a terminal run with `--rm`
+  removes the terminal, as Herdr does; any other exit makes it `finished`. `kill` ends
+  the command's process group.
+- `kill` of a terminal run with `--rm` removes it, as Herdr does, and answers
+  `not_found` "<t> was removed" with exit 3; of any other terminal it makes it `finished`.
+- FAKE_HC_EXEC=wait: as FAKE_HC_EXEC=1, but `run` answers only after the command exits.
 
 A terminal's `on_send` (set by a test) is applied by `send` after the text goes in:
 `turn` adds to the turn, `status` sets the status word with `status_ms` now, `rewrite`
@@ -18,6 +29,8 @@ replaces its whole history, `append` adds lines to its history, `complete` sets 
 """
 import json
 import os
+import signal
+import subprocess
 import sys
 import time
 
@@ -32,9 +45,32 @@ STATE = os.environ["FAKE_HC_STATE"]
 def load():
     try:
         with open(STATE) as handle:
-            return json.load(handle)
+            state = json.load(handle)
     except FileNotFoundError:
         return {"next": 1, "terminals": []}
+    reap(state)
+    return state
+
+
+def reap(state):
+    """FAKE_HC_EXEC: apply the exit of every command that ended since the last call."""
+    changed = False
+    for terminal in list(state["terminals"]):
+        status_file = terminal.get("status_file")
+        if not status_file or terminal["state"] != "live" or not os.path.exists(status_file):
+            continue
+        with open(status_file) as handle:
+            text = handle.read().strip()
+        if not text:
+            continue
+        changed = True
+        if int(text) == 0 and terminal.get("rm"):
+            state["terminals"].remove(terminal)
+        else:
+            terminal["state"] = "finished"
+            terminal["status"] = None
+    if changed:
+        save(state)
 
 
 def save(state):
@@ -122,7 +158,21 @@ if command == ["run"]:
         "argv": ["sh", "-c", (data or [""])[0]], "labels": labels, "state": "live",
         "status": None, "status_ms": None, "turn": 0, "lines": [], "how": "history",
         "complete": True, "keys": [], "sent": [], "on_send": {},
+        "rm": bool(options.get("--rm")),
     }
+    if os.environ.get("FAKE_HC_EXEC") in ("1", "wait"):
+        status_file = "%s.%s.status" % (STATE, address)
+        env = dict(os.environ)
+        env["HC_TERMINAL_ID"] = address
+        process = subprocess.Popen(
+            ["sh", "-c", 'sh -c "$1"; echo $? > "$2.tmp" && mv "$2.tmp" "$2"', "sh",
+             (data or [""])[0], status_file],
+            cwd=terminal["cwd"], env=env, stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+        terminal["pid"] = process.pid
+        terminal["status_file"] = status_file
+        if os.environ.get("FAKE_HC_EXEC") == "wait":
+            process.wait()
     state["terminals"].append(terminal)
     save(state)
     answer({"address": address, "agent": "sh", "cwd": terminal["cwd"], "name": name,
@@ -142,7 +192,11 @@ if command == ["get"]:
 
 if command == ["read"]:
     terminal = find(positional[0])
-    answer({"text": "\n".join(terminal["lines"]), "how": terminal.get("how", "history"),
+    lines = terminal["lines"]
+    if terminal.get("visible") is not None:
+        count = int(options.get("--lines", "0")) or terminal["visible"]
+        lines = lines[-count:]
+    answer({"text": "\n".join(lines), "how": terminal.get("how", "history"),
             "complete": terminal.get("complete", True), "why": None})
 
 if command == ["keys"]:
@@ -190,6 +244,17 @@ if command == ["label"]:
 
 if command == ["kill"]:
     terminal = find(positional[0])
+    if terminal.get("pid"):
+        try:
+            os.killpg(terminal["pid"], signal.SIGTERM)
+        except OSError:
+            pass
+    if terminal.get("rm"):
+        # As Herdr does: ending the program of a `--rm` terminal removes it at once,
+        # and `kill` itself answers not_found.
+        state["terminals"].remove(terminal)
+        save(state)
+        fail("not_found", "%s was removed" % terminal["address"], 3)
     terminal["state"] = "finished"
     terminal["status"] = None
     save(state)

@@ -2,7 +2,7 @@
 id: ISSUE-261115-1003-01
 kind: issue
 category: enhancement
-status: ready-for-agent
+status: done
 claimed_by: implement-issue@agentmac
 claimed_at: 2026-11-16T02:00:54Z
 brief_contract: agent-brief.v3
@@ -214,18 +214,25 @@ Review: `issue-261115-1003-01-code-review-20261115-111609.md` — Outcome: ACCEP
 
 Targeted review of the P3.2 repair episode (diff vs `f8214a0`): Outcome: ACCEPTED — no findings.
 
-## Repair Notes
-
-- kind: repairable
-- Prior claim: `implement-issue@agentmac`, claimed 2026-11-15T10:32:10Z; released by triage after the session shut down.
-- Maintainer decision 2026-11-15 (Option A, approved change to PRD-261109-2223-01 P3.2): a Herdr create with no `--split`, or with `--split window`, also sets a `herdr.tab` label with an id that tmux-tools makes up. PRD P3.2 and the Contracts entry are updated (`41e0c45`); the brief carries the change.
-- Restore: `git cherry-pick --no-commit f8214a000916c26dc2adcfcec3e198945418b232` (local branch `wip/ISSUE-261115-1003-01-20261116T014902Z`, based on `41e0c45`). Same code diff as lane snapshot `agent/wip/teammate-shim-herdr` `e5f32e0` (based on `32b5511`).
-- Review file: `issue-261115-1003-01-code-review-20261115-111609.md`; review accepted, M1–M3 fixed and verified.
-- Remaining required outcome: implement the P3.2 no-split made-up `herdr.tab` in code, fake-`hc` contract tests (the acceptance item for it), and the `TT_TEST_HERDR=1` / `TMUX_TOOLS_LIVE_HERDR=1` suite assertions, with a passing `TT_TEST_HERDR=1` run; targeted review of that change; then rerun the whole live P8, including P8.3 and P8.5, and the release steps.
-- Resume phase: implementation of the P3.2 change (targeted repair episode), then targeted review, then live P8.
-- Counts: review repair rounds 1 (M1–M3 in one consolidated repair, all verified); no-progress 0.
-
 ## Triage Notes
 
 - 2026-11-16: claim released (session shut down); brief reminted for maintainer decision Option A on PRD-261109-2223-01 P3.2; mint and dispatch readiness passed; prior approval `review-20261115T105821Z` superseded by a fresh dispatch.
 - 2026-11-16: brief-required PRD-261109-2223-01 P3.4/P4.2/P7.7/Contracts edit committed as source; re-dispatch binds it (precedent ISSUE-261108-2323-01).
+
+## Resolution
+
+- **Commit:** `feat: claude-teams on Herdr sets up a Team whose teammates are Herdr Teammate panes in the Leader's tab; live-checked in the maintainer's Herdr window and released as the next minor version (ISSUE-261115-1003-01)`
+- **Route:** `claude — deepseek-suspended` (code-primary feature plus tests and supporting README/version; Opus, effort medium) for the implementation, the P3.2 repair batch, and the release text/version batch.
+- **TDD:** red-green at the fake `hc` call log, `launch --format json` stdout, `tmux-tools list --format json`, and the Shim's stdout.
+- **Review:** first attempt: dual review, M1–M3 all `VERIFIED_FIXED` in one correction batch — Outcome: ACCEPTED (`issue-261115-1003-01-code-review-20261115-111609.md`). Repair episode (P3.2 made-up `herdr.tab`, maintainer Option A): targeted dual review (Claude + Codex) of the diff vs `f8214a0` — Outcome: ACCEPTED, no findings. No scope proposals.
+- **Suite:** PASS — `cargo fmt --check`, clippy `-D warnings`, `cargo test --workspace --features test-fixtures` (577 passed), `TT_TEST_HERDR=1 cargo test --features test-fixtures --test integration herdr_contract` (33 passed, private core), all with `TT_TEAM`/`TT_HOST` unset.
+- **P8 live run (maintainer's Herdr window, core `agentmac` 0.1.21, Leader by `spawn-agent claude --name lead` with no `--split`):** Claude runtime identity `/Users/agent/.local/share/claude/versions/2.1.325`, sha256 `84590fefe6338be9087f5814b61f9a54c5f21524163a4c127cb5a808e31009f2`, `2.1.325 (Claude Code)` (unchanged across the run). Leader `t23` in made-up tab `tt-tab-8a13ee73…`; no `claude-teams: no team` line.
+  - P8.1 PASS — `lead.tm1` (`t25`) in `list --format json` with `team`, `parent: "lead"`, `shim_id`, and live in `hc ls --all --json`, same `herdr.tab` as the Leader.
+  - P8.2 PASS — teammate `HC_TERMINAL_ID=t25`, Leader `t23`.
+  - P8.3 PASS — maintainer confirmed 2026-11-16: Leader and teammate are panes in tab `claude / 2`, and Herdr's agents list shows the teammate as the Leader's child.
+  - P8.4 PASS — clean `/exit` ("Exit and stop tasks") removed teammate terminal `t25` from `hc ls --all`.
+  - P8.5 PASS — SIGKILL of the Launcher and Leader Claude left `lead.tm1` with `orphan: true` (`orphan:lead`); `kill --target lead.tm1` closed it. A graceful `kill --target lead` closes the teammate too, through the shared Launcher clean-exit path (P2.5), on every host.
+  - P8.7 PASS — no tmux-tools pane and no new hc terminal after the run.
+- **Release:** `origin/development` already merged (ancestor of HEAD, 0.8.0); version 0.10.0 (0.9.0 is the Rex release ISSUE-261114-0707-02, P9.1); README Herdr placement and `claude-teams` text updated (P9.2); `cargo install --path . --locked` → `tmux-tools 0.10.0`.
+- **Repair history:** first claim 2026-11-15T10:32:10Z released after the session shut down at the P8.3 tab blocker; resumed from WIP `f8214a0` after the maintainer's P3.2 Option A decision.
+- **Date:** 2026-11-16 (UTC)
