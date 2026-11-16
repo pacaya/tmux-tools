@@ -119,6 +119,7 @@ Review: `issue-261114-0707-02-code-review-20261115-095134.md` — Outcome: ACCEP
 ## Triage Notes
 
 - 2026-11-16 Release check: on the release revision (0.9.0, this issue's implementation commit), `TT_TEST_REX=1` (42 passed) and `TMUX_TOOLS_LIVE_REX=1` (1 passed) ran from a plain Rex terminal on the default server; the maintainer confirmed P9.2 checks 1–4 in the Rex app (Claude block state `idle`, shown on hover); post-check `tmux-tools list` and Rex block listing showed no block of the runs or the visual check.
+- 2026-11-16 Maintainer decision (P9.2 check 4): ACCEPTED — Rex showing the Claude block state `idle` only on hover counts as a pass; Rex is in beta and may change this display later.
 
 ## Resolution
 
