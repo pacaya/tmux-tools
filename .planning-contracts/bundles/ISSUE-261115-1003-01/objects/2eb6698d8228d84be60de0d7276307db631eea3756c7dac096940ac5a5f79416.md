@@ -2,7 +2,7 @@
 id: ISSUE-261115-1003-01
 kind: issue
 category: enhancement
-status: in-review
+status: ready-for-agent
 claimed_by: implement-issue@agentmac
 claimed_at: 2026-11-16T02:00:54Z
 brief_contract: agent-brief.v3
@@ -228,3 +228,4 @@ Targeted review of the P3.2 repair episode (diff vs `f8214a0`): Outcome: ACCEPTE
 ## Triage Notes
 
 - 2026-11-16: claim released (session shut down); brief reminted for maintainer decision Option A on PRD-261109-2223-01 P3.2; mint and dispatch readiness passed; prior approval `review-20261115T105821Z` superseded by a fresh dispatch.
+- 2026-11-16: brief-required PRD-261109-2223-01 P3.4/P4.2/P7.7/Contracts edit committed as source; re-dispatch binds it (precedent ISSUE-261108-2323-01).
