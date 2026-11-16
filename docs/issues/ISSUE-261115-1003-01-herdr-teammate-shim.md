@@ -208,6 +208,12 @@ contract:
 
 **Test seam:** `tmux-tools list --format json`, the fake `hc` call log, the Shim's stdout, and the CLI's stdout/stderr (Agent Brief Acceptance)
 
+## Code Review
+
+Review: `issue-261115-1003-01-code-review-20261115-111609.md` — Outcome: ACCEPTED
+
+Targeted review of the P3.2 repair episode (diff vs `f8214a0`): Outcome: ACCEPTED — no findings.
+
 ## Repair Notes
 
 - kind: repairable
