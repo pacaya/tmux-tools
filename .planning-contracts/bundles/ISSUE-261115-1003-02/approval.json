@@ -1,5 +1,5 @@
 {
-  "approval_id": "redispatch-20261116T070955Z",
+  "approval_id": "review-20261116T071029Z",
   "impact_disposition": {
     "checked_revisions": [
       {
@@ -141,7 +141,7 @@
     "status": "accepted"
   },
   "issue": {
-    "revision": "1d5c7280e434d4a6cf44b8dea6d9b8b81bc99f46",
+    "revision": "6283997138728db92fbf42597e7a0df19f9228db",
     "sha256": "b2464cb271b60edb7babf5a6d171b79c2c019de3ba07e7e74b2739d384388f9e",
     "target": "tmux-tools:ISSUE-261115-1003-02"
   },
