@@ -29,6 +29,10 @@ the block's `lines`. `send-key enter` then applies the block's `on_send` (set by
 test): `records` adds records stamped now, `append` adds lines, `rewrite` replaces all
 lines, `drop` removes that many oldest lines, `rows`, `columns`, `alternate` set them.
 
+`block rename BLOCK -- LABEL` sets the block's `label`; any other argument shape is a
+usage error (exit 2). A server's `rename_gone` removes the block first, so the rename
+fails as not found (exit 3); its `rename_fail` fails the rename with exit 1.
+
 - FAKE_REX_LOG: append each call's argv as one JSON line.
 """
 import datetime
@@ -286,6 +290,21 @@ if command == ["api", "call"]:
         block["lines"].extend(text.split("\n"))
     save(state)
     answer({})
+
+if command == ["block", "rename"]:
+    # `rex block rename BLOCK -- LABEL`: one block and one label, else a usage error.
+    if len(positional) != 1 or data is None or len(data) != 1:
+        fail("usage: rex block rename BLOCK -- LABEL", 2)
+    # `rename_gone` makes the block vanish first; `rename_fail` fails the rename.
+    if server.get("rename_gone"):
+        server["blocks"] = [b for b in server["blocks"] if b["block_id"] != positional[0]]
+        save(state)
+    block = find(positional[0])
+    if server.get("rename_fail"):
+        fail("block.rename request failed", 1)
+    block["label"] = data[0]
+    save(state)
+    sys.exit(0)
 
 if command == ["block", "close"]:
     block = find(positional[0])

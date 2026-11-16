@@ -266,15 +266,17 @@ fn an_unreachable_herdr_names_the_host_and_the_selection_source() {
 }
 
 /// Acceptance (PRD-261115-0921-01 P2.1): inside a team, `TT_HOST=bogus` fails every
-/// verb with exit 1, and the error names `tmux`, `orca`, and `herdr` as the valid values.
+/// verb with exit 1, and the error names every accepted value: `tmux`, `orca`, `rex`
+/// (Rex slice), and `herdr`.
 #[test]
-fn an_invalid_tt_host_names_tmux_orca_and_herdr() {
+fn an_invalid_tt_host_names_every_accepted_host() {
     let fake = FakeHc::with_caller("herdr-tt-host", json!({}));
     for args in [&["list"][..], &["self", "--format", "json"][..]] {
         let out = fake.cli_with(args, &[("TT_TEAM", "0a1b2c3d"), ("TT_HOST", "bogus")], &[]);
         assert_eq!(out.status, 1, "{args:?}: {out:?}");
         assert!(
-            out.stderr.contains("valid values are tmux, orca and herdr"),
+            out.stderr
+                .contains("valid values are tmux, orca, rex and herdr"),
             "{args:?}: {}",
             out.stderr
         );

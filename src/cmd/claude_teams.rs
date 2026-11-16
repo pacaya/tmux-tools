@@ -160,8 +160,12 @@ fn set_up(claude: ClaudeBinary) -> std::result::Result<Started, String> {
                 .ok_or_else(|| format!("{} is unset", host::HC_TERMINAL_ID))?;
             (handle, None)
         }
-        // PRD-261112-2108-01 P7.6: Rex has no teammate shim.
-        Host::Rex => return Err("no teammate shim on rex".to_owned()),
+        // PRD-261115-0921-01 P2.2: the Leader handle on Rex is `REX_BLOCK`.
+        Host::Rex => {
+            let handle = non_empty_env(host::REX_BLOCK)
+                .ok_or_else(|| format!("{} is unset", host::REX_BLOCK))?;
+            (handle, None)
+        }
     };
     let server_id = port
         .server_identity()

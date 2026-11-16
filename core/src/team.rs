@@ -43,7 +43,8 @@ pub struct TeamRecord {
     /// 8 lowercase hex digits.
     pub id: String,
     pub host: Host,
-    /// The Orca `runtimeId`; on tmux the server socket path; on Herdr the core id.
+    /// The Orca `runtimeId`; on tmux the server socket path; on Herdr the core id; on
+    /// Rex the `instance_id`.
     pub server_id: String,
     pub leader: TeamLeader,
     /// The next teammate number `k`; starts at 1.
@@ -53,7 +54,7 @@ pub struct TeamRecord {
     /// RFC 3339.
     pub created_at: String,
     pub claude: ClaudeBinary,
-    /// `Some` only on tmux; `None` on Orca and Herdr.
+    /// `Some` only on tmux; `None` on Orca, Herdr, and Rex.
     pub tmux: Option<TmuxEndpoint>,
 }
 
@@ -61,8 +62,8 @@ pub struct TeamRecord {
 /// Leader's current Pane registration by `handle` (P2.8, P6.1).
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct TeamLeader {
-    /// The host pane handle: a tmux `%id`, an Orca `term_…`, or the Herdr
-    /// `HC_TERMINAL_ID`.
+    /// The host pane handle: a tmux `%id`, an Orca `term_…`, the Herdr
+    /// `HC_TERMINAL_ID`, or the Rex `REX_BLOCK`.
     pub handle: String,
     /// Always [`LEADER_SHIM_ID`].
     pub shim_id: String,

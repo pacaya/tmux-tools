@@ -2,7 +2,7 @@
 id: ISSUE-261115-1003-02
 kind: issue
 category: enhancement
-status: in-review
+status: done
 claimed_by: implement-issue@agentmac
 claimed_at: 2026-11-16T06:51:03Z
 brief_contract: agent-brief.v3
@@ -197,7 +197,28 @@ contract:
 
 Review: `issue-261115-1003-02-code-review-20261116-072603.md` — Outcome: ACCEPTED
 
+Label fix (P8 finding, maintainer Q4 = A): independent targeted review of the `rex block rename` diff — B1 (failed non-not-found rename failed a completed respawn) and N2–N5 fixed in one batch; targeted recheck: all resolved, no new blocking findings — Outcome: ACCEPTED.
+
 ## Triage Notes
 
 - 2026-11-16: `rex-no-space` settled by the maintainer at triage — P3.4 no-space mapping, its P7.2 test, P8.6, and the Shim error contract removed; PRD-261112-2108-01 P4.4 unchanged.
 - 2026-11-16: brief-required PRD-261112-2108-01 P7.6/Contracts edit committed as source; re-dispatch binds it (precedent ISSUE-261115-1003-01).
+- 2026-11-16: P8.1 live finding — the Rex block label stayed at the transitional name `<name>.respawn-<pid>`; maintainer chose to fix it in this issue (Q4 = A): a Name change runs `rex block rename <block> -- <label>` (PRD-261112-2108-01 P3.4).
+
+## Resolution
+
+- **Commit:** `feat: claude-teams on Rex sets up a Team whose teammates are Rex blocks right of the Leader and below the newest teammate; live-checked in a Rex tab and released as the next minor version (ISSUE-261115-1003-02)`
+- **Route:** `claude — deepseek-suspended` (Opus, effort medium) for the implementation, review fix batch 1 (M1/M2/L1), the label fix, the label-fix review batch (B1, N2–N5), and the README/version batch; `claude — regression` (`RETAINED_REGRESSION: M3`, tests only, medium) for review fix batch 2.
+- **TDD:** red-green at `tmux-tools list --format json`, `rex session inspect`, the teammate's printed environment, `claude-teams` stderr, the fake `rex` call log, and the `relabel` unit test. Label fix red: fake `tests/contract/rex.rs` respawn test (no rename call) and real server (`lead.tm1.respawn-80137` vs `lead.tm1`); review batch red: respawn test exit 8 without `--` and in `rename_fail` mode.
+- **Review:** dual review, M1, M2, L1, M3 all `(FIXED)` — Outcome: ACCEPTED (`issue-261115-1003-02-code-review-20261116-072603.md`). Label fix: independent targeted review, B1 + N2–N5 fixed in one batch, targeted recheck all resolved, no new blocking findings — Outcome: ACCEPTED. No scope proposals.
+- **Suite:** PASS — `cargo fmt --check`, clippy `-D warnings`, `cargo test --workspace --features test-fixtures` (581 passed), `TT_TEST_REX=1 cargo test --workspace --features test-fixtures --test integration -- rex_contract::` (44 passed, private server; includes the real `rex block rename … -- <label>` label assertion), all with `TT_TEAM`/`TT_HOST` unset.
+- **P8 live run (Rex app, client `agentmac`, session `tt-live-rex`, Leader by `spawn-agent claude --name lead`):** first run with Claude `/Users/agent/.local/share/claude/versions/2.1.325`, sha256 `84590fefe6338be9087f5814b61f9a54c5f21524163a4c127cb5a808e31009f2`, `2.1.325 (Claude Code)`; final run with `/Users/agent/.local/share/claude/versions/2.1.326`, sha256 `e214ad76dcc0e846b03be28ed1c2734aacd4e27acb527cb7f8a9e2bed644e837`, `2.1.326 (Claude Code)` (re-recorded before each Leader; unchanged within the run). No `claude-teams: no team` line.
+  - P8.1 PASS — `lead.tm1` in `list --format json` with `team`, `parent: "lead"`, `shim_id: "%2"`; in `rex ls` and `rex block ls`; horizontal split, teammate `after` the Leader; label `lead.tm1`. Maintainer confirmed visually (Q3 first run; Q6 after the label fix).
+  - P8.2 PASS — teammate `REX_BLOCK` is its own block, not the Leader's.
+  - P8.4 PASS — clean `/exit` ("Exit and stop tasks") removed the teammate block from `rex block ls` and `lead.tm1` from `list`.
+  - P8.5 PASS — SIGKILL of the Launcher and Leader Claude left `lead.tm1` with `orphan: true`; `kill --target lead.tm1` closed the block.
+  - P8.6 removed (rex-no-space).
+  - P8.7 PASS — `list` `[]`, no leftover block; `rex kill tt-live-rex` left only `Onboarding`; no `/tmp/ttrex-*`.
+  - Live finding: the teammate block label stayed at the transitional name; fixed in this issue (Q4 = A), see Triage Notes. The final live run used the label fix before review batch B1/N2 (`--` before the label; warning instead of failure); that batch is covered by the suites above.
+- **Release:** `origin/development` (0.10.0) already merged (ancestor of HEAD, fetched immediately before the bump); version 0.11.0; README Rex `claude-teams` text, Claude teams host list and `spawn-agent claude` Launcher host list updated; `cargo install --path . --locked` → `tmux-tools 0.11.0`.
+- **Date:** 2026-11-16 (UTC)

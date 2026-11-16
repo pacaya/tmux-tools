@@ -29,13 +29,12 @@ const WINDOW_ID: &str = "@0";
 /// The longest Teammate pane name built from the Leader name (P6.1).
 const MAX_NAME_BYTES: usize = 100;
 /// The `-e` variables the Shim drops on `host`: a teammate gets its own pane's values
-/// (P6.5; Herdr: PRD-261115-0921-01 P4.1).
+/// (P6.5; Herdr and Rex: PRD-261115-0921-01 P4.1).
 fn dropped_env(host: Host) -> &'static [&'static str] {
     match host {
         Host::Herdr => &["HC_TERMINAL_ID", "HC_SCOPE"],
-        Host::Tmux | Host::Orca | Host::Rex => {
-            &["ORCA_PANE_KEY", "ORCA_TERMINAL_HANDLE", "ORCA_TAB_ID"]
-        }
+        Host::Rex => &["REX_BLOCK", "REX_SESSION", "REX_SERVER"],
+        Host::Tmux | Host::Orca => &["ORCA_PANE_KEY", "ORCA_TERMINAL_HANDLE", "ORCA_TAB_ID"],
     }
 }
 

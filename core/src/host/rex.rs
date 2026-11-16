@@ -807,9 +807,36 @@ impl RexHost {
         if record.name != old_name {
             self.reserve_record(&record)?;
             self.write_record(&record)?;
-            return registry::delete(Host::Rex, &record.server_id, &old_name);
+            registry::delete(Host::Rex, &record.server_id, &old_name)?;
+            // The block label follows the pane name (P3.4). It is for display only, so
+            // a failed rename after the record moved is a warning, not a failure.
+            if let (Some(label), Some(handle)) =
+                (relabel(&old_name, &record.name), record.handle.as_deref())
+            {
+                if let Err(error) = self.rename_block(handle, &label) {
+                    let detail = format!("{error:#}").replace('\n', " ");
+                    eprintln!("rex: block label not updated: {handle}: {detail}");
+                }
+            }
+            return Ok(());
         }
         self.write_record(&record)
+    }
+
+    /// `rex block rename <block> -- <label>`: `--` keeps a label that starts with `-`
+    /// from being read as a flag. A block already gone counts as renamed.
+    fn rename_block(&self, block: &str, label: &str) -> Result<()> {
+        match self.call(&["block", "rename", block, "--", label]) {
+            Ok(_) => Ok(()),
+            Err(error)
+                if error
+                    .downcast_ref::<RexError>()
+                    .is_some_and(RexError::not_found) =>
+            {
+                Ok(())
+            }
+            Err(error) => Err(error),
+        }
     }
 
     /// `rex block close <block>`; a block already gone counts as closed (P7.4).
@@ -835,6 +862,13 @@ fn command_name(args: &[&str]) -> String {
         .copied()
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// The new block label when a pane is renamed from `old` to `new`; `None` when the
+/// first 128 characters, and so the label, stay the same.
+fn relabel(old: &str, new: &str) -> Option<String> {
+    let label = label_of(new);
+    (label != label_of(old)).then_some(label)
 }
 
 /// The block label of a pane name: its first 128 characters (P3.4).
@@ -1660,6 +1694,26 @@ mod tests {
             Some(1_794_726_347_570_986_000)
         );
         assert_eq!(rfc3339_ns("1970-01-01T00:00:01+00:00"), Some(1_000_000_000));
+    }
+
+    #[test]
+    fn a_rename_relabels_only_when_the_first_128_characters_change() {
+        let name = |length: usize, last: char| {
+            let mut name: String = "a".repeat(length - 1);
+            name.push(last);
+            name
+        };
+        // Two names of 128 or more characters that share the first 128: no rename.
+        assert_eq!(relabel(&name(130, 'x'), &name(129, 'y')), None);
+        assert_eq!(relabel(&name(128, 'a'), &name(140, 'z')), None);
+        // A rename to a 129-character name: the label is its first 128 characters.
+        let new = format!("b{}", name(128, 'c'));
+        assert_eq!(new.chars().count(), 129);
+        assert_eq!(relabel("lead.tm1", &new), Some(new[..128].to_owned()));
+        assert_eq!(
+            relabel("lead.tm1.respawn-1", "lead.tm1").as_deref(),
+            Some("lead.tm1")
+        );
     }
 
     #[test]
