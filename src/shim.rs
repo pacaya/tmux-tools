@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use serde::Serialize;
 use tmux_tools_core::{
-    host::{self, HostPort, ListScope, RegistrationKey, SplitDirection},
+    host::{self, Host, HostPort, ListScope, RegistrationKey, SplitDirection},
     layout::{Registration, TeammateRegistration},
     names::{self, Registered},
     registry::NameTaken,
@@ -28,8 +28,16 @@ const TMUX_VERSION: &str = "tmux 3.4";
 const WINDOW_ID: &str = "@0";
 /// The longest Teammate pane name built from the Leader name (P6.1).
 const MAX_NAME_BYTES: usize = 100;
-/// The `-e` variables the Shim drops: a teammate gets its own pane's values (P6.5).
-const DROPPED_ENV: [&str; 3] = ["ORCA_PANE_KEY", "ORCA_TERMINAL_HANDLE", "ORCA_TAB_ID"];
+/// The `-e` variables the Shim drops on `host`: a teammate gets its own pane's values
+/// (P6.5; Herdr: PRD-261115-0921-01 P4.1).
+fn dropped_env(host: Host) -> &'static [&'static str] {
+    match host {
+        Host::Herdr => &["HC_TERMINAL_ID", "HC_SCOPE"],
+        Host::Tmux | Host::Orca | Host::Rex => {
+            &["ORCA_PANE_KEY", "ORCA_TERMINAL_HANDLE", "ORCA_TAB_ID"]
+        }
+    }
+}
 
 /// An exit 1 of the Shim: its message, printed as `tmux: <message>`.
 #[derive(Debug)]
@@ -528,9 +536,10 @@ fn capture_pane(parsed: &Parsed) -> Outcome {
         .filter(|start| *start != "-")
         .map(line)
         .transpose()?;
-    if team.host.uses_pane_records() {
-        // A host without line addressing (Orca): `-S -` reads all history, and a
-        // negative `-S` reads that many history lines plus the visible screen (P5.6).
+    if !team.host.addresses_lines() {
+        // A host without line addressing (Orca, Herdr): `-S -` reads all history, and a
+        // negative `-S` reads that many history lines plus the visible screen (P5.6,
+        // PRD-261115-0921-01 P3.5).
         let range = match (parsed.value('S'), start) {
             (Some("-"), _) => host::CaptureRange::All,
             (_, Some(start)) if start < 0 => {
@@ -573,9 +582,9 @@ fn kill_pane(parsed: &Parsed) -> Outcome {
 }
 
 /// The pane command of P6.1: `cd '<dir>' && env K=V … <command>`, with the `-e`
-/// settings of [`DROPPED_ENV`] dropped (P6.5). Without a command, the caller's login
-/// shell.
-fn pane_command(parsed: &Parsed) -> String {
+/// settings of [`dropped_env`] of `host` dropped (P6.5). Without a command, the
+/// caller's login shell.
+fn pane_command(parsed: &Parsed, host: Host) -> String {
     let command = match parsed.rest.as_slice() {
         [] => std::env::var("SHELL")
             .ok()
@@ -593,7 +602,7 @@ fn pane_command(parsed: &Parsed) -> String {
         .into_iter()
         .filter(|setting| {
             let key = setting.split('=').next().unwrap_or_default();
-            !DROPPED_ENV.contains(&key)
+            !dropped_env(host).contains(&key)
         })
         .map(shell_quote)
         .collect();
@@ -656,7 +665,9 @@ impl Team {
         fields: &TeammateFields,
         detached: bool,
     ) -> std::result::Result<String, anyhow::Error> {
-        if self.host.uses_pane_records() {
+        // PRD-261115-0921-01 P3.1: a host that creates panes only with their
+        // registration (Herdr), or keeps Pane records, takes the registered create.
+        if self.host.creates_registered() {
             let (handle, _) = self.host.create_registered(
                 command,
                 Some(direction),
@@ -772,7 +783,7 @@ fn split_window(parsed: &Parsed) -> Outcome {
     };
 
     let leader_name = team.leader_name()?;
-    let command = close_on_success(&pane_command(parsed));
+    let command = close_on_success(&pane_command(parsed, team.host.host()));
     let launched_at = rfc3339_utc_now()?;
     let cwd = std::env::current_dir()
         .ok()
@@ -844,11 +855,12 @@ fn respawn_pane(parsed: &Parsed) -> Outcome {
         surface: registered.surface.clone(),
         surface_unvalidated: registered.surface_unvalidated,
     };
-    let command = close_on_success(&pane_command(parsed));
+    let command = close_on_success(&pane_command(parsed, team.host.host()));
     // On a registry host the old record holds the name until the old pane is closed,
+    // and Herdr refuses a second live terminal with the name (PRD-261115-0921-01 P5),
     // so the new pane is registered under a transitional name and renamed after.
-    let registry_host = team.host.uses_pane_records();
-    if registry_host {
+    let transitional = team.host.creates_registered();
+    if transitional {
         fields.name = format!("{name}.respawn-{}", std::process::id());
     }
     let handle = match team.create_teammate(
@@ -863,9 +875,21 @@ fn respawn_pane(parsed: &Parsed) -> Outcome {
         Err(error) => return Err(Refusal(format!("{error:#}"))),
     };
     team.host.close_pane(&old.handle, None)?;
-    if registry_host {
-        team.host
-            .write_registration_value(&handle, RegistrationKey::Name, &name)?;
+    if transitional {
+        if let Err(error) =
+            team.host
+                .write_registration_value(&handle, RegistrationKey::Name, &name)
+        {
+            // A Herdr Teammate terminal is removed when its command exits 0
+            // (PRD-261115-0921-01 P6.1), possibly before the name is written; the
+            // create succeeded and the old terminal is closed, so the respawn is
+            // complete (PRD-261108-0447-01 P6.2).
+            let removed = team.host.host() == Host::Herdr
+                && matches!(team.host.pane_exists(&handle), Ok(false));
+            if !removed {
+                return Err(error.into());
+            }
+        }
     }
     Ok(String::new())
 }
@@ -1105,6 +1129,6 @@ mod tests {
             &[('e', true)],
         )
         .unwrap();
-        assert_eq!(pane_command(&parsed), "env 'K=V' cat");
+        assert_eq!(pane_command(&parsed, Host::Orca), "env 'K=V' cat");
     }
 }

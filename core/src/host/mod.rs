@@ -112,8 +112,10 @@ impl HostSelection {
                 None => anyhow::bail!("{TT_TEAM} is set but {TT_HOST} is unset"),
                 Some("tmux") => Host::Tmux,
                 Some("orca") => Host::Orca,
+                // PRD-261115-0921-01 P2.1: the Herdr slice adds `herdr`.
+                Some("herdr") => Host::Herdr,
                 Some(other) => anyhow::bail!(
-                    "{TT_HOST}={other:?} is not a host; valid values are tmux and orca"
+                    "{TT_HOST}={other:?} is not a host; valid values are tmux, orca and herdr"
                 ),
             };
             return Ok(HostSelection {
@@ -677,6 +679,15 @@ pub trait HostPort: Sync {
         self.uses_pane_records()
     }
 
+    /// Whether the host addresses a pane's lines by number ([`CaptureRange::Rows`]),
+    /// as tmux does. A host that creates every pane with its registration (Orca, Rex,
+    /// Herdr) reads history only as a whole or as a tail ([`CaptureRange::All`],
+    /// [`CaptureRange::Tail`]); the Shim's `capture-pane` chooses its history path by
+    /// this (PRD-261115-0921-01 P3.5).
+    fn addresses_lines(&self) -> bool {
+        !self.creates_registered()
+    }
+
     /// Whether the program that runs a pane command keeps a shell after the command
     /// exits, so the command itself is the Keep-alive wrap (Orca, P9.9).
     fn shell_stays_after_command(&self) -> bool {
@@ -897,9 +908,12 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(
-            invalid.contains("tmux") && invalid.contains("orca"),
+            invalid.contains("tmux") && invalid.contains("orca") && invalid.contains("herdr"),
             "{invalid}"
         );
+        // PRD-261115-0921-01 P2.1: the Herdr slice accepts `TT_HOST=herdr`.
+        let herdr_team = select(&[(TT_TEAM, "0a1b2c3d"), (TT_HOST, "herdr")]).unwrap();
+        assert_eq!(herdr_team.host, Host::Herdr);
 
         // PRD-261109-2223-01 P2.1–P2.2: `herdr` is a valid value, and
         // `HC_TERMINAL_ID` selects it after `$TMUX` and `ORCA_TERMINAL_HANDLE`.

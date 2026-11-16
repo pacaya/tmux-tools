@@ -133,14 +133,14 @@ Under Herdr, panes that `tmux-tools` creates are invisible in the Herdr window a
 ### P3 — Placement and visibility
 
 1. A new terminal shows in the Herdr window only through the labels `herdr.space` and `herdr.tab`. Their source, first match: with `--target`, the target terminal's labels; with `HC_TERMINAL_ID` set, the calling terminal's labels; otherwise `TMUX_TOOLS_HERDR_SPACE` and `TMUX_TOOLS_HERDR_TAB`. When no source gives a space, the terminal gets neither label and stays hidden.
-2. `--split h` and `--split v` set both `herdr.space` and `herdr.tab`, so the terminal joins that tab; Herdr chooses its position and the split direction has no effect. No `--split`, and `--split window`, set only `herdr.space`, so Herdr opens a new tab.
+2. `--split h` and `--split v` set both `herdr.space` and `herdr.tab`, so the terminal joins that tab; Herdr chooses its position and the split direction has no effect. No `--split`, and `--split window`, set `herdr.space` and a `herdr.tab` with a new tab id that tmux-tools makes up and that no other terminal carries, so Herdr opens a new tab; a later `--split h` or `--split v` whose label source is this terminal joins that tab.
 3. `--split tile`, `--size`, `--session`, `--window`, and `rebalance` exit 3 with the PRD-261107-0825-01 P5.3 messages and no side effect. The automatic tile after a spawn is skipped (P5.4).
-4. The terminal starts with `hc run --bg --outlive-parent --no-notify --name <hc name> --cwd <cwd>` plus its labels (P3.1, P4.1), so its name and registration exist when it is created. Herdr creates through the port's `create_registered` path, not the create-then-name path of `layout::place`, and measures no geometry. `--rm` is never used.
+4. The terminal starts with `hc run --bg --outlive-parent --no-notify --name <hc name> --cwd <cwd>` plus its labels (P3.1, P4.1), so its name and registration exist when it is created. Herdr creates through the port's `create_registered` path, not the create-then-name path of `layout::place`, and measures no geometry. `--rm` is never used, except on a Teammate terminal, which starts with `--rm` (PRD-261115-0921-01 P6).
 
 ### P4 — Pane registration, names, and lifetime
 
 1. The Pane registration is stored as hc labels on the terminal: each `RegistrationKey` is the label `tt.<key in snake_case>` with a string value (`tt.surface_unvalidated` is `"true"` or `"false"`); an absent label is `None`. The label `where` is set to the tmux-tools pane name. Herdr uses no Pane record (`uses_pane_records()` is false).
-2. Name validation stays PRD-261107-0825-01 P4.1. Uniqueness among live terminals comes from the hc name: when `hc run` reports that the name is taken, the spawn fails with exit 1 and no terminal is created. A name is free again when its terminal is removed (P4.4).
+2. Name validation stays PRD-261107-0825-01 P4.1. Uniqueness among live terminals comes from the hc name: when `hc run` reports that the name is taken, the spawn fails with exit 1 and no terminal is created. A name is free again when its terminal is removed (P4.4). Exception: the terminal that `respawn-pane -k` creates keeps the hc name of its transitional name `<name>.respawn-<pid>` after it gets `<name>`, so uniqueness among live terminals is by the `tt.name` label: a create of a name that a live terminal holds as `tt.name` fails as taken with exit 1 and creates no terminal (PRD-261115-0921-01 P5).
 3. The `tt.parent` label follows PRD-261108-0447-01 P7.
 4. A terminal in state `finished` that carries `tt.name` is dead. Every invocation that resolves, lists, or spawns a name first removes, by hc address, each dead terminal that carries that name (`hc rm`); `list` shows each removed name once with `status: dead`. A verb that resolves only a dead name fails with exit 1 as for an unknown name, and that value is never tried as an hc address after that (P7.6). A dead name never resolves to another terminal. A spawn of that name then proceeds. Terminals are always resolved and removed by hc address, never by hc name.
 5. Ownership reads the `tt.*` labels: `tt.name` is present, and `tt.cwd` matches the current working directory where both are known.
@@ -169,7 +169,7 @@ Under Herdr, panes that `tmux-tools` creates are invisible in the Herdr window a
 4. `kill` resolves the name, applies the self-pane refusal and the Ownership check, runs `hc kill`, then `hc rm`. A `not_found` result after the kill counts as success.
 5. `launch` keeps the shell after the command as tmux does (Keep-alive wrap); `--bare` runs the command so the terminal finishes with it.
 6. A Target on Herdr is a tmux-tools pane name or an hc address `t<n>`. A registered name wins; a value is used as an hc address only when no registered name matches it.
-7. `claude-teams` cannot set up a Team on host `herdr`: it fails open per PRD-261108-0447-01 P2.7 with `<reason>` `no teammate shim on herdr`. So `spawn-agent claude` on Herdr starts Claude with in-process teammates, and the tmux and Orca Launcher paths do not change.
+7. `claude-teams` sets up a Team on host `herdr` per PRD-261115-0921-01: the Leader handle is `HC_TERMINAL_ID`, and without it the Launcher fails open per PRD-261108-0447-01 P2.7 with `<reason>` `HC_TERMINAL_ID is unset` (PRD-261115-0921-01 P2.2). The tmux and Orca Launcher paths do not change.
 
 ### P8 — Contract tests
 
@@ -208,12 +208,12 @@ Under Herdr, panes that `tmux-tools` creates are invisible in the Herdr window a
 - **`TMUX_TOOLS_HOST`** — `tmux` | `orca` | `herdr` (P2.1).
 - **Detection order** — P2.2.
 - **`TMUX_TOOLS_HERDR_SPACE`, `TMUX_TOOLS_HERDR_TAB`** — Herdr space id and tab id for new terminals when no `--target` and no `HC_TERMINAL_ID` (P3.1).
-- **hc terminal fields written by this tool** — `--name tt-<16 lowercase hex of SHA-256(name)>`; labels `herdr.space`, `herdr.tab` (P3), `where=<name>`, and the `tt.*` labels; flags `--outlive-parent --no-notify`.
+- **hc terminal fields written by this tool** — `--name tt-<16 lowercase hex of SHA-256(name)>`; labels `herdr.space`, `herdr.tab` (P3; a create with no `--split` or with `--split window` writes a new `herdr.tab` id that tmux-tools makes up, P3.2), `where=<name>`, and the `tt.*` labels; flags `--outlive-parent --no-notify`, and `--rm` on a Teammate terminal only (PRD-261115-0921-01 P6). The terminal of a `respawn-pane -k` keeps the hc name of its transitional name `<name>.respawn-<pid>` (PRD-261115-0921-01 P5).
 - **JSON results on Herdr** — `host: "herdr"`; `list` rows per P7.3 (no `window` key); `window` in `status`, `spawn-agent`, `launch` is the `herdr.tab` label or `null`; keys with no Herdr source are `null`.
 - **`status --format json`** — adds `host_word: string | null` on every host; always `null` on tmux and Orca.
 - **`self --format json`** — `host` adds `"herdr"`; `driven` per P7.2.
 - **Exit code 3 on Herdr** — `--split tile`, `--size`, `--session`, `--window`, `rebalance` (P3.3).
-- **stderr texts** — `notify: not delivered on herdr` (exit 0); `cannot type on herdr: U+<XXXX>` and `cannot type on herdr: <argument as written>` (exit 1); `prompt target blocked: <reason>` (exit 1); `claude-teams: no team: no teammate shim on herdr; starting claude without teammate panes` (P7.7).
+- **stderr texts** — `notify: not delivered on herdr` (exit 0); `cannot type on herdr: U+<XXXX>` and `cannot type on herdr: <argument as written>` (exit 1); `prompt target blocked: <reason>` (exit 1); `claude-teams: no team: HC_TERMINAL_ID is unset; starting claude without teammate panes` (P7.7, PRD-261115-0921-01 P2.2).
 - **Test switches** — `TT_TEST_HERDR=1` (private core), `TMUX_TOOLS_LIVE_HERDR=1` (live run).
 
 ## Verification and release

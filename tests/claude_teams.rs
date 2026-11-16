@@ -1896,3 +1896,715 @@ fn refused_fixture_argvs(fixture: &str, team: &Value) -> Vec<Vec<String>> {
 fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
+
+// --- PRD-261115-0921-01: the Herdr slice, against the fake `hc` ----------------------
+
+const FAKE_HC: &str = include_str!("contract/fake_hc.py");
+
+/// A Herdr terminal scene: the fake `hc` and the fake `claude` first on `PATH`, and a
+/// Leader terminal `t1` registered as `lead` in space `S1` and tab `T1`.
+struct HerdrScene {
+    scene: Scene,
+}
+
+impl HerdrScene {
+    fn new(label: &str) -> HerdrScene {
+        let scene = Scene::new(label);
+        write_executable(&scene.bin().join("hc"), FAKE_HC);
+        let herdr = HerdrScene { scene };
+        let leader = serde_json::json!({
+            "address": "t1", "name": "tt-lead", "cwd": "/", "argv": ["sh"],
+            "labels": {"tt.name": "lead", "where": "lead", "herdr.space": "S1", "herdr.tab": "T1"},
+            "state": "live", "status": null, "status_ms": null, "turn": 0, "lines": [],
+            "how": "history", "complete": true, "keys": [], "sent": [], "on_send": {},
+        });
+        herdr.save(&serde_json::json!({"next": 2, "terminals": [leader]}));
+        herdr
+    }
+
+    fn hc_state(&self) -> PathBuf {
+        self.scene.dir.join("hc-state.json")
+    }
+
+    fn hc_log(&self) -> PathBuf {
+        self.scene.dir.join("hc-log.jsonl")
+    }
+
+    fn save(&self, state: &Value) {
+        std::fs::write(self.hc_state(), serde_json::to_vec(state).unwrap()).unwrap();
+    }
+
+    /// The fake's terminals, read through the fake `hc` itself, so an ended command
+    /// is applied first (`FAKE_HC_EXEC`).
+    fn terminals(&self) -> Vec<Value> {
+        let out = self
+            .command(Path::new("hc"))
+            .args(["ls", "--json", "--all"])
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "hc ls: {out:?}");
+        let state: Value =
+            serde_json::from_slice(&std::fs::read(self.hc_state()).unwrap()).unwrap();
+        state["terminals"].as_array().unwrap().clone()
+    }
+
+    fn terminal(&self, address: &str) -> Option<Value> {
+        self.terminals()
+            .into_iter()
+            .find(|terminal| terminal["address"] == address)
+    }
+
+    fn edit(&self, address: &str, change: impl FnOnce(&mut Value)) {
+        let mut state: Value =
+            serde_json::from_slice(&std::fs::read(self.hc_state()).unwrap()).unwrap();
+        let terminal = state["terminals"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|terminal| terminal["address"] == address)
+            .expect("the terminal exists");
+        change(terminal);
+        self.save(&state);
+    }
+
+    /// Every logged `hc run` call.
+    fn runs(&self) -> Vec<Vec<String>> {
+        std::fs::read_to_string(self.hc_log())
+            .unwrap_or_default()
+            .lines()
+            .map(|line| serde_json::from_str::<Vec<String>>(line).unwrap())
+            .filter(|call| call.first().map(String::as_str) == Some("run"))
+            .collect()
+    }
+
+    /// `program` in the Herdr terminal `t1`: no tmux, Orca, Rex, or team variables.
+    fn command(&self, program: &Path) -> Command {
+        let mut command = Command::new(program);
+        command
+            .current_dir(self.scene.work())
+            .env_remove("TMUX")
+            .env_remove("TMUX_PANE")
+            .env_remove("TMUX_TOOLS_HOST")
+            .env_remove("ORCA_TERMINAL_HANDLE")
+            .env_remove("REX_BLOCK")
+            .env_remove("TT_TEAM")
+            .env_remove("TT_HOST")
+            .env_remove("TT_SHIM_DEBUG")
+            .env(
+                "PATH",
+                format!(
+                    "{}:{}",
+                    self.scene.bin().display(),
+                    std::env::var("PATH").unwrap_or_default()
+                ),
+            )
+            .env("HC_TERMINAL_ID", "t1")
+            .env("SHELL", "/bin/sh")
+            .env("FAKE_HC_STATE", self.hc_state())
+            .env("FAKE_HC_LOG", self.hc_log());
+        for (key, value) in self.scene.base_env() {
+            command.env(key, value);
+        }
+        command
+    }
+
+    fn start_launcher(&self, env: &[(&str, &str)]) -> Child {
+        let mut command = self.command(Path::new(BIN));
+        command.arg("claude-teams");
+        for (key, value) in env {
+            command.env(key, value);
+        }
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn claude-teams on herdr")
+    }
+
+    fn cli(&self, args: &[&str]) -> CmdOutput {
+        let child = self
+            .command(Path::new(BIN))
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        wait_for_child(
+            child,
+            &format!("tmux-tools {args:?}"),
+            Duration::from_secs(60),
+        )
+    }
+
+    fn list(&self) -> Vec<Value> {
+        let out = self.cli(&["list", "--format", "json"]);
+        out.assert_success("list --format json on herdr");
+        serde_json::from_str::<Value>(&out.stdout)
+            .unwrap_or_else(|e| panic!("list JSON: {e}: {}", out.stdout))
+            .as_array()
+            .unwrap()
+            .clone()
+    }
+
+    /// The Shim of `team_dir` on Herdr, with `env` added.
+    fn shim(&self, team_dir: &Path, env: &[(&str, &str)], args: &[&str]) -> CmdOutput {
+        let id = team_dir.file_name().unwrap().to_str().unwrap();
+        let mut command = self.command(&team_dir.join("bin/tmux"));
+        command
+            .args(args)
+            .env("TT_TEAM", id)
+            .env("TT_HOST", "herdr");
+        for (key, value) in env {
+            command.env(key, value);
+        }
+        let child = command
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        wait_for_child(child, "shim on herdr", Duration::from_secs(60))
+    }
+}
+
+/// The value after `flag` in one logged `hc` call.
+fn hc_flag<'a>(call: &'a [String], flag: &str) -> Option<&'a str> {
+    let at = call.iter().position(|arg| arg == flag)?;
+    call.get(at + 1).map(String::as_str)
+}
+
+/// Every `--label` value of one logged `hc` call.
+fn hc_labels(call: &[String]) -> Vec<String> {
+    call.windows(2)
+        .filter(|pair| pair[0] == "--label")
+        .map(|pair| pair[1].clone())
+        .collect()
+}
+
+/// Assert the PRD-261115-0921-01 Herdr Teammate terminal create of one `hc run`: the
+/// flags with `--rm`, and the split target's space and tab with the team labels.
+fn assert_teammate_run(run: &[String], team_id: &str) {
+    for flag in ["--bg", "--outlive-parent", "--no-notify", "--rm"] {
+        assert!(run.iter().any(|arg| arg == flag), "{flag}: {run:?}");
+    }
+    let labels = hc_labels(run);
+    for label in [
+        "herdr.space=S1".to_owned(),
+        "herdr.tab=T1".to_owned(),
+        format!("tt.team={team_id}"),
+        "tt.parent=lead".to_owned(),
+        "tt.shim_id=%2".to_owned(),
+    ] {
+        assert!(labels.contains(&label), "{label}: {labels:?}");
+    }
+}
+
+fn label_of<'a>(terminal: &'a Value, key: &str) -> &'a Value {
+    &terminal["labels"][key]
+}
+
+/// Acceptance (PRD-261115-0921-01 P2, P3.1–P3.2, P5, P7.1): `claude-teams` in the
+/// Herdr terminal `t1` (registered as `lead`) sets up a Team; each trace fixture
+/// replays through the Shim with every stdout and exit as recorded; its
+/// `split-window` creates teammate `lead.tm1` by one `hc run` with `--rm` and the
+/// Leader's space and tab, listed with `team`, `parent: "lead"`, and `shim_id`; its
+/// `respawn-pane -k` runs the new terminal under `lead.tm1.respawn-<pid>`, removes the
+/// old terminal, then writes `lead.tm1` to `tt.name` and `where`, and the hc name stays
+/// that of the transitional name. A create of `lead.tm1` then fails as taken, and the
+/// Shim advances `k`. The clean exit closes every teammate and removes the team
+/// directory.
+#[test]
+fn on_herdr_the_fixture_replays_into_teammate_terminals_in_the_leaders_tab() {
+    for_every_fixture(on_herdr_the_fixture_replays_with);
+}
+
+fn on_herdr_the_fixture_replays_with(key: &str) {
+    let herdr = HerdrScene::new("herdr-replay");
+    let fixture = fixture(key).display().to_string();
+    let version = fake_version(key);
+    let mut child = herdr.start_launcher(&[
+        ("FAKE_CLAUDE_FIXTURE", fixture.as_str()),
+        ("FAKE_CLAUDE_VERSION", version.as_str()),
+        ("FAKE_CLAUDE_PAUSE_BEFORE_KILL", "1"),
+        ("FAKE_CLAUDE_SELF", "1"),
+    ]);
+    herdr.scene.wait_paused(&mut child);
+    let partial = herdr.scene.read_report(".partial");
+    assert_eq!(partial["mismatches"], serde_json::json!([]), "{partial:#}");
+
+    let team_dir = herdr
+        .scene
+        .team_dirs()
+        .pop()
+        .expect("a team directory on herdr");
+    let team: Value =
+        serde_json::from_slice(&std::fs::read(team_dir.join("team.json")).unwrap()).unwrap();
+    let id = team["id"].as_str().unwrap().to_owned();
+    assert_eq!(team["host"], "herdr", "{team}");
+    assert_eq!(team["server_id"], "fake-core", "{team}");
+    assert_eq!(team["leader"]["handle"], "t1", "{team}");
+    assert!(team["tmux"].is_null(), "{team}");
+    let env = herdr.scene.read_report(".env");
+    assert_eq!(env["TT_HOST"], "herdr", "{env}");
+    let own: Value = serde_json::from_str(
+        &std::fs::read_to_string(format!("{}.self", herdr.scene.report().display())).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        (&own["host"], &own["role"], &own["team"], &own["name"]),
+        (
+            &Value::from("herdr"),
+            &Value::from("leader"),
+            &Value::from(id.as_str()),
+            &Value::from("lead")
+        ),
+        "{own}"
+    );
+
+    // P3.1–P3.2, P6.1: one `hc run` per create, each a Teammate terminal.
+    let runs = herdr.runs();
+    assert_eq!(runs.len(), 2, "split-window and respawn-pane: {runs:?}");
+    for run in &runs {
+        assert_teammate_run(run, &id);
+    }
+    let first = hc_labels(&runs[0]);
+    assert!(first.contains(&"tt.name=lead.tm1".to_owned()), "{first:?}");
+    assert!(first.contains(&"where=lead.tm1".to_owned()), "{first:?}");
+    let second = hc_labels(&runs[1]);
+    let transitional = second
+        .iter()
+        .find_map(|label| label.strip_prefix("tt.name="))
+        .unwrap()
+        .to_owned();
+    let pid = transitional
+        .strip_prefix("lead.tm1.respawn-")
+        .unwrap_or_else(|| panic!("a transitional name: {transitional}"));
+    assert!(
+        !pid.is_empty() && pid.chars().all(|c| c.is_ascii_digit()),
+        "{pid}"
+    );
+    assert!(
+        second.contains(&format!("where={transitional}")),
+        "{second:?}"
+    );
+    let respawn_hc_name = hc_flag(&runs[1], "--name").unwrap().to_owned();
+    assert_ne!(Some(respawn_hc_name.as_str()), hc_flag(&runs[0], "--name"));
+
+    // P5.1: the old terminal is gone; the new one carries the name in both labels and
+    // keeps the hc name of the transitional name.
+    let terminals = herdr.terminals();
+    let addresses: Vec<&str> = terminals
+        .iter()
+        .map(|t| t["address"].as_str().unwrap())
+        .collect();
+    assert_eq!(addresses, vec!["t1", "t3"], "{terminals:#?}");
+    let teammate = herdr.terminal("t3").unwrap();
+    assert_eq!(label_of(&teammate, "tt.name"), "lead.tm1", "{teammate}");
+    assert_eq!(label_of(&teammate, "where"), "lead.tm1", "{teammate}");
+    assert_eq!(teammate["name"], respawn_hc_name.as_str(), "{teammate}");
+    assert_eq!(label_of(&teammate, "tt.agent"), "claude", "{teammate}");
+    assert_eq!(
+        label_of(&teammate, "tt.claude_agent_name"),
+        "r1",
+        "{teammate}"
+    );
+    assert_eq!(label_of(&teammate, "tt.title"), "r1", "{teammate}");
+
+    let rows = herdr.list();
+    let tm1 = row(&rows, "lead.tm1").unwrap_or_else(|| panic!("lead.tm1: {rows:#?}"));
+    assert_eq!(tm1["pane"], "t3", "{tm1}");
+    assert_eq!(tm1["team"], id.as_str(), "{tm1}");
+    assert_eq!(tm1["parent"], "lead", "{tm1}");
+    assert_eq!(tm1["shim_id"], "%2", "{tm1}");
+    assert_eq!(tm1["orphan"], false, "{tm1}");
+
+    // P5.2: a create of the respawned teammate's name fails as taken and creates no
+    // terminal; the Shim advances `k` past it.
+    let taken = herdr.cli(&[
+        "launch", "--name", "lead.tm1", "--split", "v", "--cmd", "cat",
+    ]);
+    assert_eq!(taken.status, 1, "{taken:?}");
+    assert_eq!(herdr.runs().len(), 2, "no hc run for a taken name");
+    let mut record = team.clone();
+    record["next_teammate"] = Value::from(1);
+    std::fs::write(
+        team_dir.join("team.json"),
+        serde_json::to_vec(&record).unwrap(),
+    )
+    .unwrap();
+    let next = herdr.shim(
+        &team_dir,
+        &[],
+        &[
+            "split-window",
+            "-d",
+            "-t",
+            "%1",
+            "-P",
+            "-F",
+            "#{pane_id}",
+            "--",
+            "cat",
+        ],
+    );
+    assert_eq!((next.status, next.stdout.as_str()), (0, "%3\n"), "{next:?}");
+    let rows = herdr.list();
+    let tm2 = row(&rows, "lead.tm2").unwrap_or_else(|| panic!("lead.tm2: {rows:#?}"));
+    assert_eq!(tm2["shim_id"], "%3", "{tm2}");
+
+    herdr.scene.go();
+    let out = finish(child);
+    assert_eq!(out.status, 0, "{out:?}");
+    assert!(
+        !out.stderr.contains("claude-teams: no team"),
+        "{}",
+        out.stderr
+    );
+    let report = herdr.scene.read_report("");
+    assert_eq!(report["mismatches"], serde_json::json!([]), "{report:#}");
+    let addresses: Vec<String> = herdr
+        .terminals()
+        .iter()
+        .map(|t| t["address"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(
+        addresses,
+        vec!["t1"],
+        "the clean exit closed every teammate"
+    );
+    assert!(!team_dir.exists(), "the team directory is gone");
+}
+
+/// Acceptance (PRD-261115-0921-01 P4.1, P3.5, PRD-261108-0447-01 P8.1, P8.3 on Herdr):
+/// a `split-window` with `-e HC_TERMINAL_ID=x -e HC_SCOPE=y -e K=V` runs a teammate
+/// command that sets `K=V` and neither Herdr variable; `capture-pane -p -S -10` prints
+/// 10 history lines plus the visible screen, `-S -` all history, and no `-S` the
+/// screen; `self --format json` in the teammate terminal gives `role: "teammate"`, the
+/// team id, and `parent: "lead"`; after Claude exits 1 the teammate stays, `list`
+/// reports it as an Orphan, and `kill --target` closes it.
+#[test]
+fn on_herdr_a_teammate_drops_the_herdr_variables_captures_history_and_can_be_an_orphan() {
+    let herdr = HerdrScene::new("herdr-env");
+    let mut child = herdr.start_launcher(&[("FAKE_CLAUDE_PAUSE", "1"), ("FAKE_CLAUDE_EXIT", "1")]);
+    herdr.scene.wait_paused(&mut child);
+    let team_dir = herdr
+        .scene
+        .team_dirs()
+        .pop()
+        .expect("a team directory on herdr");
+
+    let out = herdr.shim(
+        &team_dir,
+        &[],
+        &[
+            "split-window",
+            "-d",
+            "-t",
+            "%1",
+            "-h",
+            "-e",
+            "HC_TERMINAL_ID=x",
+            "-e",
+            "HC_SCOPE=y",
+            "-e",
+            "K=V",
+            "-P",
+            "-F",
+            "#{pane_id}",
+            "--",
+            "cat",
+        ],
+    );
+    assert_eq!((out.status, out.stdout.as_str()), (0, "%2\n"), "{out:?}");
+    let runs = herdr.runs();
+    assert_eq!(runs.len(), 1, "{runs:?}");
+    let command = runs[0][runs[0].iter().position(|a| a == "--").unwrap() + 1..].join(" ");
+    assert!(command.contains("K=V"), "{command}");
+    for variable in ["HC_TERMINAL_ID", "HC_SCOPE"] {
+        assert!(!command.contains(variable), "{variable} in {command}");
+    }
+
+    // P3.5: the screen is the last 5 of 40 lines.
+    let address = herdr
+        .terminals()
+        .iter()
+        .find(|t| label_of(t, "tt.shim_id") == "%2")
+        .map(|t| t["address"].as_str().unwrap().to_owned())
+        .unwrap();
+    herdr.edit(&address, |terminal| {
+        terminal["lines"] = (1..=40).map(|n| Value::from(format!("line{n}"))).collect();
+        terminal["visible"] = Value::from(5);
+    });
+    let lines = |from: u32| {
+        (from..=40)
+            .map(|n| format!("line{n}\n"))
+            .collect::<String>()
+    };
+    let capture = |args: &[&str]| {
+        let mut all = vec!["capture-pane", "-p"];
+        all.extend_from_slice(args);
+        all.extend_from_slice(&["-t", "%2"]);
+        let out = herdr.shim(&team_dir, &[], &all);
+        assert_eq!(out.status, 0, "{args:?}: {out:?}");
+        out.stdout
+    };
+    assert_eq!(capture(&["-S", "-10"]), lines(26));
+    assert_eq!(capture(&["-S", "-"]), lines(1));
+    assert_eq!(capture(&[]), lines(36));
+
+    // PRD-261108-0447-01 P8.1 on Herdr: `self` in the teammate's own terminal.
+    let team_id = team_dir.file_name().unwrap().to_str().unwrap();
+    let own = herdr
+        .command(Path::new(BIN))
+        .env("HC_TERMINAL_ID", &address)
+        .args(["self", "--format", "json"])
+        .output()
+        .unwrap();
+    assert!(own.status.success(), "self in the teammate: {own:?}");
+    let own: Value = serde_json::from_slice(&own.stdout).unwrap();
+    assert_eq!(
+        (&own["role"], &own["team"], &own["parent"], &own["name"]),
+        (
+            &Value::from("teammate"),
+            &Value::from(team_id),
+            &Value::from("lead"),
+            &Value::from("lead.tm1")
+        ),
+        "{own}"
+    );
+
+    herdr.scene.go();
+    let out = finish(child);
+    assert_eq!(out.status, 1, "{out:?}");
+    let rows = herdr.list();
+    let tm1 = row(&rows, "lead.tm1").unwrap_or_else(|| panic!("lead.tm1: {rows:#?}"));
+    assert_eq!(tm1["orphan"], true, "{tm1}");
+    herdr
+        .cli(&["kill", "--target", "lead.tm1"])
+        .assert_success("kill --target lead.tm1");
+    assert!(herdr.terminal(&address).is_none(), "the orphan is closed");
+}
+
+/// Acceptance (PRD-261115-0921-01 P6.1): with the fake `hc` running each command, a
+/// teammate whose command exits 0 was started with `--rm` and is gone from
+/// `hc ls --all`; a teammate whose command exits 1 keeps a login shell and stays live.
+/// The clean Leader exit closes it.
+#[test]
+fn on_herdr_a_teammate_that_exits_0_is_removed_and_one_that_fails_keeps_a_shell() {
+    let herdr = HerdrScene::new("herdr-rm");
+    let kept = herdr.scene.dir.join("shell-kept");
+    let shell = herdr.scene.bin().join("kept-shell");
+    write_executable(
+        &shell,
+        &format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\nexec sleep 60\n",
+            kept.display()
+        ),
+    );
+    let shell = shell.display().to_string();
+    let exec = [("FAKE_HC_EXEC", "1"), ("SHELL", shell.as_str())];
+    let mut child = herdr.start_launcher(&[("FAKE_CLAUDE_PAUSE", "1"), exec[0]]);
+    herdr.scene.wait_paused(&mut child);
+    let team_dir = herdr
+        .scene
+        .team_dirs()
+        .pop()
+        .expect("a team directory on herdr");
+
+    let wait = |what: &str, done: &dyn Fn() -> bool| {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !done() {
+            assert!(Instant::now() < deadline, "{what}");
+            thread::sleep(Duration::from_millis(50));
+        }
+    };
+    // The address the fake gives the next terminal.
+    let split = |command: &str| {
+        let state: Value =
+            serde_json::from_slice(&std::fs::read(herdr.hc_state()).unwrap()).unwrap();
+        let address = format!("t{}", state["next"]);
+        let out = herdr.shim(
+            &team_dir,
+            &exec,
+            &["split-window", "-d", "-t", "%1", "--", command],
+        );
+        assert_eq!(out.status, 0, "{out:?}");
+        address
+    };
+
+    let ok = split("sh -c 'exit 0'");
+    let runs = herdr.runs();
+    assert!(runs[0].iter().any(|arg| arg == "--rm"), "{:?}", runs[0]);
+    wait("the exit-0 teammate is removed", &|| {
+        herdr.terminal(&ok).is_none()
+    });
+
+    let failed = split("sh -c 'exit 1'");
+    wait("the failed teammate starts a shell", &|| kept.exists());
+    assert_eq!(std::fs::read_to_string(&kept).unwrap(), "-l\n");
+    let terminal = herdr.terminal(&failed).expect("the failed teammate stays");
+    assert_eq!(terminal["state"], "live", "{terminal}");
+
+    herdr.scene.go();
+    let out = finish(child);
+    assert_eq!(out.status, 0, "{out:?}");
+    assert!(
+        herdr.terminal(&failed).is_none(),
+        "the clean exit closed it"
+    );
+}
+
+/// Acceptance (PRD-261115-0921-01 P5.1, P6.1, PRD-261108-0447-01 P6.2): a
+/// `respawn-pane -k` whose new command exits 0 before the Shim writes the name (the
+/// fake `hc` answers `run` only after the command exits) exits 0 with no output: the
+/// create succeeded, Herdr removed the new terminal (`--rm`), and the old terminal is
+/// closed.
+#[test]
+fn on_herdr_a_respawn_whose_command_exits_0_at_once_succeeds() {
+    let herdr = HerdrScene::new("herdr-fast-respawn");
+    let mut child = herdr.start_launcher(&[("FAKE_CLAUDE_PAUSE", "1")]);
+    herdr.scene.wait_paused(&mut child);
+    let team_dir = herdr
+        .scene
+        .team_dirs()
+        .pop()
+        .expect("a team directory on herdr");
+
+    let split = herdr.shim(
+        &team_dir,
+        &[],
+        &["split-window", "-d", "-t", "%1", "--", "cat"],
+    );
+    assert_eq!(split.status, 0, "{split:?}");
+    let respawn = herdr.shim(
+        &team_dir,
+        &[("FAKE_HC_EXEC", "wait")],
+        &["respawn-pane", "-k", "-t", "%2", "--", "true"],
+    );
+    assert_eq!(
+        (
+            respawn.status,
+            respawn.stdout.as_str(),
+            respawn.stderr.as_str()
+        ),
+        (0, "", ""),
+        "{respawn:?}"
+    );
+    let addresses: Vec<String> = herdr
+        .terminals()
+        .iter()
+        .map(|t| t["address"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(
+        addresses,
+        vec!["t1"],
+        "the old terminal is closed and the new one removed"
+    );
+
+    herdr.scene.go();
+    let out = finish(child);
+    assert_eq!(out.status, 0, "{out:?}");
+}
+
+/// M3 (PRD-261115-0921-01 P5.1, P6.1, PRD-261109-2223-01 P7.4): on Herdr, `hc kill`
+/// of a `--rm` Teammate terminal removes it and answers `not_found`; the close still
+/// succeeds. Through the Shim, a `respawn-pane -k` after a `split-window` with no
+/// command exits 0 with no output and keeps the new terminal, and a `kill-pane` of
+/// the teammate exits 0 and closes it.
+#[test]
+fn on_herdr_the_shim_closes_a_rm_teammate_that_hc_kill_reports_removed() {
+    let herdr = HerdrScene::new("herdr-rm-close-shim");
+    let mut child = herdr.start_launcher(&[("FAKE_CLAUDE_PAUSE", "1")]);
+    herdr.scene.wait_paused(&mut child);
+    let team_dir = herdr
+        .scene
+        .team_dirs()
+        .pop()
+        .expect("a team directory on herdr");
+    let addresses = || -> Vec<String> {
+        herdr
+            .terminals()
+            .iter()
+            .map(|t| t["address"].as_str().unwrap().to_owned())
+            .collect()
+    };
+
+    let split = herdr.shim(
+        &team_dir,
+        &[],
+        &["split-window", "-d", "-t", "%1", "-P", "-F", "#{pane_id}"],
+    );
+    assert_eq!(
+        (split.status, split.stdout.as_str()),
+        (0, "%2\n"),
+        "{split:?}"
+    );
+    let runs = herdr.runs();
+    assert!(runs[0].iter().any(|arg| arg == "--rm"), "{:?}", runs[0]);
+
+    let respawn = herdr.shim(
+        &team_dir,
+        &[],
+        &["respawn-pane", "-k", "-t", "%2", "--", "cat"],
+    );
+    assert_eq!(
+        (
+            respawn.status,
+            respawn.stdout.as_str(),
+            respawn.stderr.as_str()
+        ),
+        (0, "", ""),
+        "{respawn:?}"
+    );
+    assert_eq!(addresses(), vec!["t1", "t3"], "the new terminal stays");
+    let teammate = herdr.terminal("t3").unwrap();
+    assert_eq!(label_of(&teammate, "tt.name"), "lead.tm1", "{teammate}");
+
+    let kill = herdr.shim(&team_dir, &[], &["kill-pane", "-t", "%2"]);
+    assert_eq!(
+        (kill.status, kill.stdout.as_str(), kill.stderr.as_str()),
+        (0, "", ""),
+        "{kill:?}"
+    );
+    assert_eq!(addresses(), vec!["t1"], "kill-pane closed the teammate");
+
+    herdr.scene.go();
+    let out = finish(child);
+    assert_eq!(out.status, 0, "{out:?}");
+}
+
+/// M3 (PRD-261109-2223-01 P7.4, PRD-261115-0921-01 P6.1): `tmux-tools kill --target`
+/// of a `--rm` Teammate terminal, which `hc kill` reports as removed, exits 0 and
+/// closes it.
+#[test]
+fn on_herdr_kill_target_closes_a_rm_teammate_that_hc_kill_reports_removed() {
+    let herdr = HerdrScene::new("herdr-rm-close-kill");
+    let mut child = herdr.start_launcher(&[("FAKE_CLAUDE_PAUSE", "1")]);
+    herdr.scene.wait_paused(&mut child);
+    let team_dir = herdr
+        .scene
+        .team_dirs()
+        .pop()
+        .expect("a team directory on herdr");
+
+    let split = herdr.shim(
+        &team_dir,
+        &[],
+        &["split-window", "-d", "-t", "%1", "--", "cat"],
+    );
+    assert_eq!(split.status, 0, "{split:?}");
+    let runs = herdr.runs();
+    assert!(runs[0].iter().any(|arg| arg == "--rm"), "{:?}", runs[0]);
+    assert!(herdr.terminal("t2").is_some(), "the teammate is t2");
+
+    herdr
+        .cli(&["kill", "--target", "lead.tm1"])
+        .assert_success("kill --target lead.tm1");
+    assert!(herdr.terminal("t2").is_none(), "kill --target closed it");
+
+    herdr.scene.go();
+    let out = finish(child);
+    assert_eq!(out.status, 0, "{out:?}");
+}

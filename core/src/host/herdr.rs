@@ -468,7 +468,8 @@ impl HerdrHost {
 
     /// The `herdr.space` and `herdr.tab` of a new terminal (P3.1–P3.2): from the
     /// target, else the calling terminal, else the environment. A split joins the tab;
-    /// any other placement opens a new tab, so it carries only the space. No space, no
+    /// any other placement opens a new tab with a tab id that tmux-tools makes up
+    /// ([`made_up_tab`]), which a later split from this terminal joins. No space, no
     /// labels.
     fn placement(
         &self,
@@ -497,7 +498,7 @@ impl HerdrHost {
         };
         Ok(match split {
             Some(_) => (Some(space), tab),
-            None => (Some(space), None),
+            None => (Some(space), Some(made_up_tab())),
         })
     }
 
@@ -587,13 +588,13 @@ impl HerdrHost {
         for (key, value) in self.registration_labels(name, registration) {
             labels.push(format!("{}={value}", label_key(key)));
         }
-        let mut args: Vec<&str> = vec![
-            "--bg",
-            "--outlive-parent",
-            "--no-notify",
-            "--name",
-            &hc_name,
-        ];
+        let mut args: Vec<&str> = vec!["--bg", "--outlive-parent", "--no-notify"];
+        // PRD-261115-0921-01 P6: a Teammate terminal is removed by Herdr when its
+        // Close-on-success wrap exits 0; no other terminal uses `--rm` (P3.4).
+        if registration.team.is_some() {
+            args.push("--rm");
+        }
+        args.extend_from_slice(&["--name", &hc_name]);
         if let Some(cwd) = registration.cwd {
             args.extend_from_slice(&["--cwd", cwd]);
         }
@@ -654,6 +655,31 @@ fn env_value(name: &str) -> Option<String> {
         .ok()
         .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty())
+}
+
+/// A new `herdr.tab` id that no other terminal carries (P3.2): `tt-tab-` and 32
+/// lowercase hex characters of SHA-256 over this process id, the wall-clock time in
+/// nanoseconds, and a per-process counter. The `tt-tab-` prefix keeps it apart from
+/// Herdr's own tab ids; the 128-bit digest keeps two made-up ids apart.
+fn made_up_tab() -> String {
+    use sha2::{Digest, Sha256};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos())
+        .unwrap_or_default();
+    let seed = format!(
+        "{}:{nanos}:{}",
+        std::process::id(),
+        COUNTER.fetch_add(1, Ordering::Relaxed)
+    );
+    let digest = Sha256::digest(seed.as_bytes());
+    let hex: String = digest[..16]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    format!("tt-tab-{hex}")
 }
 
 fn now_ms() -> u64 {
@@ -915,7 +941,13 @@ impl HostPort for HerdrHost {
 
     fn close_pane(&self, pane: &str, _retile_window: Option<&str>) -> Result<()> {
         // P7.4: end the program, then remove the terminal; already removed is success.
-        self.call(&["kill"], &[pane])?;
+        // `hc kill` of a `--rm` terminal (PRD-261115-0921-01 P6.1) answers `not_found`
+        // ("<t> was removed"): Herdr removed it as the program ended.
+        match self.call(&["kill"], &[pane]) {
+            Ok(_) => {}
+            Err(error) if is_kind(&error, "not_found") => {}
+            Err(error) => return Err(error),
+        }
         self.remove(pane)
     }
 
