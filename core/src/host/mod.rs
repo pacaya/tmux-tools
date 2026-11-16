@@ -112,10 +112,12 @@ impl HostSelection {
                 None => anyhow::bail!("{TT_TEAM} is set but {TT_HOST} is unset"),
                 Some("tmux") => Host::Tmux,
                 Some("orca") => Host::Orca,
-                // PRD-261115-0921-01 P2.1: the Herdr slice adds `herdr`.
+                // PRD-261115-0921-01 P2.1: the Herdr slice adds `herdr`, the Rex
+                // slice `rex`.
+                Some("rex") => Host::Rex,
                 Some("herdr") => Host::Herdr,
                 Some(other) => anyhow::bail!(
-                    "{TT_HOST}={other:?} is not a host; valid values are tmux, orca and herdr"
+                    "{TT_HOST}={other:?} is not a host; valid values are tmux, orca, rex and herdr"
                 ),
             };
             return Ok(HostSelection {
@@ -904,16 +906,27 @@ mod tests {
         );
         let missing = select(&[(TT_TEAM, "0a1b2c3d")]).unwrap_err().to_string();
         assert!(missing.contains("TT_HOST"), "{missing}");
-        let invalid = select(&[(TT_TEAM, "0a1b2c3d"), (TT_HOST, "rex")])
+        let invalid = select(&[(TT_TEAM, "0a1b2c3d"), (TT_HOST, "bogus")])
             .unwrap_err()
             .to_string();
         assert!(
-            invalid.contains("tmux") && invalid.contains("orca") && invalid.contains("herdr"),
+            invalid.contains("valid values are tmux, orca, rex and herdr"),
             "{invalid}"
         );
         // PRD-261115-0921-01 P2.1: the Herdr slice accepts `TT_HOST=herdr`.
         let herdr_team = select(&[(TT_TEAM, "0a1b2c3d"), (TT_HOST, "herdr")]).unwrap();
         assert_eq!(herdr_team.host, Host::Herdr);
+        // PRD-261115-0921-01 P2.1: the Rex slice accepts `TT_HOST=rex`.
+        let rex_team = select(&[
+            (TT_TEAM, "0a1b2c3d"),
+            (TT_HOST, "rex"),
+            (REX_BLOCK, "block:x"),
+        ])
+        .unwrap();
+        assert_eq!(
+            (rex_team.host, rex_team.source),
+            (Host::Rex, SelectionSource::Team("0a1b2c3d".to_owned()))
+        );
 
         // PRD-261109-2223-01 P2.1–P2.2: `herdr` is a valid value, and
         // `HC_TERMINAL_ID` selects it after `$TMUX` and `ORCA_TERMINAL_HANDLE`.

@@ -1642,42 +1642,280 @@ fn launch_keeps_the_shell_unless_bare() {
     );
 }
 
+/// A fake `claude`: it records its arguments and `TT_HOST`; with `FAKE_CLAUDE_SPLIT`
+/// set it runs two `split-window` calls through the Shim on `PATH` (the first with the
+/// Rex per-block variables and `K=V` as `-e` settings) and exits with that value; with
+/// `FAKE_CLAUDE_ONE` set it runs one `split-window`, writes `TT_TEAM` and the output of
+/// `$TT_BIN list --format json` beside the arguments, and exits 0; with
+/// `FAKE_CLAUDE_RESPAWN` set it runs one `split-window`, then `respawn-pane -k -t %2`,
+/// and exits 3; it exits 9 without `TT_TEAM`.
 const FAKE_CLAUDE: &str = r#"#!/bin/sh
 if [ "$1" = "--version" ]; then echo "2.1.319 (Claude Code)"; exit 0; fi
 printf '%s\n' "$@" > "$FAKE_CLAUDE_ARGS"
+printf '%s\n' "${TT_HOST-}" > "$FAKE_CLAUDE_ARGS.host"
+if [ -n "${FAKE_CLAUDE_ONE-}" ]; then
+  [ -n "${TT_TEAM-}" ] || exit 9
+  printf '%s' "$TT_TEAM" > "$FAKE_CLAUDE_ARGS.team"
+  tmux split-window -d -P -F '#{pane_id}' -- cat > "$FAKE_CLAUDE_ARGS.splits" 2>&1 || exit 7
+  "$TT_BIN" list --format json > "$FAKE_CLAUDE_ARGS.list" || exit 8
+  exit 0
+fi
+if [ -n "${FAKE_CLAUDE_RESPAWN-}" ]; then
+  [ -n "${TT_TEAM-}" ] || exit 9
+  tmux split-window -d -P -F '#{pane_id}' -- cat > "$FAKE_CLAUDE_ARGS.splits" 2>&1 || exit 7
+  tmux respawn-pane -k -t %2 -- cat >> "$FAKE_CLAUDE_ARGS.splits" 2>&1 || exit 8
+  exit 3
+fi
+if [ -n "${FAKE_CLAUDE_SPLIT-}" ]; then
+  # Outside a Team, `tmux` is not this Team's Shim: never call it.
+  [ -n "${TT_TEAM-}" ] || exit 9
+  tmux split-window -d -P -F '#{pane_id}' -e REX_BLOCK=x -e REX_SESSION=y \
+    -e REX_SERVER=z -e K=V -- printenv >> "$FAKE_CLAUDE_ARGS.splits" 2>&1 || exit 7
+  tmux split-window -d -P -F '#{pane_id}' -- cat >> "$FAKE_CLAUDE_ARGS.splits" 2>&1 || exit 7
+  exit "$FAKE_CLAUDE_SPLIT"
+fi
 exit 0
 "#;
 
-/// Acceptance (P7.6): `claude-teams` on Rex fails open with `no teammate shim on rex`,
-/// starts Claude with in-process teammates, and creates no team directory.
+/// Acceptance (PRD-261115-0921-01 P2): `claude-teams` in a plain (unregistered) Rex
+/// block sets up a Team: no `claude-teams: no team` line, Claude gets `--teammate-mode
+/// tmux` and `TT_HOST=rex`, the one teammate it starts shows in `list --format json` as
+/// `team-<team id>.tm1` with `team` and `parent: null` (PRD-261108-0447-01 P2.8, P6.1),
+/// and the clean exit closes it and removes the team directory; with `REX_BLOCK`
+/// unset (`TMUX_TOOLS_HOST=rex`) it fails open with `REX_BLOCK is unset` and
+/// in-process teammates, and creates no team directory.
 #[test]
-fn claude_teams_fails_open_on_rex() {
+fn claude_teams_sets_up_a_team_on_rex_and_fails_open_without_rex_block() {
     let fake = FakeRex::start("rex-claude");
     write_executable(&fake.dir.join("bin/claude"), FAKE_CLAUDE);
     let args_file = fake.dir.join("claude-args");
     let args_file_str = args_file.display().to_string();
-    let out = fake.cli_with(
+    let teams = fake.dir.join("state/tmux-tools/teams");
+    let no_team_dir = || !teams.exists() || std::fs::read_dir(&teams).unwrap().next().is_none();
+
+    let unset = fake.cli_with(
         &["claude-teams"],
-        &[("FAKE_CLAUDE_ARGS", args_file_str.as_str())],
-        &[],
+        &[
+            ("FAKE_CLAUDE_ARGS", args_file_str.as_str()),
+            ("TMUX_TOOLS_HOST", "rex"),
+        ],
+        &["REX_BLOCK"],
     );
-    out.assert_success("claude-teams on rex");
-    assert!(
-        out.stderr.contains(
-            "claude-teams: no team: no teammate shim on rex; starting claude without teammate panes"
-        ),
-        "{}",
-        out.stderr
+    unset.assert_success("claude-teams on rex without REX_BLOCK");
+    assert_eq!(
+        unset.stderr,
+        "claude-teams: no team: REX_BLOCK is unset; starting claude without teammate panes\n"
     );
     assert_eq!(
         std::fs::read_to_string(&args_file).unwrap(),
         "--teammate-mode\nin-process\n"
     );
-    let teams = fake.dir.join("state/tmux-tools/teams");
-    assert!(
-        !teams.exists() || std::fs::read_dir(&teams).unwrap().next().is_none(),
-        "no team directory"
+    assert!(no_team_dir(), "no team directory");
+
+    let blocks_before = fake.block_count();
+    let out = fake.cli_with(
+        &["claude-teams"],
+        &[
+            ("FAKE_CLAUDE_ARGS", args_file_str.as_str()),
+            ("FAKE_CLAUDE_ONE", "1"),
+            ("TT_BIN", BIN),
+        ],
+        &[],
     );
+    out.assert_success("claude-teams on rex");
+    assert!(
+        !out.stderr.contains("claude-teams: no team"),
+        "{}",
+        out.stderr
+    );
+    assert_eq!(
+        std::fs::read_to_string(&args_file).unwrap(),
+        "--teammate-mode\ntmux\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(format!("{args_file_str}.host")).unwrap(),
+        "rex\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(format!("{args_file_str}.splits")).unwrap(),
+        "%2\n"
+    );
+    let team = std::fs::read_to_string(format!("{args_file_str}.team")).unwrap();
+    assert_eq!(team.len(), 8, "{team:?}");
+    let rows: Value =
+        serde_json::from_str(&std::fs::read_to_string(format!("{args_file_str}.list")).unwrap())
+            .unwrap();
+    let name = format!("team-{team}.tm1");
+    let teammate = rows
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["name"] == name.as_str())
+        .unwrap_or_else(|| panic!("{name}: {rows:#}"));
+    assert_eq!(teammate["team"], team.as_str(), "{teammate}");
+    assert_eq!(teammate["parent"], Value::Null, "{teammate}");
+    assert_eq!(teammate["shim_id"], "%2", "{teammate}");
+    assert!(no_team_dir(), "the clean exit removed the team directory");
+    assert_eq!(
+        fake.block_count(),
+        blocks_before,
+        "the clean exit closed the teammate"
+    );
+}
+
+/// Acceptance (PRD-261115-0921-01 P3.1, P3.3, P4.1, PRD-261108-0447-01 P8): with the
+/// calling block registered as `lead`, Claude's two `split-window` calls create
+/// `lead.tm1` by `rex split --split=right -b <leader>` and `lead.tm2` by `rex split
+/// --split=below -b <lead.tm1>`; the first teammate command keeps `K=V` and none of
+/// the `-e` settings of `REX_BLOCK`, `REX_SESSION`, `REX_SERVER`. After a failed exit
+/// `list --format json` shows both with `team`, `parent: "lead"`, and `shim_id`, as
+/// Orphans, and `kill` closes them.
+#[test]
+fn on_rex_teammates_split_right_of_the_leader_then_below_and_drop_the_rex_variables() {
+    let fake = FakeRex::start("rex-teammates");
+    fake.write_record(INSTANCE, "unset", "lead", Some(CALLER));
+    write_executable(&fake.dir.join("bin/claude"), FAKE_CLAUDE);
+    let args_file = fake.dir.join("claude-args");
+    let args_file_str = args_file.display().to_string();
+    let out = fake.cli_with(
+        &["claude-teams"],
+        &[
+            ("FAKE_CLAUDE_ARGS", args_file_str.as_str()),
+            ("FAKE_CLAUDE_SPLIT", "3"),
+        ],
+        &[],
+    );
+    assert_eq!(out.status, 3, "{out:?}");
+    assert_eq!(
+        std::fs::read_to_string(format!("{args_file_str}.splits")).unwrap(),
+        "%2\n%3\n"
+    );
+
+    let splits = fake.calls(&["split"]);
+    assert_eq!(splits.len(), 2, "{splits:?}");
+    assert!(has(&splits[0], "--split=right"), "{:?}", splits[0]);
+    assert_eq!(flag_value(&splits[0], "-b"), Some(CALLER));
+    assert_eq!(flag_value(&splits[0], "--label"), Some("lead.tm1"));
+    let rows = json_payload(&fake.cli(&["list", "--format", "json"]), "list");
+    let row = |name: &str| {
+        rows.as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["name"] == name)
+            .unwrap_or_else(|| panic!("{name}: {rows}"))
+            .clone()
+    };
+    let tm1 = row("lead.tm1");
+    let tm2 = row("lead.tm2");
+    assert!(has(&splits[1], "--split=below"), "{:?}", splits[1]);
+    assert_eq!(flag_value(&splits[1], "-b"), tm1["pane"].as_str());
+    assert_eq!(flag_value(&splits[1], "--label"), Some("lead.tm2"));
+
+    let command = command_of(&splits[0]).join(" ");
+    assert!(command.contains("'K=V'"), "{command}");
+    for dropped in ["REX_BLOCK=", "REX_SESSION=", "REX_SERVER="] {
+        assert!(!command.contains(dropped), "{dropped}: {command}");
+    }
+
+    let team = tm1["team"].as_str().expect("team").to_owned();
+    assert_eq!(team.len(), 8, "{tm1}");
+    for (teammate, shim_id) in [(&tm1, "%2"), (&tm2, "%3")] {
+        assert_eq!(teammate["team"], team.as_str(), "{teammate}");
+        assert_eq!(teammate["parent"], "lead", "{teammate}");
+        assert_eq!(teammate["shim_id"], shim_id, "{teammate}");
+        assert_eq!(teammate["orphan"], true, "{teammate}");
+    }
+    for name in ["lead.tm1", "lead.tm2"] {
+        fake.cli(&["kill", "--target", name])
+            .assert_success(&format!("kill {name}"));
+    }
+    assert_eq!(fake.block_count(), 1, "only the Leader block is left");
+}
+
+/// PRD-261112-2108-01 P3.4: a teammate respawn on Rex creates the new block under a
+/// transitional name and then moves its record to `lead.tm1`; the block label follows
+/// by `rex block rename <block> -- lead.tm1`. The label is for display only (P3 item
+/// 2): a block gone before the rename, or a failed rename (one warning line), still
+/// gives a successful respawn.
+#[test]
+fn a_rex_teammate_respawn_renames_the_block_label_to_the_pane_name() {
+    for mode in ["ok", "gone", "fail"] {
+        let fake = FakeRex::start("rex-respawn");
+        fake.write_record(INSTANCE, "unset", "lead", Some(CALLER));
+        match mode {
+            "gone" => fake.edit_server(INSTANCE, |server| server["rename_gone"] = json!(true)),
+            "fail" => fake.edit_server(INSTANCE, |server| server["rename_fail"] = json!(true)),
+            _ => {}
+        }
+        write_executable(&fake.dir.join("bin/claude"), FAKE_CLAUDE);
+        let args_file = fake.dir.join("claude-args");
+        let args_file_str = args_file.display().to_string();
+        let out = fake.cli_with(
+            &["claude-teams"],
+            &[
+                ("FAKE_CLAUDE_ARGS", args_file_str.as_str()),
+                ("FAKE_CLAUDE_RESPAWN", "1"),
+            ],
+            &[],
+        );
+        assert_eq!(out.status, 3, "{mode}: {out:?}");
+        let splits = std::fs::read_to_string(format!("{args_file_str}.splits")).unwrap();
+        let warning = splits
+            .strip_prefix("%2\n")
+            .unwrap_or_else(|| panic!("{mode}: the respawn succeeded: {splits:?}"));
+        let renames = fake.calls(&["block", "rename"]);
+        let tm1_name = "lead.tm1";
+        assert_eq!(renames.len(), 1, "{mode}: {:?}", fake.log());
+        assert_eq!(
+            renames[0][renames[0].len() - 2..],
+            ["--", tm1_name],
+            "{mode}: the label follows `--`"
+        );
+        if mode == "fail" {
+            assert_eq!(warning.lines().count(), 1, "{mode}: {warning:?}");
+            assert!(
+                warning.starts_with("rex: block label not updated: block:"),
+                "{mode}: {warning:?}"
+            );
+        } else {
+            assert_eq!(warning, "", "{mode}: no warning");
+        }
+        let rows = json_payload(&fake.cli(&["list", "--format", "json"]), "list");
+        let names: Vec<&str> = rows
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|row| row["name"].as_str())
+            .collect();
+        assert!(names.contains(&tm1_name), "{mode}: {rows}");
+        assert!(
+            !names.iter().any(|name| name.contains(".respawn-")),
+            "{mode}: {rows}"
+        );
+        if mode == "gone" {
+            continue;
+        }
+        let tm1 = rows
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["name"] == tm1_name)
+            .unwrap()
+            .clone();
+        let block = fake
+            .block(tm1["pane"].as_str().expect("the block of the teammate"))
+            .expect("the respawned block exists");
+        let label = block["label"].as_str().unwrap();
+        match mode {
+            "fail" => assert!(
+                label.starts_with("lead.tm1.respawn-"),
+                "{mode}: the transitional label stays: {block}"
+            ),
+            _ => assert_eq!(label, "lead.tm1", "{mode}: {block}"),
+        }
+        fake.cli(&["kill", "--target", tm1_name])
+            .assert_success(&format!("kill {tm1_name}"));
+    }
 }
 
 // --- P8.3: the private-server run, opt-in ------------------------------------------------
@@ -1815,6 +2053,149 @@ fn default_server_listing(rex: &Path) -> (Option<i32>, String) {
         out.status.code(),
         String::from_utf8_lossy(&out.stdout).into_owned(),
     )
+}
+
+/// The private-server Leader's fake `claude` (PRD-261115-0921-01 P7.2). `--version`
+/// prints `FAKE_CLAUDE_VERSION` (default `2.1.322`). As a teammate (`--agent-id` or
+/// `--agent-name`) it sleeps. As the Leader it waits for the file `<report>.start`, then
+/// by `FAKE_CLAUDE_MODE`:
+/// - unset: replays the trace fixture `FAKE_CLAUDE_FIXTURE` through the Shim without
+///   its `kill-pane` (so `lead.tm1` stays), runs one more `split-window` with the Rex
+///   per-block variables and `K=V` as `-e` settings whose teammate writes its
+///   environment to `<report>.tm2-env`, writes the result (with the output of `TT_BIN
+///   self --format json`) to `<report>.paused`, waits for `<report>.go`, and exits 0;
+/// - `full`: replays every line of `FAKE_CLAUDE_FIXTURE`, its `kill-pane` included,
+///   writes the result to `<report>.done`, and exits 0;
+/// - `fail`: runs one `split-window` whose teammate sleeps, writes the result to
+///   `<report>.done`, and exits 3.
+///
+/// `{{python}}` is the absolute `python3`.
+const REPLAY_CLAUDE: &str = r##"#!{{python}}
+import json, os, shlex, subprocess, sys, time
+args = sys.argv[1:]
+if args[:1] == ["--version"]:
+    print(os.environ.get("FAKE_CLAUDE_VERSION", "2.1.322") + " (Claude Code)")
+    sys.exit(0)
+if "--agent-id" in args or "--agent-name" in args:
+    time.sleep(3600)
+    sys.exit(0)
+report = os.environ["FAKE_CLAUDE_REPORT"]
+def wait(path):
+    deadline = time.time() + 120
+    while not os.path.exists(path) and time.time() < deadline:
+        time.sleep(0.05)
+wait(report + ".start")
+def publish(path, obj):
+    # Write and close a temporary file, then rename it: existence means complete.
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(obj, f)
+    os.replace(tmp, path)
+def tmux(argv):
+    p = subprocess.run(["tmux"] + argv, capture_output=True, text=True)
+    return p.returncode, p.stdout, p.stderr
+result = {"args": args, "mismatches": []}
+own = subprocess.run([os.environ["TT_BIN"], "self", "--format", "json"],
+                     capture_output=True, text=True)
+result["self"] = own.stdout + own.stderr
+team, cwd, claude = os.environ["TT_TEAM"], os.getcwd(), os.path.abspath(sys.argv[0])
+mode = os.environ.get("FAKE_CLAUDE_MODE", "")
+result["team"] = team
+if mode == "fail":
+    code, out, err = tmux(["split-window", "-d", "-t", "%1", "-P", "-F", "#{pane_id}",
+                           "--", "sleep 3600"])
+    result["split"] = {"exit": code, "stdout": out, "stderr": err}
+    publish(report + ".done", result)
+    sys.exit(3)
+def fill(s):
+    return s.replace("{{team_id}}", team).replace("{{cwd}}", cwd).replace("{{claude}}", claude)
+result["calls"] = 0
+for line in open(os.environ["FAKE_CLAUDE_FIXTURE"]):
+    if not line.strip():
+        continue
+    entry = json.loads(line)
+    argv = [fill(a) for a in entry["argv"]]
+    if "kill-pane" in argv and mode != "full":
+        continue
+    result["calls"] += 1
+    code, out, err = tmux(argv)
+    expected = fill(entry["stdout"])
+    if code != entry["exit"] or out != expected:
+        result["mismatches"].append({"argv": argv, "exit": code, "stdout": out,
+                                     "stderr": err, "expected_exit": entry["exit"],
+                                     "expected_stdout": expected})
+if mode == "full":
+    publish(report + ".done", result)
+    sys.exit(0)
+env_file = shlex.quote(report + ".tm2-env")
+code, out, err = tmux(["split-window", "-d", "-t", "%1", "-P", "-F", "#{pane_id}",
+                       "-e", "REX_BLOCK=x", "-e", "REX_SESSION=y", "-e", "REX_SERVER=z",
+                       "-e", "K=V", "--",
+                       "env > %s.tmp && mv %s.tmp %s; exec sleep 3600"
+                       % (env_file, env_file, env_file)])
+result["split2"] = {"exit": code, "stdout": out, "stderr": err}
+publish(report + ".paused", result)
+wait(report + ".go")
+sys.exit(0)
+"##;
+
+/// Every trace fixture of `tests/fixtures/claude-teams/`, oldest version first
+/// (PRD-261108-0447-01 P10.2).
+fn all_fixtures() -> Vec<PathBuf> {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/claude-teams");
+    let mut fixtures: Vec<PathBuf> = std::fs::read_dir(&dir)
+        .unwrap()
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "jsonl"))
+        .collect();
+    fixtures.sort_by_key(|path| {
+        path.file_stem()
+            .and_then(|stem| stem.to_str())
+            .map(|stem| {
+                stem.split('.')
+                    .map(|part| part.parse::<u64>().unwrap_or(0))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+    });
+    assert!(!fixtures.is_empty(), "a trace fixture");
+    fixtures
+}
+
+/// The newest trace fixture of `tests/fixtures/claude-teams/`.
+fn newest_fixture() -> PathBuf {
+    all_fixtures().pop().expect("a trace fixture")
+}
+
+/// The first `program` on the suite's `PATH`.
+fn on_path(program: &str) -> PathBuf {
+    std::env::var("PATH")
+        .unwrap_or_default()
+        .split(':')
+        .map(|entry| Path::new(entry).join(program))
+        .find(|candidate| candidate.is_file())
+        .unwrap_or_else(|| panic!("{program} on PATH"))
+}
+
+/// The rect `[x, y, width, height]` of `block` in a `rex session inspect --json` layout.
+fn block_rect(layout: &Value, block: &str) -> Option<[f64; 4]> {
+    if layout["block_id"] == block {
+        let rect = layout["rect"].as_array()?;
+        return Some([
+            rect[0].as_f64()?,
+            rect[1].as_f64()?,
+            rect[2].as_f64()?,
+            rect[3].as_f64()?,
+        ]);
+    }
+    let split = layout.get("split")?;
+    block_rect(&split["before"], block).or_else(|| block_rect(&split["after"], block))
+}
+
+/// A POSIX single-quoted word.
+fn sh_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
 /// One private-server run: the real `rex`, a private server listening on
@@ -2345,8 +2726,19 @@ fn rex_private_server_contract_suite() {
     assert_eq!(labelled.len(), 1, "{labelled:?}");
     assert_eq!(labelled[0]["block_id"], adopted.as_str());
 
+    // PRD-261115-0921-01 P2–P4, P7.2: `claude-teams` in a plain Rex block registered as
+    // `lead` sets up a Team; the replayed fixture and one more `split-window` give
+    // `lead.tm1` right of the Leader and `lead.tm2` below it, each a Rex block.
+    claude_teams_on_the_private_server(&server);
+
+    // PRD-261108-0447-01 P10.2 on the private server: every trace fixture, in full, in
+    // its own Team; then the P8.3 Orphan of a failed Launcher and its `kill`.
+    every_fixture_replays_on_the_private_server(&server);
+    a_failed_leader_leaves_an_orphan_on_the_private_server(&server);
+
     // kill every created block (P7.4), then nothing created is left (P8.6).
     for name in [
+        "lead",
         "tt.v",
         "tt.tab",
         "tt.echo",
@@ -2391,6 +2783,377 @@ fn rex_private_server_contract_suite() {
     assert!(!after.status.success(), "the private server is stopped");
     assert_eq!(default_server_listing(&rex), default_before);
     assert_eq!(operator_registry(), registry_before);
+}
+
+/// PRD-261115-0921-01 P2, P3.1, P3.3, P4, P7.2 and the PRD-261108-0447-01 P8 output on
+/// the private server: a Leader block launched as `lead` runs `tmux-tools claude-teams`
+/// with [`REPLAY_CLAUDE`]. Its stderr has no `claude-teams: no team` line; `list
+/// --format json` shows `lead.tm1` and `lead.tm2` with `team`, `parent: "lead"`, and
+/// `shim_id`; `rex session inspect --json` places `lead.tm1` right of the Leader and
+/// `lead.tm2` below `lead.tm1`; `lead.tm2` has `K=V`, its own `REX_BLOCK`, and none of
+/// the dropped `-e` values or the team variables. The clean exit closes both teammates
+/// and removes the team directory. The Leader block stays for the caller's `kill`.
+/// Launch a Leader block named `name` that runs `tmux-tools claude-teams` with
+/// [`REPLAY_CLAUDE`], report `<dir>/<name>-report`, stderr in `<dir>/<name>.stderr`,
+/// and `env` as extra `K=V` settings. Gives the Leader block, the report path, and the
+/// stderr path.
+fn launch_leader(
+    server: &PrivateServer,
+    name: &str,
+    env: &[(&str, &str)],
+) -> (String, String, PathBuf) {
+    let python = on_path("python3");
+    write_executable(
+        &server.dir.join("bin/claude"),
+        &REPLAY_CLAUDE.replace("{{python}}", &python.display().to_string()),
+    );
+    let report_str = server
+        .dir
+        .join(format!("{name}-report"))
+        .display()
+        .to_string();
+    let stderr_file = server.dir.join(format!("{name}.stderr"));
+    let path = format!(
+        "{}:{}:{}",
+        server.dir.join("bin").display(),
+        server.rex.parent().unwrap().display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let extra: String = env
+        .iter()
+        .map(|(key, value)| format!("{key}={} ", sh_quote(value)))
+        .collect();
+    // A block has no `REX_SERVER` of a private server: the Leader gets it, and the
+    // run's registry and `PATH`, explicitly.
+    let leader_command = format!(
+        "env -u TT_TEAM -u TT_HOST -u TMUX -u TMUX_PANE REX_SERVER={} PATH={} \
+         XDG_STATE_HOME={} TT_BIN={} FAKE_CLAUDE_REPORT={} {extra}{} \
+         claude-teams 2> {}",
+        sh_quote(&server.address),
+        sh_quote(&path),
+        sh_quote(&server.dir.join("xdg").display().to_string()),
+        sh_quote(BIN),
+        sh_quote(&report_str),
+        sh_quote(BIN),
+        sh_quote(&stderr_file.display().to_string()),
+    );
+    let leader = server.pane_of(
+        &server.cli(&[
+            "launch",
+            "--name",
+            name,
+            "--cmd",
+            &leader_command,
+            "--format",
+            "json",
+        ]),
+        &format!("launch the Leader {name}"),
+    );
+    (leader, report_str, stderr_file)
+}
+
+/// Wait until the Leader's `<report>.done` exists and give its JSON.
+fn wait_done(report: &str, stderr_file: &Path) -> Value {
+    let done = PathBuf::from(format!("{report}.done"));
+    let deadline = Instant::now() + Duration::from_secs(90);
+    while !done.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "the Leader never finished: stderr {:?}",
+            std::fs::read_to_string(stderr_file)
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    serde_json::from_slice(&std::fs::read(&done).unwrap()).unwrap()
+}
+
+fn claude_teams_on_the_private_server(server: &PrivateServer) {
+    let fixture = newest_fixture();
+    let fixture_str = fixture.display().to_string();
+    let (leader, report_str, stderr_file) =
+        launch_leader(server, "lead", &[("FAKE_CLAUDE_FIXTURE", &fixture_str)]);
+    std::fs::write(format!("{report_str}.start"), "1").unwrap();
+    let paused = PathBuf::from(format!("{report_str}.paused"));
+    let tm2_env = PathBuf::from(format!("{report_str}.tm2-env"));
+    let deadline = Instant::now() + Duration::from_secs(90);
+    while !(paused.exists() && tm2_env.exists()) {
+        assert!(
+            Instant::now() < deadline,
+            "the Leader never paused: stderr {:?}",
+            std::fs::read_to_string(&stderr_file)
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let result: Value = serde_json::from_slice(&std::fs::read(&paused).unwrap()).unwrap();
+    assert_eq!(result["mismatches"], json!([]), "{result:#}");
+    assert_eq!(result["split2"]["exit"], 0, "{result:#}");
+    assert_eq!(result["split2"]["stdout"], "%3\n", "{result:#}");
+    assert_eq!(
+        result["args"],
+        json!(["--teammate-mode", "tmux"]),
+        "{result:#}"
+    );
+    let stderr = std::fs::read_to_string(&stderr_file).unwrap();
+    assert!(!stderr.contains("claude-teams: no team"), "{stderr}");
+
+    // The Team record (P2.2, P2.3).
+    let teams = server.dir.join("xdg/tmux-tools/teams");
+    let team_dirs: Vec<PathBuf> = std::fs::read_dir(&teams)
+        .unwrap()
+        .flatten()
+        .map(|entry| entry.path())
+        .collect();
+    assert_eq!(team_dirs.len(), 1, "{team_dirs:?}");
+    let team: Value =
+        serde_json::from_slice(&std::fs::read(team_dirs[0].join("team.json")).unwrap()).unwrap();
+    let instance = server.rex_json(&["server", "status", "--json"])["instance_id"].clone();
+    assert_eq!(team["host"], "rex", "{team}");
+    assert_eq!(team["server_id"], instance, "{team}");
+    assert_eq!(team["leader"]["handle"], leader.as_str(), "{team}");
+    assert!(team["tmux"].is_null(), "{team}");
+    let id = team["id"].as_str().unwrap().to_owned();
+    let own: Value = serde_json::from_str(result["self"].as_str().unwrap())
+        .unwrap_or_else(|_| panic!("self --format json: {result:#}"));
+    assert_eq!(
+        (&own["host"], &own["role"], &own["team"], &own["name"]),
+        (
+            &Value::from("rex"),
+            &Value::from("leader"),
+            &Value::from(id.as_str()),
+            &Value::from("lead")
+        ),
+        "{own}"
+    );
+
+    // `list --format json` (PRD-261108-0447-01 P8).
+    let rows = json_payload(&server.cli(&["list", "--format", "json"]), "list the team");
+    let row = |name: &str| {
+        rows.as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["name"] == name)
+            .unwrap_or_else(|| panic!("{name}: {rows:#}"))
+            .clone()
+    };
+    let tm1 = row("lead.tm1");
+    let tm2 = row("lead.tm2");
+    for (teammate, shim_id) in [(&tm1, "%2"), (&tm2, "%3")] {
+        assert_eq!(teammate["team"], id.as_str(), "{teammate}");
+        assert_eq!(teammate["parent"], "lead", "{teammate}");
+        assert_eq!(teammate["shim_id"], shim_id, "{teammate}");
+        assert_eq!(teammate["orphan"], false, "{teammate}");
+        assert_eq!(teammate["status"], "running", "{teammate}");
+    }
+    let tm1_block = tm1["pane"].as_str().unwrap().to_owned();
+    let tm2_block = tm2["pane"].as_str().unwrap().to_owned();
+
+    // PRD-261112-2108-01 P3.4: the fixture's `respawn-pane` of `lead.tm1` renamed the
+    // new block from its transitional label to the pane name.
+    let tm1_label = server
+        .blocks()
+        .into_iter()
+        .find(|block| block["block_id"] == tm1_block.as_str())
+        .map(|block| block["label"].clone());
+    assert_eq!(tm1_label, Some(json!("lead.tm1")), "{tm1_block}");
+
+    // P3.1, P3.3: the layout of the Leader's window.
+    let inspect = server.rex_json(&["session", "inspect", &server.session, "--json"]);
+    let rect = |block: &str| {
+        inspect["windows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|window| window["layers"].as_array().cloned().unwrap_or_default())
+            .find_map(|layer| block_rect(&layer["layout"], block))
+            .unwrap_or_else(|| panic!("{block} in {inspect:#}"))
+    };
+    let (lead_rect, tm1_rect, tm2_rect) = (rect(&leader), rect(&tm1_block), rect(&tm2_block));
+    let close = |a: f64, b: f64| (a - b).abs() < 1e-6;
+    assert!(
+        close(tm1_rect[0], lead_rect[0] + lead_rect[2]) && close(tm1_rect[1], lead_rect[1]),
+        "lead.tm1 is right of the Leader: {lead_rect:?} {tm1_rect:?}"
+    );
+    assert!(
+        close(tm2_rect[1], tm1_rect[1] + tm1_rect[3]) && close(tm2_rect[0], tm1_rect[0]),
+        "lead.tm2 is below lead.tm1: {tm1_rect:?} {tm2_rect:?}"
+    );
+
+    // P4: the teammate's own environment.
+    let env = std::fs::read_to_string(&tm2_env).unwrap();
+    let value = |key: &str| {
+        env.lines()
+            .find_map(|line| line.strip_prefix(&format!("{key}=")))
+            .map(str::to_owned)
+    };
+    assert_eq!(value("K").as_deref(), Some("V"), "{env}");
+    assert_eq!(value("REX_BLOCK"), Some(tm2_block.clone()), "{env}");
+    assert_ne!(value("REX_BLOCK"), Some(leader.clone()), "{env}");
+    assert_ne!(value("REX_SESSION").as_deref(), Some("y"), "{env}");
+    assert_ne!(value("REX_SERVER").as_deref(), Some("z"), "{env}");
+    for key in ["TT_TEAM", "TT_HOST", "TMUX"] {
+        assert_eq!(value(key), None, "{key}: {env}");
+    }
+
+    // The clean exit closes both teammates and removes the team directory (P2.5).
+    std::fs::write(format!("{report_str}.go"), "1").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while team_dirs[0].exists() {
+        assert!(
+            Instant::now() < deadline,
+            "the clean exit never removed the team directory"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let left: Vec<Value> = server
+        .blocks()
+        .into_iter()
+        .filter(|block| block["block_id"] == tm1_block || block["block_id"] == tm2_block)
+        .collect();
+    assert!(left.is_empty(), "the teammates are closed: {left:?}");
+}
+
+/// The `list --format json` rows of the private server.
+fn private_rows(server: &PrivateServer, ctx: &str) -> Vec<Value> {
+    json_payload(&server.cli(&["list", "--format", "json"]), ctx)
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+}
+
+/// PRD-261115-0921-01 P7.2, PRD-261108-0447-01 P10.2 on the private server: each trace
+/// fixture of `tests/fixtures/claude-teams/` is replayed in full, its `kill-pane`
+/// included, by its own Leader block `rp<n>` in its own Team, with the fixture's
+/// version; every call's stdout and exit equal the filled fixture line. The
+/// `kill-pane` closes the teammate's block, and the clean exit removes the team
+/// directory. Each Leader block is then killed.
+fn every_fixture_replays_on_the_private_server(server: &PrivateServer) {
+    for (index, fixture) in all_fixtures().iter().enumerate() {
+        let key = fixture.file_stem().unwrap().to_str().unwrap().to_owned();
+        eprintln!("P10.2 private-server replay of fixture {key}");
+        let name = format!("rp{}", index + 1);
+        let fixture_str = fixture.display().to_string();
+        let (_leader, report, stderr_file) = launch_leader(
+            server,
+            &name,
+            &[
+                ("FAKE_CLAUDE_FIXTURE", &fixture_str),
+                ("FAKE_CLAUDE_VERSION", &key),
+                ("FAKE_CLAUDE_MODE", "full"),
+            ],
+        );
+        std::fs::write(format!("{report}.start"), "1").unwrap();
+        let result = wait_done(&report, &stderr_file);
+        let lines = std::fs::read_to_string(fixture)
+            .unwrap()
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .count();
+        assert_eq!(result["calls"], lines as u64, "{key}: {result:#}");
+        assert_eq!(result["mismatches"], json!([]), "{key}: {result:#}");
+
+        let team_dir = server
+            .dir
+            .join("xdg/tmux-tools/teams")
+            .join(result["team"].as_str().unwrap());
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while team_dir.exists() {
+            assert!(
+                Instant::now() < deadline,
+                "{key}: the clean exit never removed the team directory"
+            );
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        let stderr = std::fs::read_to_string(&stderr_file).unwrap();
+        assert!(!stderr.contains("claude-teams:"), "{key}: {stderr}");
+
+        let teammate = format!("{name}.tm1");
+        let rows = private_rows(server, "list after the replay");
+        assert!(
+            rows.iter().all(|row| row["name"] != teammate.as_str()),
+            "{key}: {teammate} is gone: {rows:#?}"
+        );
+        let labelled: Vec<Value> = server
+            .blocks()
+            .into_iter()
+            .filter(|block| block["label"] == teammate.as_str())
+            .collect();
+        assert!(
+            labelled.is_empty(),
+            "{key}: kill-pane closed {teammate}: {labelled:?}"
+        );
+
+        server
+            .cli(&["kill", "--target", &name, "--any"])
+            .assert_success(&format!("kill {name}"));
+    }
+}
+
+/// PRD-261108-0447-01 P2.5, P8.2–P8.4 on the private server: a Leader `orph` whose
+/// Claude starts one teammate and exits 3 leaves `orph.tm1` live; `list --format json`
+/// reports it with `team`, `parent: "orph"`, and `orphan: true` (the Team's
+/// `leader.lock` is no longer held), and `kill --target orph.tm1` removes it from
+/// `tmux-tools list` and from the Rex block listing. The Leader block is then killed.
+fn a_failed_leader_leaves_an_orphan_on_the_private_server(server: &PrivateServer) {
+    let (_leader, report, stderr_file) =
+        launch_leader(server, "orph", &[("FAKE_CLAUDE_MODE", "fail")]);
+    std::fs::write(format!("{report}.start"), "1").unwrap();
+    let result = wait_done(&report, &stderr_file);
+    assert_eq!(result["split"]["exit"], 0, "{result:#}");
+    assert_eq!(result["split"]["stdout"], "%2\n", "{result:#}");
+    let team = result["team"].as_str().unwrap().to_owned();
+
+    // The Launcher exits after Claude: wait until its lock is released.
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let row = loop {
+        let rows = private_rows(server, "list the orphan");
+        let row = rows
+            .iter()
+            .find(|row| row["name"] == "orph.tm1")
+            .unwrap_or_else(|| panic!("orph.tm1 survives the failed Leader: {rows:#?}"))
+            .clone();
+        if row["orphan"] == true {
+            break row;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "orph.tm1 never became an Orphan: {row}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    assert_eq!(row["team"], team.as_str(), "{row}");
+    assert_eq!(row["parent"], "orph", "{row}");
+    assert_eq!(row["shim_id"], "%2", "{row}");
+    let block = row["pane"].as_str().unwrap().to_owned();
+    assert!(
+        server
+            .blocks()
+            .iter()
+            .any(|b| b["block_id"] == block.as_str()),
+        "the teammate block survives"
+    );
+    assert!(
+        server.dir.join("xdg/tmux-tools/teams").join(&team).exists(),
+        "a failed exit keeps the team directory"
+    );
+
+    server
+        .cli(&["kill", "--target", "orph.tm1"])
+        .assert_success("kill the Orphan orph.tm1");
+    let rows = private_rows(server, "list after the Orphan kill");
+    assert!(
+        rows.iter().all(|row| row["name"] != "orph.tm1"),
+        "{rows:#?}"
+    );
+    assert!(
+        server
+            .blocks()
+            .iter()
+            .all(|b| b["block_id"] != block.as_str()),
+        "the Orphan's block is closed"
+    );
+    server
+        .cli(&["kill", "--target", "orph", "--any"])
+        .assert_success("kill orph");
 }
 
 // --- P8.4, P8.6: the opt-in live run on the default server ------------------------------

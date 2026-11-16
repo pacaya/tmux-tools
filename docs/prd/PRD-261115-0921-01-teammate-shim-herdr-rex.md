@@ -158,7 +158,7 @@ On Herdr and Rex, `tmux-tools claude-teams` (the `cl` alias, and every `spawn-ag
 1. The Shim creates a Teammate pane through the Host port's registered-create path on every host whose backend creates panes only together with their registration (Herdr), and on every host with Pane records; it uses the create-then-register path only on the remaining hosts. A Herdr teammate create therefore never calls `create_split`.
 2. Herdr: the teammate is created with the `herdr.space` and `herdr.tab` labels of its split target (the Leader or a Teammate pane), so it joins the Leader's tab and Herdr chooses its position (PRD-261109-2223-01 P3.1–P3.2). The split direction has no effect.
 3. Rex: Rex has no `tile`. The first teammate goes right of the Leader; each later teammate goes below the live Teammate pane with the highest number (the no-`tile` rule of PRD-261108-0447-01 P6.1).
-4. Rex: when Rex refuses a split for lack of space, the Shim exits 1 with `tmux: no space for a new pane` and does not use `k` [OPEN: rex-no-space]. When the probe finds such a refusal, the Rex backend must report it as a definite create failure that keeps no name reservation, so that a retry with the same `k` works; this changes PRD-261112-2108-01 P4.4 (which sends unknown create errors to recovery) and needs maintainer approval at the Rex slice triage.
+4. Rex: no Shim error for "no space" (removed at the Rex slice triage; the `rex-no-space` probe saw no refusal). A Rex create error keeps PRD-261112-2108-01 P4.4.
 5. The Shim's `capture-pane` chooses its history path by whether the host addresses lines, not by registration storage: on Herdr, as on Orca, `-S -` reads all history and a negative `-S` reads that many history lines plus the visible screen (PRD-261108-0447-01 P5.6), through the backend's `All`, `Visible`, and `Tail` capture ranges.
 
 ### P4 — Teammate environment
@@ -179,7 +179,7 @@ On Herdr and Rex, `tmux-tools claude-teams` (the `cl` alias, and every `spawn-ag
 ### P7 — Contract tests
 
 1. Herdr: the default `cargo test --workspace --features test-fixtures` run tests the real binary as `claude-teams` and as `tmux` against the fake `hc` (`tests/contract/fake_hc.py`), with a fake `claude` that replays the trace fixtures of `tests/fixtures/claude-teams/` (PRD-261108-0447-01 P10.2). It covers P2, P3.1–P3.2, P3.5 (`capture-pane -p -S -10` returns history lines plus the visible screen), P4.1, P5 (including `tt.name` and `where` after a respawn, and a create of a respawned teammate's name that is refused as taken), P6, and the PRD-261108-0447-01 P8 output (`list` and `self` fields, Orphan).
-2. Rex: the `TT_TEST_REX=1` suite (PRD-261112-2108-01 P8) covers P2, P3.1, P3.3, P4.1, and the PRD-261108-0447-01 P8 output on the private Rex server, with the same fake `claude` and fixtures. When P3.4 is kept, a test with the fake `rex` that answers a split with the error found by the `rex-no-space` probe checks that the Shim exits 1 with `tmux: no space for a new pane`, creates no registration, does not use `k`, and that the next `split-window` succeeds with that `k`.
+2. Rex: the `TT_TEST_REX=1` suite (PRD-261112-2108-01 P8) covers P2, P3.1, P3.3, P4.1, and the PRD-261108-0447-01 P8 output on the private Rex server, with the same fake `claude` and fixtures.
 3. Run every suite with `TT_TEAM` and `TT_HOST` unset.
 
 ### P8 — Live runs
@@ -191,7 +191,7 @@ Each slice passes one live run on its host before its release. The run starts `s
 3. Herdr: the teammate shows in the Leader's tab in the Herdr window (maintainer check);
 4. a clean `/exit` of the Leader closes the teammate; on Herdr, the teammate terminal is removed (P6.1);
 5. a killed Leader leaves the teammate, which `list` reports as `orphan: true`, and `kill --target <name>` closes it;
-6. Rex, when P3.4 is kept: in a small visible Rex window, the Leader starts teammates until a split is refused; the refused start exits 1 with `tmux: no space for a new pane`, and no new block or registration exists;
+6. (removed at the Rex slice triage with P3.4);
 7. no leaked pane in `tmux-tools list` or in the host listing of item 1 after the run.
 
 The Herdr run needs the maintainer's Herdr window, with the Herdr core started from the GUI session.
@@ -205,7 +205,7 @@ The Herdr run needs the maintainer's Herdr window, with the Herdr core started f
 ## Codebase fit
 
 - Reuse: the Launcher and Shim (`src/cmd/claude_teams.rs`, `src/shim.rs`), the Team record (`core/src/team.rs`), host selection (`core/src/host/mod.rs`), the Herdr backend (`core/src/host/herdr.rs`: `create_registered`, `placement`, `server_identity`), the Rex backend (`core/src/host/rex.rs`: `server_identity`, `uses_pane_records`), the fake `hc` (`tests/contract/fake_hc.py`), the Rex private-server suite, the trace fixtures (`tests/fixtures/claude-teams/`).
-- Sites that change: `claude_teams.rs` Leader match and fail-open arms (`Host::Herdr`, `Host::Rex`); the `TT_HOST` parse and its error text in `core/src/host/mod.rs`; in `src/shim.rs` the create-path branch (`uses_pane_records()` → P3.1), the dropped-variable list (`DROPPED_ENV` → per host, P4.1), the respawn transitional-name branch (P5), the `capture-pane` history branch (`uses_pane_records()` → P3.5), and the `no space` mapping for Rex (P3.4, with the Rex backend's create-error classification in `core/src/host/rex.rs` when a refusal is found); the Herdr `run_terminal` flags for teammate registrations (P6.1); `team.rs` doc comments of `server_id` and `tmux`.
+- Sites that change: `claude_teams.rs` Leader match and fail-open arms (`Host::Herdr`, `Host::Rex`); the `TT_HOST` parse and its error text in `core/src/host/mod.rs`; in `src/shim.rs` the create-path branch (`uses_pane_records()` → P3.1), the dropped-variable list (`DROPPED_ENV` → per host, P4.1), the respawn transitional-name branch (P5), the `capture-pane` history branch (`uses_pane_records()` → P3.5); the Herdr `run_terminal` flags for teammate registrations (P6.1); `team.rs` doc comments of `server_id` and `tmux`.
 - Conventions: CONTEXT.md terms (Team, Team record, Leader, Teammate pane, Launcher, Shim, Orphan, Close-on-success wrap) unchanged; ADR-260809-1542 (domain-modeling conventions).
 - New homes: none; Herdr-slice tests extend `tests/contract/herdr.rs` and `tests/claude_teams.rs`; Rex-slice tests extend the Rex private-server suite.
 - Planned-record dependencies: none at PRD level; the Rex-slice issue declares `implementation_after` ISSUE-261114-0707-02 (P1.1).
@@ -226,7 +226,6 @@ The Herdr run needs the maintainer's Herdr window, with the Herdr core started f
 - **Herdr Teammate terminal** (changed) — created by `hc run --bg --outlive-parent --no-notify --rm --name <hc name> --cwd <cwd>` with the `tt.*` registration labels (PRD-261109-2223-01 P4.1, including `tt.team`, `tt.parent`, `tt.shim_id`) and the split target's `herdr.space` and `herdr.tab` labels.
 - **Herdr respawn name** (changed) — transitional name `<name>.respawn-<pid>` (`tt.name` and `where`), replaced by `<name>` in both labels after the old terminal closes; the hc name stays that of the transitional name.
 - **Rex Teammate block placement** (changed) — first teammate `rex split --split=right -b <leader block>`, later teammates `--split=below -b <highest-numbered live teammate block>`.
-- **Shim error on Rex** (changed) — `tmux: no space for a new pane` when Rex refuses a split for lack of space (kept only if the `rex-no-space` probe finds such a refusal).
 - Unchanged: the Shim `tmux` subset, the team directory and `shim.log`, `list`/`self` JSON, the trace fixture format, and the `spawn-agent claude` pane command.
 
 ## Verification and release
@@ -249,11 +248,7 @@ Rollback is reverting the slice's release: the previous version fails open on th
 
 ## Open Questions
 
-### rex-no-space
-- question: which Rex exit status and error text mean "no space for a new block" in a visible window, so P3.4 can map it?
-- dimension: contracts/integrations
-- resolve-by: during-triage
-- owner: the Rex slice triage: a direct `rex split` loop in a new small visible Rex window, before P3.4 is built. An observed refusal gives the exit status and text that P3.4 maps (and the P3.4 change to PRD-261112-2108-01 P4.4 goes to the maintainer). When no refusal is observed, the question stays open and the triage returns the choice for P3.4 and P8.6 to the maintainer.
+None.
 
 ## Dimension Scan
 
@@ -265,6 +260,6 @@ Rollback is reverting the slice's release: the previous version fails open on th
 | architecture shape | n/a | brownfield — Host port and Shim of PRD-261107-0825-01 and PRD-261108-0447-01 ratified |
 | stack | n/a | brownfield — Rust workspace unchanged |
 | data/schema | decided | ## Contracts — Business entities (Team record values only) |
-| contracts/integrations | deferred | P3.4; open-questions: rex-no-space |
+| contracts/integrations | decided | ## Contracts; P3.4 |
 | UX (if UI) | n/a | CLI only; host window placement in P3.2–P3.3 |
 | testing/seams | decided | P7; P8 |
