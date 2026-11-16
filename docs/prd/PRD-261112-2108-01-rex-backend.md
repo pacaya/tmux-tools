@@ -183,7 +183,7 @@ Under Rex, panes that `tmux-tools` creates do not show in the Rex app and get no
 3. `list` rows on Rex: `pane` is the block id, `session` is the Rex session id, and `status` is `running`, `dead`, or `unknown` (P4.3); rows gain no `window` key. In a result that already carries a `window` value (`status`, `spawn-agent`, `launch`), it is the Rex window id. Every `--format json` key that the result has on tmux and that has no Rex source is `null` (the PRD-261107-0825-01 P9.13 rule).
 4. `kill` resolves the name, applies the self-pane refusal and the Ownership check, runs `rex block close <block>`, and then deletes the record. A `not_found` result counts as success.
 5. `launch` runs `(<command>); exec $SHELL` (Keep-alive wrap). `--bare` runs the command with no wrap, so the block closes when the command exits.
-6. `claude-teams` cannot set up a Team on host `rex`: it fails open per PRD-261108-0447-01 P2.7 with `<reason>` `no teammate shim on rex`. The tmux, Orca, and Herdr paths do not change.
+6. `claude-teams` sets up a Team on host `rex` per PRD-261115-0921-01: the Leader handle is `REX_BLOCK`, and without it the Launcher fails open per PRD-261108-0447-01 P2.7 with `<reason>` `REX_BLOCK is unset` (PRD-261115-0921-01 P2.2). The tmux, Orca, and Herdr Launcher paths do not change.
 
 ### P8 — Contract tests
 
@@ -230,7 +230,7 @@ Under Rex, panes that `tmux-tools` creates do not show in the Rex app and get no
 - **JSON results on Rex** — `host: "rex"`; `list` rows and `window` per P7.3; keys with no Rex source are `null`; `host_word` per P6.2; `submit` per P6.6.
 - **`self --format json`** — `host` adds `"rex"`; `driven` per P7.2.
 - **Exit code 3 on Rex** — `--split tile`, `--size`, `--session`, `--window`, `rebalance` (P3.5).
-- **stderr texts** — `notify: not delivered on rex` (exit 0); `rex api revision <n> is older than 12` (exit 1); `spawn outcome unknown: <name> (session <session id>)` (exit 1); `claude-teams: no team: no teammate shim on rex; starting claude without teammate panes` (P7.6); the PRD-261107-0825-01 P4 registry texts, with `list incomplete: rex`.
+- **stderr texts** — `notify: not delivered on rex` (exit 0); `rex api revision <n> is older than 12` (exit 1); `spawn outcome unknown: <name> (session <session id>)` (exit 1); `claude-teams: no team: REX_BLOCK is unset; starting claude without teammate panes` (P7.6, PRD-261115-0921-01 P2.2); the PRD-261107-0825-01 P4 registry texts, with `list incomplete: rex`.
 - **Test switches** — `TT_TEST_REX=1` (private server), `TMUX_TOOLS_LIVE_REX=1` (live run).
 
 ## Verification and release
