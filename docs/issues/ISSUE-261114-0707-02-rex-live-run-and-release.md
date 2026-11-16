@@ -2,9 +2,7 @@
 id: ISSUE-261114-0707-02
 kind: issue
 category: enhancement
-status: in-review
-claimed_by: implement-issue@agentmac
-claimed_at: 2026-11-15T09:36:28Z
+status: ready-for-agent
 brief_contract: agent-brief.v3
 context: tmux-tools
 summary: the Rex backend passes a live run in a plain Rex terminal, the maintainer confirms it in the Rex app, and it ships as 0.9.0 with a README Rex section
@@ -111,5 +109,17 @@ contract:
 **Bundle manifest:** `.planning-contracts/bundles/ISSUE-261114-0707-02/manifest.json`
 
 **Test seam:** the CLI binary driven by `tests/integration.rs` (PRD-261112-2108-01 P8.1) with `TMUX_TOOLS_LIVE_REX=1`; `tmux-tools --version`; `README.md`
+
+## Repair Notes
+
+- kind: repairable
+- Prior attempt: claimed_by `implement-issue@agentmac`, claimed_at `2026-11-15T09:36:28Z`; session ended for context size during the maintainer visual check.
+- WIP: branch `wip/ISSUE-261114-0707-02-20261116T015443Z`, commit `77175f293e70b1c8c11cbb45ef957a7b10d74196` (`Cargo.lock`, `Cargo.toml`, `README.md`, `core/Cargo.toml`, `tests/contract/rex.rs`).
+- Review file: `issue-261114-0707-02-code-review-20261115-095134.md`; outcome ACCEPTED (M1/CODEX-1 fixed, Codex recheck VERIFIED_FIXED).
+- Counts: correction episodes 1; no-progress 0.
+- Visual check answers from the prior attempt: (1) `tt-check-split-v` block below `tt-live-runner`: yes. (2) `tt-check-claude` in a new tab of its own: yes. (3) focused tab/block unchanged, no focus taken: unknown, maintainer not present when the blocks opened (reports that tmux panes often take focus). (4) Rex shows a program state (idle) for the Claude block: not answered.
+- 0.9.0 is not installed.
+- Resume phase: maintainer visual check of the live run (before release).
+- Remaining required outcome: rerun the live check blocks for checks 1–4 with the maintainer watching. Before opening them, stop with `BLOCKED: maintainer check — ready to open the check blocks; reply go`; open them only after "go"; then ask checks 1–4. Install 0.9.0 only after a confirming answer to all four checks, then finish release per the Agent Brief.
 
 ## Triage Notes
