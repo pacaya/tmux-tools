@@ -2,7 +2,9 @@
 id: ISSUE-261114-0707-02
 kind: issue
 category: enhancement
-status: ready-for-agent
+status: in-progress
+claimed_by: implement-issue@agentmac
+claimed_at: 2026-11-16T01:56:47Z
 brief_contract: agent-brief.v3
 context: tmux-tools
 summary: the Rex backend passes a live run in a plain Rex terminal, the maintainer confirms it in the Rex app, and it ships as 0.9.0 with a README Rex section
@@ -87,11 +89,11 @@ contract:
 
 **Out of scope:** backend behaviour (ISSUE-261114-0707-01); the Rex teammate shim; harness `rex` guard and poll rows.
 
-## Context Pack — canonical at claim (2026-11-15T09:36:28Z)
+## Context Pack — canonical at claim (2026-11-16T01:56:47Z)
 
-**Contract approval:** `review-20261115T093443Z` · canonical · revision check complete
+**Contract approval:** `repair-20261116T015523Z` · canonical · revision check complete
 
-**Issue binding:** `tmux-tools:ISSUE-261114-0707-02` · revision `eb2ebc61205769b3349eabb7244302005e20ae6c` · sha256 `7e4cf6ae57ae98c2a2d9b10356add676e87c27b4bcaa1e7eeaf2bff259205338`
+**Issue binding:** `tmux-tools:ISSUE-261114-0707-02` · revision `0a846d021be7551cd8ea0659973d46dcd0ecc007` · sha256 `d85616055c891925a8dea38e5390435c022ed41836a12bb10a90f10a30996884`
 
 **Required source objects:**
 - `tmux-tools:PRD-261107-0825-01#p10-tests` · revision `eb2ebc61205769b3349eabb7244302005e20ae6c` · sha256 `a28eb660fd94942cad51db5869d5ba74757bff5b2ac3317f6e44699676aa3fcb` · `objects/a28eb660fd94942cad51db5869d5ba74757bff5b2ac3317f6e44699676aa3fcb.md`
