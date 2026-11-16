@@ -1,5 +1,5 @@
 {
-  "approval_id": "review-20261115T094333Z",
+  "approval_id": "repair-20261116T015523Z",
   "impact_disposition": {
     "checked_revisions": [
       {
@@ -61,8 +61,8 @@
     "status": "accepted"
   },
   "issue": {
-    "revision": "83a0bb6b1dcf008d3407a281f397265af13f16a7",
-    "sha256": "f232b66a35f1b33342aafec665f3dd2f8c4156487f18603d563ee1569a941386",
+    "revision": "0a846d021be7551cd8ea0659973d46dcd0ecc007",
+    "sha256": "d85616055c891925a8dea38e5390435c022ed41836a12bb10a90f10a30996884",
     "target": "tmux-tools:ISSUE-261114-0707-02"
   },
   "resolution_mode": "canonical",
