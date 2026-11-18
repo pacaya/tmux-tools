@@ -2,7 +2,7 @@
 id: ISSUE-261118-0307-01
 kind: issue
 category: bug
-status: in-review
+status: done
 claimed_by: implement-issue@agentmac
 claimed_at: 2026-11-18T03:28:09Z
 brief_contract: agent-brief.v3
@@ -72,3 +72,20 @@ contract:
 **Bundle manifest:** `.planning-contracts/bundles/ISSUE-261118-0307-01/manifest.json`
 
 **Test seam:** `tests/contract/herdr.rs`, `tests/contract/orca.rs`, `tests/contract/rex.rs` (fake-host contract tests), a `send --help` integration test, and the live Herdr `prompt '/exit'` check
+
+## Code Review
+
+Outcome: ACCEPTED
+
+Scope proposals (not fixed; maintainer decides):
+- CLAUDE-1 — `core/src/host/orca/keys.rs:185`: the NUL refusal for `C-Space` prints `cannot send C- : it is the NUL byte, which <Host> cannot carry as text` (a space, not `Space`), and modifier-prefixed forms drop the extra modifier (`M-C-@` gives `cannot send C-@`). The text was already like this on Orca; the acceptance item for `C-Space` (stderr names the host) holds. CHANGE: build the refusal from the argument as written (`cannot send C-Space: …`) and assert the full `C-Space` stderr on Orca and Rex. OWNER: maintainer — the fix changes the Orca text, which this brief says does not change.
+
+## Resolution
+
+- Commit: `fix: on Herdr, prompt and execute deliver text untagged so a leading /command runs, a refused control character names its key, and the NUL refusal names its host (ISSUE-261118-0307-01)`.
+- Route: `claude — deepseek-suspended` (code bug fix with supporting docs; Opus, effort medium); two batches (brief at claim, then the Q324 NUL delta after re-mint and re-dispatch).
+- TDD: red-green at `tests/contract/herdr.rs`, `tests/contract/orca.rs`, `tests/contract/rex.rs`, and the `send --help` integration test.
+- Review: dual review ACCEPTED with no actionable findings; one scope proposal (CLAUDE-1) for the maintainer. No correction batch.
+- Suite: `cargo test --workspace --features test-fixtures` PASS (588 passed, 0 failed), run with `TT_TEAM` and `TT_HOST` unset (a Claude team leader's environment makes unrelated Orca fake-host tests fail).
+- Live Herdr check: PASS. A Claude session in Herdr terminal `t2y` launched Claude pane `live-q-c` (`t30`) with the branch build; while its `host_state` was `working`, `tmux-tools prompt --target live-q-c '/exit'` ended it with the resume line `claude --dangerously-skip-permissions --resume 77cbd60b-7128-45b1-ace2-0b2263a70a79`; its transcript has no `<hc` text. An earlier run on an idle pane (`live-q-b`) also ended with no `<hc` text. Afterwards `tmux-tools list` was empty and `hc ls --all --json` showed only terminals that existed before the check.
+- Date: 2026-11-18 (UTC).

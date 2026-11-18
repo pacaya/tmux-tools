@@ -11,6 +11,8 @@ Its terminals live in the JSON file FAKE_HC_STATE:
 lines; without it every read answers all its lines.
 
 - FAKE_HC_LOG: append each call's argv as one JSON line.
+- FAKE_HC_ENV_LOG: append each call as one JSON line `{"argv", "HC_TERMINAL_ID"}`, the
+  second the call's `HC_TERMINAL_ID` or null when its environment has none.
 - FAKE_HC_DOWN=1: `server status` fails.
 - FAKE_HC_REJECT_KEYS=<a,b>: `keys` rejects these key names as `invalid_params`.
 - FAKE_HC_EXEC=1: `run` starts the terminal's command with `sh -c` in the background,
@@ -38,6 +40,9 @@ argv = sys.argv[1:]
 if os.environ.get("FAKE_HC_LOG"):
     with open(os.environ["FAKE_HC_LOG"], "a") as log:
         log.write(json.dumps(argv) + "\n")
+if os.environ.get("FAKE_HC_ENV_LOG"):
+    with open(os.environ["FAKE_HC_ENV_LOG"], "a") as log:
+        log.write(json.dumps({"argv": argv, "HC_TERMINAL_ID": os.environ.get("HC_TERMINAL_ID")}) + "\n")
 
 STATE = os.environ["FAKE_HC_STATE"]
 

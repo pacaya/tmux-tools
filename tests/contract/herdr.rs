@@ -110,6 +110,20 @@ impl FakeHc {
 
     fn clear_log(&self) {
         let _ = std::fs::remove_file(self.dir.join("log.jsonl"));
+        let _ = std::fs::remove_file(self.dir.join("env.jsonl"));
+    }
+
+    /// Every logged call with the `HC_TERMINAL_ID` of its environment (`None` when unset).
+    fn calls_with_terminal_id(&self) -> Vec<(Vec<String>, Option<String>)> {
+        std::fs::read_to_string(self.dir.join("env.jsonl"))
+            .unwrap_or_default()
+            .lines()
+            .map(|line| {
+                let call: Value = serde_json::from_str(line).unwrap();
+                let argv = serde_json::from_value(call["argv"].clone()).unwrap();
+                (argv, call["HC_TERMINAL_ID"].as_str().map(str::to_owned))
+            })
+            .collect()
     }
 
     /// Every logged call of the `hc` command `name`.
@@ -140,7 +154,8 @@ impl FakeHc {
             .env("XDG_STATE_HOME", self.dir.join("state"))
             .env("XDG_CONFIG_HOME", self.dir.join("config"))
             .env("FAKE_HC_STATE", self.state_path())
-            .env("FAKE_HC_LOG", self.dir.join("log.jsonl"));
+            .env("FAKE_HC_LOG", self.dir.join("log.jsonl"))
+            .env("FAKE_HC_ENV_LOG", self.dir.join("env.jsonl"));
         for (key, value) in env {
             command.env(key, value);
         }
@@ -742,6 +757,92 @@ fn send_types_hc_key_names_and_refuses_untypeable_input() {
         "{}",
         out.stderr
     );
+}
+
+/// Acceptance (P6.5): every `hc send` of `prompt` and `execute` runs without
+/// `HC_TERMINAL_ID`, so hc delivers the text untagged; every other `hc` call of these
+/// verbs keeps it.
+#[test]
+fn hc_send_runs_without_hc_terminal_id_and_every_other_call_keeps_it() {
+    let fake = FakeHc::with_caller("herdr-untagged", json!({}));
+    let pane = fake.add_terminal(json!({
+        "labels": {"tt.name": "a"}, "status": "working", "status_ms": 5, "lines": ["$ ready"],
+    }));
+    for args in [
+        &["prompt", "--target", "a", "--timeout", "1", "/exit"][..],
+        &["execute", "--target", "a", "--no-wait", "echo hi"][..],
+    ] {
+        fake.clear_log();
+        fake.cli(args).assert_success(&format!("{args:?}"));
+        let calls = fake.calls_with_terminal_id();
+        let sends: Vec<_> = calls
+            .iter()
+            .filter(|(argv, _)| argv.first().map(String::as_str) == Some("send"))
+            .collect();
+        assert_eq!(sends.len(), 1, "{args:?}: {calls:?}");
+        for (argv, terminal_id) in &calls {
+            if argv.first().map(String::as_str) == Some("send") {
+                assert_eq!(terminal_id, &None, "{args:?}: {argv:?}");
+            } else {
+                assert_eq!(terminal_id.as_deref(), Some("t1"), "{args:?}: {argv:?}");
+            }
+        }
+    }
+    assert_eq!(fake.terminal(&pane).unwrap()["sent"][0], "/exit");
+}
+
+/// Acceptance (P5.2): a character outside the typeable set that has a tmux key name is
+/// refused with that key name, the command that sends it as a key, and a pointer to
+/// `send --help`; nothing is sent. Other refusals keep their text.
+#[test]
+fn send_refuses_a_control_character_with_its_key_hint() {
+    let fake = FakeHc::with_caller("herdr-key-hint", json!({}));
+    fake.add_terminal(json!({"labels": {"tt.name": "probe"}}));
+    let other = |key: &str| format!("tmux-tools send --target <pane> {key}");
+    let cases = [
+        (
+            "\u{1b}",
+            "U+001B (Escape)",
+            "tmux-tools escape --target <pane>, or tmux-tools send --target <pane> Escape"
+                .to_owned(),
+        ),
+        (
+            "\r",
+            "U+000D (Enter)",
+            "tmux-tools send-enter --target <pane>, or tmux-tools send --target <pane> Enter"
+                .to_owned(),
+        ),
+        ("\t", "U+0009 (Tab)", other("Tab")),
+        ("\u{7f}", "U+007F (BSpace)", other("BSpace")),
+        ("\u{1}", "U+0001 (C-a)", other("C-a")),
+        ("\u{1a}", "U+001A (C-z)", other("C-z")),
+    ];
+    for (text, named, commands) in cases {
+        let out = fake.cli(&["send", "--target", "probe", "--literal", text]);
+        assert_eq!(out.status, 1, "{text:?}: {out:?}");
+        let expected = format!(
+            "cannot type on herdr: {named}. Send it as a key: {commands}. See: tmux-tools send --help"
+        );
+        assert!(out.stderr.contains(&expected), "{text:?}: {}", out.stderr);
+        assert!(!out.stderr.contains("probe"), "{text:?}: {}", out.stderr);
+    }
+    let out = fake.cli(&["send", "--target", "probe", "--literal", "!"]);
+    assert_eq!(out.status, 1, "{out:?}");
+    assert!(
+        out.stderr.contains("cannot type on herdr: U+0021")
+            && !out.stderr.contains("Send it as a key"),
+        "{}",
+        out.stderr
+    );
+    let out = fake.cli(&["send", "--target", "probe", "KP0"]);
+    assert_eq!(out.status, 1, "{out:?}");
+    assert!(
+        out.stderr.contains("cannot type on herdr: KP0")
+            && !out.stderr.contains("Send it as a key"),
+        "{}",
+        out.stderr
+    );
+    assert!(fake.calls("keys").is_empty(), "{:?}", fake.log());
 }
 
 // --- P6: Host state and prompt ---------------------------------------------------------------

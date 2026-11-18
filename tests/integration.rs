@@ -11396,6 +11396,33 @@ fn assert_rebalance_refused(
     out.stderr
 }
 
+/// Acceptance (ISSUE-261118-0307-01): `tmux-tools send --help` says that an argument in
+/// tmux key grammar is sent as a key, that `--literal` text must be typeable on the
+/// host, what the Herdr typeable set is (and that the README Herdr section states it),
+/// and that tmux, Orca, and Rex send any text.
+#[test]
+fn send_help_documents_keys_and_the_per_host_typeable_rule() {
+    let out = Command::new(BIN)
+        .args(["send", "--help"])
+        .output()
+        .expect("run send --help");
+    assert!(out.status.success(), "send --help must succeed");
+    let help = String::from_utf8_lossy(&out.stdout);
+    for statement in [
+        "An argument in tmux key grammar (Escape, Enter, C-c, ...) is sent as that key",
+        "With --literal, the argument is always text",
+        "Text must be typeable on the host",
+        "On Herdr, the typeable set is: space, a-z, A-Z, 0-9, and ' , - . / ; = [ \\ ] `",
+        "the README Herdr section",
+        "tmux, Orca, and Rex send any text",
+    ] {
+        assert!(
+            help.contains(statement),
+            "send --help must state {statement:?}: {help}"
+        );
+    }
+}
+
 /// Acceptance: `tmux-tools rebalance --help` exits 0 and `tmux-tools --help` lists
 /// `rebalance`.
 #[test]

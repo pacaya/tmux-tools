@@ -899,7 +899,7 @@ impl HostPort for OrcaHost {
     fn send_keys(&self, pane: &str, keys: &[&str]) -> Result<()> {
         let mut bytes = String::new();
         for key in keys {
-            bytes.push_str(&keys::translate(key)?);
+            bytes.push_str(&keys::translate(key, "Orca")?);
         }
         self.send_text(pane, &bytes)
     }

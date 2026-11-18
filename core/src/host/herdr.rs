@@ -286,7 +286,19 @@ impl HerdrHost {
     /// Run `hc <command> --json <args>` and return its JSON answer. Not reaching the CLI
     /// names the host and the selection source (P2.3).
     fn call(&self, command: &[&str], args: &[&str]) -> Result<Value> {
-        let output = Command::new("hc")
+        self.run_hc(Command::new("hc"), command, args)
+    }
+
+    /// `hc send <pane> -- <text>`, run without `HC_TERMINAL_ID` so hc delivers the text
+    /// exactly as given, with no `<hc from="…">` tag (P6.5).
+    fn send(&self, pane: &str, text: &str) -> Result<Value> {
+        let mut hc = Command::new("hc");
+        hc.env_remove(HC_TERMINAL_ID);
+        self.run_hc(hc, &["send"], &[pane, "--", text])
+    }
+
+    fn run_hc(&self, mut hc: Command, command: &[&str], args: &[&str]) -> Result<Value> {
+        let output = hc
             .args(command)
             .arg("--json")
             .args(args)
@@ -911,7 +923,7 @@ impl HostPort for HerdrHost {
         // key, each argument checked before anything is sent (P5.2).
         if let [text, enter] = keys {
             if *enter == "Enter" && !keys::is_key(text) && !text.is_empty() {
-                self.call(&["send"], &[pane, "--", text])?;
+                self.send(pane, text)?;
                 return Ok(());
             }
         }
@@ -1201,7 +1213,7 @@ impl HostPort for HerdrHost {
     ) -> Result<Submission> {
         let baseline = self.get(pane)?;
         let sent_ms = now_ms();
-        if let Err(error) = self.call(&["send"], &[pane, "--", text]) {
+        if let Err(error) = self.send(pane, text) {
             // P6.5: a blocked program refuses the send; no retry, never `--force`.
             if let Some(hc) = error.downcast_ref::<HcError>() {
                 if hc.kind == "blocked" {

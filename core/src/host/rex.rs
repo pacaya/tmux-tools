@@ -1000,7 +1000,7 @@ fn is_block_id(value: &str) -> bool {
 /// The bytes of one `send` argument (P5.3): a key by the Orca rule, with
 /// application-mode bytes for an unmodified cursor key when mode 1 is on.
 fn key_bytes(argument: &str, application_cursor: bool) -> Result<String> {
-    let bytes = keys::translate(argument)?;
+    let bytes = keys::translate(argument, "Rex")?;
     if application_cursor {
         if let Some((0, keys::Key::Named(named))) = keys::parse(argument) {
             let final_char = match named {
