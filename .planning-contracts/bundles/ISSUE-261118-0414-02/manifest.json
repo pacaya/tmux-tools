@@ -1,0 +1,21 @@
+{
+  "approval_id": "dispatch-20261118T042758Z",
+  "approval_object": "approval.json",
+  "approval_sha256": "400c0370101267bbeb9ff4e99097c261132dece05cb09a89d616aec8c2f46304",
+  "entries": [
+    {
+      "approved_revision": "9e52d694621a070486f5cd62cfe4f94cc20e08c6",
+      "bytes": 3447,
+      "object": "objects/d591c7b670c39fc68f66bd1965e92f626250523d11bfaab69aa3bca9916f75da.md",
+      "origin": {
+        "path": "docs/issues/ISSUE-261118-0414-02-test-suite-isolated-from-caller-environment.md",
+        "repository": "tmux-tools",
+        "revision": "984986a7b6328eee210f0f7433c71f62b2dcd8a9"
+      },
+      "role": "issue",
+      "sha256": "d591c7b670c39fc68f66bd1965e92f626250523d11bfaab69aa3bca9916f75da",
+      "target": "tmux-tools:ISSUE-261118-0414-02"
+    }
+  ],
+  "schema": "planning-contracts.bundle.v1"
+}
