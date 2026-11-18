@@ -3097,3 +3097,80 @@ fn teammate_transition_check_fails_when_the_leader_row_takes_it() {
     let on_leader = ps(vec![row(lead, "working", 300), row(tm, "done", 200)]);
     assert!(judge_teammate_transition(&before, &on_leader, lead, tm).is_err());
 }
+
+/// ISSUE-261118-0307-01: the Herdr key-hint refusal is Herdr's own; on Orca
+/// `send --literal $'\e'` exits 0 and the runtime receives the byte 0x1B.
+#[test]
+fn literal_escape_is_sent_as_text_on_orca() {
+    let fake = FakeCli::start("literal-escape");
+    let run = fake.run();
+    let name = run.n("c-esc");
+    let handle = run.launch(&name, "sleep 30");
+    let log = fake.dir.join("log.jsonl");
+    let out = run.cli(
+        &["send", "--target", &name, "--literal", "\u{1b}"],
+        Call {
+            env: vec![("FAKE_ORCA_LOG", log.display().to_string())],
+            ..Call::default()
+        },
+    );
+    out.assert_success("send --literal ESC");
+    let sends: Vec<Vec<String>> = std::fs::read_to_string(&log)
+        .unwrap_or_default()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .filter(|call: &Vec<String>| call.starts_with(&["terminal".to_owned(), "send".to_owned()]))
+        .collect();
+    assert_eq!(sends.len(), 1, "{sends:?}");
+    assert!(
+        sends[0].iter().any(|arg| arg == handle.as_str()),
+        "{sends:?}"
+    );
+    assert!(
+        sends[0].iter().any(|arg| arg == "--text=\u{1b}"),
+        "{sends:?}"
+    );
+}
+
+/// ISSUE-261118-0307-01 (decision Q324): a key that gives the NUL byte is refused on
+/// Orca with a message that names Orca, and nothing is sent.
+#[test]
+fn a_nul_key_is_refused_naming_orca() {
+    let fake = FakeCli::start("nul-key");
+    let run = fake.run();
+    let name = run.n("c-nul");
+    run.launch(&name, "sleep 30");
+    let log = fake.dir.join("log.jsonl");
+    for key in ["C-@", "C-Space"] {
+        let out = run.cli(
+            &["send", "--target", &name, key],
+            Call {
+                env: vec![("FAKE_ORCA_LOG", log.display().to_string())],
+                ..Call::default()
+            },
+        );
+        assert_eq!(out.status, 1, "{key}: {out:?}");
+        assert!(
+            out.stderr
+                .contains("it is the NUL byte, which Orca cannot carry as text")
+                && !out.stderr.contains("Rex"),
+            "{key}: {}",
+            out.stderr
+        );
+        if key == "C-@" {
+            assert!(
+                out.stderr.contains(
+                    "cannot send C-@: it is the NUL byte, which Orca cannot carry as text"
+                ),
+                "{}",
+                out.stderr
+            );
+        }
+    }
+    let sends = std::fs::read_to_string(&log)
+        .unwrap_or_default()
+        .lines()
+        .filter(|line| line.contains("\"send\""))
+        .count();
+    assert_eq!(sends, 0, "nothing is sent");
+}

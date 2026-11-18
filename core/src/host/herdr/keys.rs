@@ -31,11 +31,11 @@ pub(super) fn translate(argument: &str) -> Result<Vec<Pressed>> {
 }
 
 /// Literal text, one key per character; a character outside the typeable set fails
-/// with its code point.
+/// with its code point, and with how to send it as a key when it has a tmux key name.
 pub(super) fn literal(text: &str) -> Result<Vec<Pressed>> {
     text.chars()
         .map(|c| {
-            let refusal = format!("cannot type on herdr: U+{:04X}", c as u32);
+            let refusal = untypeable(c);
             typeable(c)
                 .map(|name| Pressed {
                     name,
@@ -44,6 +44,36 @@ pub(super) fn literal(text: &str) -> Result<Vec<Pressed>> {
                 .ok_or_else(|| anyhow!("{refusal}"))
         })
         .collect()
+}
+
+/// The P5.2 refusal of a character outside the typeable set. `<pane>` is literal text.
+fn untypeable(c: char) -> String {
+    let code = format!("cannot type on herdr: U+{:04X}", c as u32);
+    let Some(key) = control_key_name(c) else {
+        return code;
+    };
+    let commands = match key.as_str() {
+        "Escape" => "tmux-tools escape --target <pane>, or tmux-tools send --target <pane> Escape"
+            .to_owned(),
+        "Enter" => {
+            "tmux-tools send-enter --target <pane>, or tmux-tools send --target <pane> Enter"
+                .to_owned()
+        }
+        _ => format!("tmux-tools send --target <pane> {key}"),
+    };
+    format!("{code} ({key}). Send it as a key: {commands}. See: tmux-tools send --help")
+}
+
+/// The tmux key name of a control character `hc keys` cannot type as text.
+fn control_key_name(c: char) -> Option<String> {
+    match c {
+        '\u{1b}' => Some("Escape".to_owned()),
+        '\r' => Some("Enter".to_owned()),
+        '\t' => Some("Tab".to_owned()),
+        '\u{7f}' => Some("BSpace".to_owned()),
+        '\u{1}'..='\u{1a}' => Some(format!("C-{}", (b'a' + c as u8 - 1) as char)),
+        _ => None,
+    }
 }
 
 /// The typeable set of P5.2: space, letters (upper case as `shift+<letter>`), digits,

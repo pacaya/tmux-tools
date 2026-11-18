@@ -11,6 +11,15 @@ use tmux_tools_core::{
 
 use crate::{cmd::hosted, CommonArgs};
 
+/// Sends keys or text to the --target pane.
+///
+/// An argument in tmux key grammar (Escape, Enter, C-c, ...) is sent as that key. Any
+/// other argument is sent as text.
+///
+/// With --literal, the argument is always text. Text must be typeable on the host.
+/// tmux, Orca, and Rex send any text. On Herdr, the typeable set is: space, a-z, A-Z,
+/// 0-9, and ' , - . / ; = [ \ ] ` (the README Herdr section states it). Herdr refuses
+/// any other character; send a control character such as Escape or C-c as a key.
 #[derive(Args, Debug)]
 pub struct SendArgs {
     #[arg(value_name = "TEXT")]

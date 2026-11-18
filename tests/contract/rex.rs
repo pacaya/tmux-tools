@@ -693,6 +693,49 @@ fn send_writes_xterm_bytes_through_rex_send() {
     }
 }
 
+/// ISSUE-261118-0307-01: the Herdr key-hint refusal is Herdr's own; on Rex
+/// `send --literal $'\e'` exits 0 and the block receives the byte 0x1B.
+#[test]
+fn literal_escape_is_sent_as_text_on_rex() {
+    let fake = FakeRex::start("rex-literal-escape");
+    let pane = fake.add_block(INSTANCE, json!({}));
+    fake.write_record(INSTANCE, "unset", "p", Some(&pane));
+    fake.cli(&["send", "--target", "p", "--literal", "\u{1b}"])
+        .assert_success("send --literal ESC");
+    assert_eq!(
+        fake.block(&pane).unwrap()["sent"],
+        json!(["\u{1b}"]),
+        "{:?}",
+        fake.log()
+    );
+}
+
+/// ISSUE-261118-0307-01 (decision Q324): a key that gives the NUL byte is refused on
+/// Rex with a message that names Rex, not Orca, and nothing is sent.
+#[test]
+fn a_nul_key_is_refused_naming_rex() {
+    let fake = FakeRex::start("rex-nul-key");
+    let pane = fake.add_block(INSTANCE, json!({}));
+    fake.write_record(INSTANCE, "unset", "p", Some(&pane));
+    let out = fake.cli(&["send", "--target", "p", "C-@"]);
+    assert_eq!(out.status, 1, "{out:?}");
+    assert!(
+        out.stderr
+            .contains("cannot send C-@: it is the NUL byte, which Rex cannot carry as text"),
+        "{}",
+        out.stderr
+    );
+    let out = fake.cli(&["send", "--target", "p", "C-Space"]);
+    assert_eq!(out.status, 1, "{out:?}");
+    assert!(
+        out.stderr.contains("Rex") && !out.stderr.contains("Orca"),
+        "{}",
+        out.stderr
+    );
+    assert!(fake.calls(&["send"]).is_empty(), "{:?}", fake.log());
+    assert_eq!(fake.block(&pane).unwrap()["sent"], json!([]));
+}
+
 // --- P4: registration, names, and lifetime ---------------------------------------------
 
 /// P4.1: the Pane record is `rex/<instance_id>/<name>.json` with `server_id` the

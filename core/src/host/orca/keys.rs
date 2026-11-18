@@ -9,10 +9,11 @@ pub(in crate::host) const META: u8 = 2;
 pub(in crate::host) const SHIFT: u8 = 1;
 
 /// The bytes one `send` argument stands for: the key's bytes when tmux parses the
-/// argument as a key, else the argument as literal text.
-pub(in crate::host) fn translate(argument: &str) -> Result<String> {
+/// argument as a key, else the argument as literal text. `host` names the host that
+/// refuses a key that gives the NUL byte (`Orca`, `Rex`).
+pub(in crate::host) fn translate(argument: &str, host: &str) -> Result<String> {
     match parse(argument) {
-        Some((modifiers, key)) => key_bytes(modifiers, key),
+        Some((modifiers, key)) => key_bytes(modifiers, key, host),
         None => Ok(argument.to_owned()),
     }
 }
@@ -149,14 +150,14 @@ fn parameter(modifiers: u8) -> u8 {
     1 + modifiers
 }
 
-fn key_bytes(modifiers: u8, key: Key) -> Result<String> {
+fn key_bytes(modifiers: u8, key: Key, host: &str) -> Result<String> {
     match key {
-        Key::Char(c) => char_bytes(modifiers, c),
-        Key::Named(named) => named_bytes(modifiers, named),
+        Key::Char(c) => char_bytes(modifiers, c, host),
+        Key::Named(named) => named_bytes(modifiers, named, host),
     }
 }
 
-fn char_bytes(modifiers: u8, c: char) -> Result<String> {
+fn char_bytes(modifiers: u8, c: char, host: &str) -> Result<String> {
     let mut c = c;
     if modifiers & SHIFT != 0 {
         c = c.to_ascii_uppercase();
@@ -181,7 +182,7 @@ fn char_bytes(modifiers: u8, c: char) -> Result<String> {
             }
         };
         if control == 0 {
-            bail!("cannot send C-{c}: it is the NUL byte, which Orca cannot carry as text");
+            bail!("cannot send C-{c}: it is the NUL byte, which {host} cannot carry as text");
         }
         out.push(control as char);
         return Ok(out);
@@ -190,7 +191,7 @@ fn char_bytes(modifiers: u8, c: char) -> Result<String> {
     Ok(out)
 }
 
-fn named_bytes(modifiers: u8, named: Named) -> Result<String> {
+fn named_bytes(modifiers: u8, named: Named, host: &str) -> Result<String> {
     let modified = modifiers != 0;
     let p = parameter(modifiers);
     // Keys whose modified form is `ESC [ 1 ; <p> <final>`.
@@ -244,7 +245,7 @@ fn named_bytes(modifiers: u8, named: Named) -> Result<String> {
         Named::Enter => meta_prefixed("\r"),
         Named::Escape => meta_prefixed("\x1b"),
         Named::Tab => meta_prefixed("\t"),
-        Named::Space => return char_bytes(modifiers, ' '),
+        Named::Space => return char_bytes(modifiers, ' ', host),
         Named::BSpace => meta_prefixed("\x7f"),
         Named::Keypad(bytes) => meta_prefixed(bytes),
     })
@@ -253,6 +254,10 @@ fn named_bytes(modifiers: u8, named: Named) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn translate(argument: &str) -> Result<String> {
+        super::translate(argument, "Orca")
+    }
 
     #[test]
     fn the_p10_3_arguments_translate_to_tmux_xterm_bytes() {
