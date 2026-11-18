@@ -2,7 +2,7 @@
 id: ISSUE-261118-0616-01
 kind: issue
 category: bug
-status: needs-triage
+status: ready-for-agent
 brief_contract: agent-brief.v3
 context: tmux-tools
 summary: four Rex fake-host contract tests pass or fail on the behaviour they check, not on how fast each fake `rex` call answers on a loaded machine; the production Rex time limits do not change
@@ -45,4 +45,4 @@ contract:
 
 ## Triage Notes
 
-- 2026-11-18: draft → needs-triage (mint check passed).
+- 2026-11-18: draft → needs-triage (mint check passed) → ready-for-agent (dispatch readiness passed).
