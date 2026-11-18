@@ -1,0 +1,21 @@
+{
+  "approval_id": "dispatch-20261118T043052Z",
+  "approval_object": "approval.json",
+  "approval_sha256": "fc34dd4531a2b3ad3762ecfbd2c5071bba790694690133c238c22f29ebd45f4c",
+  "entries": [
+    {
+      "approved_revision": "21be5980245496e69077157bbb8b14efba59fc22",
+      "bytes": 3104,
+      "object": "objects/7378af386c671efade54082ea39f83f47b75909e23a05e6fb7161682bcd7b569.md",
+      "origin": {
+        "path": "docs/issues/ISSUE-261118-0414-01-nul-refusal-names-the-key-as-written.md",
+        "repository": "tmux-tools",
+        "revision": "e175226366f440ba148f4dbce09145a76113a00a"
+      },
+      "role": "issue",
+      "sha256": "7378af386c671efade54082ea39f83f47b75909e23a05e6fb7161682bcd7b569",
+      "target": "tmux-tools:ISSUE-261118-0414-01"
+    }
+  ],
+  "schema": "planning-contracts.bundle.v1"
+}
