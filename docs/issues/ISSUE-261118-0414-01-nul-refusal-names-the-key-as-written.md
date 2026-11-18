@@ -2,7 +2,7 @@
 id: ISSUE-261118-0414-01
 kind: issue
 category: bug
-status: needs-triage
+status: ready-for-agent
 brief_contract: agent-brief.v3
 context: tmux-tools
 summary: on Orca and Rex, the send refusal of a key that gives the NUL byte names the key as the user wrote it (C-Space, M-C-@), not a rebuilt C-<char>
@@ -36,3 +36,4 @@ contract:
 **Out of scope:** Which keys give the NUL byte; the Herdr `send` refusals; the key-hint text of other refused characters.
 
 ## Triage Notes
+- 2026-11-18: draft → needs-triage (mint check passed) → ready-for-agent (dispatch readiness passed).
