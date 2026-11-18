@@ -1,5 +1,5 @@
 {
-  "approval_id": "dispatch-20261118T031612Z",
+  "approval_id": "claim-20261118T031858Z",
   "impact_disposition": {
     "checked_revisions": [
       {
@@ -16,8 +16,8 @@
     "status": "accepted"
   },
   "issue": {
-    "revision": "62b30cb3e28e8ab1faa364cb76eaedbce45e34aa",
-    "sha256": "cf35a149c64cf4cd245495243d8ac5173b7bad987023d30cd62e8b4b2022c935",
+    "revision": "10d1aacab073bacdb90465fd4e74810601bedafd",
+    "sha256": "58eda5a80ff3ea90cf0ad8a4ffdb2716257fcbef48aab612fbb87b84aa3d65a1",
     "target": "tmux-tools:ISSUE-261118-0307-01"
   },
   "resolution_mode": "canonical",
