@@ -49,6 +49,7 @@ contract:
 ## Triage Notes
 
 - 2026-11-18: draft → needs-triage (mint check passed) → ready-for-agent (dispatch readiness passed); → needs-triage (scope adds `the_sweep_deletes_a_directory_whose_address_check_times_out`, lead decision under Q337) → ready-for-agent (targeted mint and readiness rechecks passed).
+- 2026-11-18: maintainer decision Q359 — each CLI run of the five named tests (no wait limit after c05ea5e) has a hang backstop of 600 s (`HANG_BACKSTOP` in `tests/contract/rex.rs`); a run past it fails the test with a message naming the test and the backstop. All other tests keep their 60 s limit; production limits do not change.
 
 ## Context Pack — canonical at claim (2026-11-18T06:40:43Z)
 
