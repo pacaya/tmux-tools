@@ -2,7 +2,9 @@
 id: ISSUE-261118-0414-02
 kind: issue
 category: bug
-status: ready-for-agent
+status: done
+claimed_by: implement-issue@agentmac
+claimed_at: 2026-11-18T04:33:42Z
 brief_contract: agent-brief.v3
 context: tmux-tools
 summary: the test harness clears every host and team variable a test does not set on purpose from each CLI it starts (default, private-server, and live runs), so the default suite passes unchanged inside tmux, Orca, Herdr, Rex, and team sessions
@@ -34,5 +36,31 @@ contract:
 
 **Out of scope:** Rex fake-host tests that fail on a loaded machine because a fake `rex` call takes longer than its timeout.
 
+## Context Pack — standalone at claim (2026-11-18T04:33:42Z)
+
+**Contract approval:** `dispatch-20261118T042758Z` · standalone (canonical CLI mode) · revision check complete
+
+**Issue binding:** `tmux-tools:ISSUE-261118-0414-02` · revision `9e52d694621a070486f5cd62cfe4f94cc20e08c6` · sha256 `d591c7b670c39fc68f66bd1965e92f626250523d11bfaab69aa3bca9916f75da`
+
+**Required source objects:** none — standalone
+
+**Bundle manifest:** `.planning-contracts/bundles/ISSUE-261118-0414-02/manifest.json`
+
+**Test seam:** the `cargo test --workspace --features test-fixtures` result, and an integration test on the Orca fake-host harness that observes the CLI process environment
+
+## Code Review
+
+Review: `issue-261118-0414-02-code-review-20261118-051218.md` — Outcome: ACCEPTED
+
 ## Triage Notes
 - 2026-11-18: draft → needs-triage (mint check passed) → ready-for-agent (dispatch readiness passed).
+
+## Resolution
+
+- Commit: `fix: the test suite removes caller host and team variables from every CLI it starts, so it passes unchanged inside tmux, Orca, Herdr, Rex, and team sessions (ISSUE-261118-0414-02)`.
+- Route: `claude — deepseek-suspended` (test-harness code; Opus, effort medium); one implementation batch and one correction batch.
+- TDD: red-green at the Orca fake-host harness (`orca_contract::the_cli_does_not_inherit_the_callers_team_variables_on_orca`; mutation check fails without the fix, passes with it).
+- Review: `issue-261118-0414-02-code-review-20261118-051218.md` — ACCEPTED after one correction batch (M1 live Rex run, M2 live Herdr run, both verified fixed by both reviewers).
+- Suite: `cargo test --workspace --features test-fixtures` PASS (589 passed, 0 failed) in a plain shell and in the first acceptance item's fake-value shell, with an identical passing set. No Rex fake-host timing failure occurred.
+- Live runs: the opt-in Orca, Herdr, and Rex live runs were not run here. They now pass only the caller variables the brief names, and the live Rex run no longer passes the caller's `REX_SERVER` (P8.4 default server).
+- Date: 2026-11-18 (UTC).

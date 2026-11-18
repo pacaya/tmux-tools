@@ -2,8 +2,8 @@
 //!
 //! Compiled only into test builds: the core's unit tests, the `tmux-tools` binary's
 //! unit tests, and the integration suite (each includes this file). When the test
-//! executable loads, before any test runs, it removes [`HOST_SELECTION_VARS`] and
-//! [`TEAM_VARS`] from its own environment and drops every `PATH` directory that holds
+//! executable loads, before any test runs, it removes every variable that
+//! [`is_caller_var`] names from its own environment and drops every `PATH` directory that holds
 //! an `orca`, `hc` or `rex` executable or is a Team Shim directory. Every child process a test
 //! starts inherits that environment, so no child selects a host by accident or reaches
 //! a real Orca runtime, herdr-core or Rex server, also when the suite runs inside an
@@ -42,6 +42,25 @@ pub const HERDR_CORE_VARS: [&str; 3] = ["HC_SESSION", "HC_TERMINAL_SOCKET", "HC_
 /// P2.3). A suite run from inside a Team must not inherit them.
 pub const TEAM_VARS: [&str; 2] = ["TT_TEAM", "TT_HOST"];
 
+/// Whether `name` is a variable of the calling host or Team, or an opt-in switch of
+/// the suite, that no child process of a test sees unless the test sets it
+/// (ISSUE-261118-0414-02): every `TT_*`, `TMUX`, `TMUX_PANE`, every `REX_*`,
+/// `HC_TERMINAL_ID`, every `ORCA_*`, every `TMUX_TOOLS_LIVE_*` switch, and the
+/// variables of [`HOST_SELECTION_VARS`], [`HERDR_CORE_VARS`], [`REX_SERVER_VARS`]
+/// and [`TEAM_VARS`].
+pub fn is_caller_var(name: &str) -> bool {
+    ["TT_", "REX_", "ORCA_", "TMUX_TOOLS_LIVE_"]
+        .iter()
+        .any(|prefix| name.starts_with(prefix))
+        || ["TMUX", "TMUX_PANE", "HC_TERMINAL_ID"].contains(&name)
+        || HOST_SELECTION_VARS
+            .into_iter()
+            .chain(HERDR_CORE_VARS)
+            .chain(REX_SERVER_VARS)
+            .chain(TEAM_VARS)
+            .any(|var| var == name)
+}
+
 /// Whether `dir` is a Team's Shim directory, `<team dir>/bin` beside `team.lock`.
 fn is_shim_dir(dir: &str) -> bool {
     let dir = std::path::Path::new(dir);
@@ -57,21 +76,16 @@ pub fn original_environment() -> &'static HashMap<String, String> {
     ORIGINAL.get_or_init(|| std::env::vars().collect())
 }
 
-/// Remove [`HOST_SELECTION_VARS`], [`HERDR_CORE_VARS`], [`REX_SERVER_VARS`],
-/// [`TEAM_VARS`], every `PATH` directory holding an `orca`, `hc` or `rex` executable, and every Team Shim directory from
+/// Remove every variable that [`is_caller_var`] names, every `PATH` directory holding an `orca`, `hc` or `rex` executable, and every Team Shim directory from
 /// this process's environment,
 /// so the suite also runs from inside a `claude-teams` Leader. Runs once per process.
 pub fn sanitize() {
     static DONE: OnceLock<()> = OnceLock::new();
     DONE.get_or_init(|| {
-        original_environment();
-        for var in HOST_SELECTION_VARS
-            .into_iter()
-            .chain(HERDR_CORE_VARS)
-            .chain(REX_SERVER_VARS)
-            .chain(TEAM_VARS)
-        {
-            std::env::remove_var(var);
+        for var in original_environment().keys() {
+            if is_caller_var(var) {
+                std::env::remove_var(var);
+            }
         }
         let path = std::env::var("PATH").unwrap_or_default();
         let kept: Vec<&str> = path

@@ -3204,14 +3204,13 @@ fn a_failed_leader_leaves_an_orphan_on_the_private_server(server: &PrivateServer
 /// The opt-in switch of the live run (PRD-261112-2108-01 `## Contracts`, P8.4).
 const LIVE_SWITCH: &str = "TMUX_TOOLS_LIVE_REX";
 
-/// The calling plain Rex terminal's variables that the live run passes on (P2.2, P2.3,
-/// P3.1); the suite removes them from its own environment when it loads.
-const LIVE_REX_VARS: [&str; 4] = [
-    "REX_BLOCK",
-    "REX_SESSION",
-    "REX_SERVER",
-    "TMUX_TOOLS_REX_SESSION",
-];
+/// The calling plain Rex terminal's variables that the live run passes on (P8.4, P3.1);
+/// the suite removes them from its own environment when it loads.
+const LIVE_REX_VARS: [&str; 2] = ["REX_BLOCK", "REX_SESSION"];
+
+/// The caller's variables that the live run never passes on: it runs on the default
+/// server (P8.4), and a test that needs a new-block session sets it on its own command.
+const LIVE_REX_WITHHELD: [&str; 2] = ["REX_SERVER", "TMUX_TOOLS_REX_SESSION"];
 
 /// The `claude` of the original `PATH`; a missing one fails the opt-in run.
 fn live_claude() -> PathBuf {
@@ -3303,8 +3302,9 @@ impl LiveRun {
         name
     }
 
-    /// The calling terminal's Rex: its `REX_*` variables, the original `PATH`, no
-    /// `TMUX`, and none of the calling Claude session's variables.
+    /// The calling terminal's Rex: its `REX_BLOCK` and `REX_SESSION`, the original
+    /// `PATH`, no `TMUX`, no `REX_SERVER` or `TMUX_TOOLS_REX_SESSION`, and none of the
+    /// calling Claude session's variables.
     fn env(&self, command: &mut Command) {
         let original = original_environment();
         for key in claude_session_vars() {
@@ -3320,17 +3320,17 @@ impl LiveRun {
                 None => command.env_remove(key),
             };
         }
+        for key in LIVE_REX_WITHHELD {
+            command.env_remove(key);
+        }
     }
 
-    /// The real `rex` as the backend calls it: `--autostart=false`, and `-S
-    /// "$REX_SERVER"` when the calling terminal sets it (P2.3).
+    /// The real `rex` as the backend calls it on the default server:
+    /// `--autostart=false` and no `-S` (P2.3).
     fn rex(&self, args: &[&str]) -> std::process::Output {
         let mut command = Command::new(&self.rex);
         self.env(&mut command);
         command.arg("--autostart=false");
-        if let Some(address) = original_environment().get("REX_SERVER") {
-            command.args(["-S", address]);
-        }
         command
             .args(args)
             .stdin(Stdio::null())

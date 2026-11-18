@@ -2292,8 +2292,9 @@ const LIVE_SWITCH: &str = "TMUX_TOOLS_LIVE_HERDR";
 /// maintainer can check the Herdr window (Verification item 3).
 const LIVE_HOLD: Duration = Duration::from_secs(30);
 
-/// One live run in the core of the calling Herdr terminal. Every CLI and `hc` call gets
-/// the calling terminal's `HC_*` variables and the original `PATH`, never `TMUX`. Each
+/// One live run in the default core, from a calling Herdr terminal. Every CLI and `hc`
+/// call gets the calling terminal's `HC_TERMINAL_ID` and the original `PATH`, never
+/// `TMUX` or another `HC_*` variable. Each
 /// terminal the run creates carries one of the run-unique names of [`LiveRun::n`] as its
 /// `where` label from its creation (P3.4); `Drop` kills and removes, by hc address,
 /// every terminal that carries such a name, also on failure, and never another one.
@@ -2359,8 +2360,9 @@ impl LiveRun {
         name
     }
 
-    /// The calling terminal's core: its `HC_*` variables, the original `PATH`, no
-    /// `TMUX`, and none of the calling Claude session's variables.
+    /// The default core, from the calling terminal: its `HC_TERMINAL_ID`, the original
+    /// `PATH`, no `TMUX`, no other `HC_*` variable, and none of the calling Claude
+    /// session's variables.
     fn env(&self, command: &mut Command) {
         let original = original_environment();
         for key in claude_session_vars() {
@@ -2370,16 +2372,14 @@ impl LiveRun {
             .env_remove("TMUX")
             .env_remove("TMUX_PANE")
             .env("PATH", original.get("PATH").cloned().unwrap_or_default());
-        for key in [
-            "HC_TERMINAL_ID",
-            "HC_TERMINAL_SOCKET",
-            "HC_SCOPE",
-            "HC_SESSION",
-        ] {
-            match original.get(key) {
-                Some(value) => command.env(key, value),
-                None => command.env_remove(key),
-            };
+        match original.get("HC_TERMINAL_ID") {
+            Some(value) => command.env("HC_TERMINAL_ID", value),
+            None => command.env_remove("HC_TERMINAL_ID"),
+        };
+        // The run is in the default core (P8.4): neither the CLI nor `hc` gets the
+        // caller's core selection.
+        for key in ["HC_TERMINAL_SOCKET", "HC_SCOPE", "HC_SESSION"] {
+            command.env_remove(key);
         }
     }
 
