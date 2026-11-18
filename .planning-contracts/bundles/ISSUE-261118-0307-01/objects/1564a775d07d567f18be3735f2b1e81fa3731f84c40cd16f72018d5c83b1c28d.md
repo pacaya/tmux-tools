@@ -2,7 +2,9 @@
 id: ISSUE-261118-0307-01
 kind: issue
 category: bug
-status: ready-for-agent
+status: in-progress
+claimed_by: implement-issue@agentmac
+claimed_at: 2026-11-18T03:28:09Z
 brief_contract: agent-brief.v3
 context: tmux-tools
 summary: on Herdr, prompt and execute deliver text untagged so a leading /command runs, and a refused control character names its key and the command that sends it
@@ -57,3 +59,16 @@ contract:
 - 2026-11-18: draft → needs-triage (mint check passed) → ready-for-agent (dispatch readiness passed).
 - 2026-11-18: in-progress → needs-triage (maintainer decision Q324 adds the host-named NUL refusal; no PRD clause owns that text) → ready-for-agent (mint check and dispatch readiness passed); prior approval `claim-20261118T031858Z` superseded.
 
+## Context Pack — canonical at claim (2026-11-18T03:28:09Z)
+
+**Contract approval:** `redispatch-20261118T032318Z` · canonical · revision check complete
+
+**Issue binding:** `tmux-tools:ISSUE-261118-0307-01` · revision `56a417582492ffba671e06367dbf4735dded29d7` · sha256 `45e938d99302ee8c9ddefcd827dd905893c3001db0448f01c70af806df742101`
+
+**Required source objects:**
+- `tmux-tools:PRD-261109-2223-01#p5-io` · revision `2e382603c515128133a49b6a4d308eff38ec9275` · sha256 `250ba4cc552405f78a1c4de7091c19dacf45dfdcc6db2057a3ffa1e151669b05` · `objects/250ba4cc552405f78a1c4de7091c19dacf45dfdcc6db2057a3ffa1e151669b05.md`
+- `tmux-tools:PRD-261109-2223-01#p6-state` · revision `2e382603c515128133a49b6a4d308eff38ec9275` · sha256 `604326f0dde762ee44f6150b83bbb3c42d38239a03388f681790b5eebab02694` · `objects/604326f0dde762ee44f6150b83bbb3c42d38239a03388f681790b5eebab02694.md`
+
+**Bundle manifest:** `.planning-contracts/bundles/ISSUE-261118-0307-01/manifest.json`
+
+**Test seam:** `tests/contract/herdr.rs`, `tests/contract/orca.rs`, `tests/contract/rex.rs` (fake-host contract tests), a `send --help` integration test, and the live Herdr `prompt '/exit'` check
