@@ -717,21 +717,29 @@ fn a_nul_key_is_refused_naming_rex() {
     let fake = FakeRex::start("rex-nul-key");
     let pane = fake.add_block(INSTANCE, json!({}));
     fake.write_record(INSTANCE, "unset", "p", Some(&pane));
-    let out = fake.cli(&["send", "--target", "p", "C-@"]);
-    assert_eq!(out.status, 1, "{out:?}");
-    assert!(
-        out.stderr
-            .contains("cannot send C-@: it is the NUL byte, which Rex cannot carry as text"),
-        "{}",
-        out.stderr
-    );
-    let out = fake.cli(&["send", "--target", "p", "C-Space"]);
-    assert_eq!(out.status, 1, "{out:?}");
-    assert!(
-        out.stderr.contains("Rex") && !out.stderr.contains("Orca"),
-        "{}",
-        out.stderr
-    );
+    // ISSUE-261118-0414-01 (decision Q331): the refusal names the argument as written.
+    for (key, expected) in [
+        (
+            "C-@",
+            "cannot send C-@: it is the NUL byte, which Rex cannot carry as text",
+        ),
+        (
+            "C-Space",
+            "cannot send C-Space: it is the NUL byte, which Rex cannot carry as text",
+        ),
+        (
+            "M-C-@",
+            "cannot send M-C-@: it is the NUL byte, which Rex cannot carry as text",
+        ),
+    ] {
+        let out = fake.cli(&["send", "--target", "p", key]);
+        assert_eq!(out.status, 1, "{key}: {out:?}");
+        assert!(
+            out.stderr.contains(expected) && !out.stderr.contains("Orca"),
+            "{key}: {}",
+            out.stderr
+        );
+    }
     assert!(fake.calls(&["send"]).is_empty(), "{:?}", fake.log());
     assert_eq!(fake.block(&pane).unwrap()["sent"], json!([]));
 }

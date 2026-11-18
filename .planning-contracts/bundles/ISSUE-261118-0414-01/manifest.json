@@ -1,19 +1,19 @@
 {
-  "approval_id": "dispatch-20261118T043052Z",
+  "approval_id": "accepted-20261118T055858Z",
   "approval_object": "approval.json",
-  "approval_sha256": "fc34dd4531a2b3ad3762ecfbd2c5071bba790694690133c238c22f29ebd45f4c",
+  "approval_sha256": "eef5f7b52e795e6ea7ebab9119e764096ce23b3283d7c90c6f4f7bec44650288",
   "entries": [
     {
-      "approved_revision": "21be5980245496e69077157bbb8b14efba59fc22",
-      "bytes": 3104,
-      "object": "objects/7378af386c671efade54082ea39f83f47b75909e23a05e6fb7161682bcd7b569.md",
+      "approved_revision": "6b7167228be39006a77f861c75fc718c4df87bcd",
+      "bytes": 3884,
+      "object": "objects/4a5f8d79b794052b7ccf392ae105d66686468081c4ad5a0890af92e954c84ca0.md",
       "origin": {
         "path": "docs/issues/ISSUE-261118-0414-01-nul-refusal-names-the-key-as-written.md",
         "repository": "tmux-tools",
-        "revision": "e175226366f440ba148f4dbce09145a76113a00a"
+        "revision": "7aa9386c137b814214d4894866091dac0bffa36f"
       },
       "role": "issue",
-      "sha256": "7378af386c671efade54082ea39f83f47b75909e23a05e6fb7161682bcd7b569",
+      "sha256": "4a5f8d79b794052b7ccf392ae105d66686468081c4ad5a0890af92e954c84ca0",
       "target": "tmux-tools:ISSUE-261118-0414-01"
     }
   ],

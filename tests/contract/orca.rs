@@ -3171,7 +3171,21 @@ fn a_nul_key_is_refused_naming_orca() {
     let name = run.n("c-nul");
     run.launch(&name, "sleep 30");
     let log = fake.dir.join("log.jsonl");
-    for key in ["C-@", "C-Space"] {
+    // ISSUE-261118-0414-01 (decision Q331): the refusal names the argument as written.
+    for (key, expected) in [
+        (
+            "C-@",
+            "cannot send C-@: it is the NUL byte, which Orca cannot carry as text",
+        ),
+        (
+            "C-Space",
+            "cannot send C-Space: it is the NUL byte, which Orca cannot carry as text",
+        ),
+        (
+            "M-C-@",
+            "cannot send M-C-@: it is the NUL byte, which Orca cannot carry as text",
+        ),
+    ] {
         let out = run.cli(
             &["send", "--target", &name, key],
             Call {
@@ -3181,21 +3195,10 @@ fn a_nul_key_is_refused_naming_orca() {
         );
         assert_eq!(out.status, 1, "{key}: {out:?}");
         assert!(
-            out.stderr
-                .contains("it is the NUL byte, which Orca cannot carry as text")
-                && !out.stderr.contains("Rex"),
+            out.stderr.contains(expected) && !out.stderr.contains("Rex"),
             "{key}: {}",
             out.stderr
         );
-        if key == "C-@" {
-            assert!(
-                out.stderr.contains(
-                    "cannot send C-@: it is the NUL byte, which Orca cannot carry as text"
-                ),
-                "{}",
-                out.stderr
-            );
-        }
     }
     let sends = std::fs::read_to_string(&log)
         .unwrap_or_default()
