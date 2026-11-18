@@ -31,7 +31,7 @@ contract:
 - [ ] Given Orca and Rex, when `send --target <pane> M-C-@` runs, then it exits 1, sends nothing, and its stderr contains `cannot send M-C-@: it is the NUL byte, which <Host> cannot carry as text` with that host's name. Observable in `tests/contract/orca.rs` and `tests/contract/rex.rs`.
 - [ ] Given Orca and Rex, when `send --target <pane> C-@` runs, then the stderr is still `cannot send C-@: it is the NUL byte, which <Host> cannot carry as text`. Observable in `tests/contract/orca.rs` and `tests/contract/rex.rs`.
 
-**Verification and release:** `cargo test --workspace --features test-fixtures` passes. No separate release; the change ships with the next tmux-tools release.
+**Verification and release:** `cargo test --workspace --features test-fixtures` passes. Until ISSUE-261118-0414-02 lands, run it with every `TT_*`, `TMUX`, `TMUX_PANE`, `REX_*`, `HC_TERMINAL_ID`, and `ORCA_*` variable removed from the caller environment. No separate release; the change ships with the next tmux-tools release.
 
 **Out of scope:** Which keys give the NUL byte; the Herdr `send` refusals; the key-hint text of other refused characters.
 
