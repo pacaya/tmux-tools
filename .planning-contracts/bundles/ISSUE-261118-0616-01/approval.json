@@ -1,14 +1,14 @@
 {
-  "approval_id": "dispatch-20261118T062717Z",
+  "approval_id": "dispatch-20261118T063816Z",
   "impact_disposition": {
     "checked_revisions": [
       {
-        "revision": "d9d34faec0646f43670ad10524b484deee073327",
+        "revision": "736df60faf5d636d160ec29b0a42f082b38ed442",
         "sha256": "21b2c9c7820f2ddbdde9b6c386bff5e4b594d4f7e94d5794a33efc95594733d2",
         "target": "tmux-tools:PRD-261112-2108-01#p4-registration"
       },
       {
-        "revision": "d9d34faec0646f43670ad10524b484deee073327",
+        "revision": "736df60faf5d636d160ec29b0a42f082b38ed442",
         "sha256": "f7102c0030dc591e4e076dd53421ebefc580298b4f3d957455311ea547996684",
         "target": "tmux-tools:PRD-261112-2108-01#p8-tests"
       }
@@ -16,20 +16,20 @@
     "status": "accepted"
   },
   "issue": {
-    "revision": "95b6ee863ea45873d858881a0107333aa4f1781f",
-    "sha256": "3e46ef01d234e9a40d01994e03b7e62a25009fa71c312f1d15d3850b93854f7c",
+    "revision": "a83add182840da34d8111bc6d04864978858cad8",
+    "sha256": "8952d9b55db620e8a3ef75042b259c784b49c468b1cde93379edfffb0b6f59b4",
     "target": "tmux-tools:ISSUE-261118-0616-01"
   },
   "resolution_mode": "canonical",
   "schema": "planning-contracts.revision.v2",
   "sources": [
     {
-      "revision": "d9d34faec0646f43670ad10524b484deee073327",
+      "revision": "736df60faf5d636d160ec29b0a42f082b38ed442",
       "sha256": "21b2c9c7820f2ddbdde9b6c386bff5e4b594d4f7e94d5794a33efc95594733d2",
       "target": "tmux-tools:PRD-261112-2108-01#p4-registration"
     },
     {
-      "revision": "d9d34faec0646f43670ad10524b484deee073327",
+      "revision": "736df60faf5d636d160ec29b0a42f082b38ed442",
       "sha256": "f7102c0030dc591e4e076dd53421ebefc580298b4f3d957455311ea547996684",
       "target": "tmux-tools:PRD-261112-2108-01#p8-tests"
     }
