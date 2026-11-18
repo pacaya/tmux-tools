@@ -2,7 +2,7 @@
 id: ISSUE-261118-0307-01
 kind: issue
 category: bug
-status: in-progress
+status: in-review
 claimed_by: implement-issue@agentmac
 claimed_at: 2026-11-18T03:28:09Z
 brief_contract: agent-brief.v3
