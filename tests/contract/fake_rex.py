@@ -34,6 +34,8 @@ usage error (exit 2). A server's `rename_gone` removes the block first, so the r
 fails as not found (exit 3); its `rename_fail` fails the rename with exit 1.
 
 - FAKE_REX_LOG: append each call's argv as one JSON line.
+- FAKE_REX_DELAY: sleep that many seconds at the start of every call, before it
+  answers (a slow or loaded machine).
 """
 import datetime
 import json
@@ -45,6 +47,8 @@ argv = sys.argv[1:]
 if os.environ.get("FAKE_REX_LOG"):
     with open(os.environ["FAKE_REX_LOG"], "a") as log:
         log.write(json.dumps(argv) + "\n")
+
+time.sleep(float(os.environ.get("FAKE_REX_DELAY") or 0))
 
 STATE = os.environ["FAKE_REX_STATE"]
 

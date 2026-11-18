@@ -239,6 +239,10 @@ impl FakeRex {
             .env("XDG_CONFIG_HOME", self.dir.join("config"))
             .env("FAKE_REX_STATE", self.state_path())
             .env("FAKE_REX_LOG", self.dir.join("log.jsonl"));
+        // `FAKE_REX_DELAY=<seconds>` in the test run's environment slows every fake call.
+        if let Ok(delay) = std::env::var("FAKE_REX_DELAY") {
+            command.env("FAKE_REX_DELAY", delay);
+        }
         for (key, value) in env {
             command.env(key, value);
         }
@@ -267,6 +271,21 @@ impl FakeRex {
 
     fn cli(&self, args: &[&str]) -> CmdOutput {
         self.cli_with(args, &[], &[])
+    }
+
+    /// [`FakeRex::cli_with`] with no wait limit, for the cases whose result must not
+    /// depend on the time each fake call takes (their `env` sets [`TIMEOUT_ONLY`]).
+    fn cli_unlimited(&self, args: &[&str], env: &[(&str, &str)]) -> CmdOutput {
+        let out = self
+            .command(args, env, &[])
+            .stdin(Stdio::null())
+            .output()
+            .expect("run tmux-tools");
+        CmdOutput {
+            status: out.status.code().unwrap_or(-1),
+            stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+        }
     }
 }
 
@@ -871,7 +890,7 @@ const SESSION2: &str = "session:00000000-0000-4000-8000-0000000000cc";
 /// `list --format json` on an incomplete listing: exit 0, `list incomplete: rex`, and
 /// the status of each named row; every record stays.
 fn assert_incomplete_list(fake: &FakeRex, env: &[(&str, &str)], expect: &[(&str, &str)]) {
-    let out = fake.cli_with(&["list", "--format", "json"], env, &[]);
+    let out = fake.cli_unlimited(&["list", "--format", "json"], env);
     out.assert_success("list on an incomplete listing");
     assert!(
         out.stderr.contains("list incomplete: rex"),
@@ -894,8 +913,12 @@ fn assert_incomplete_list(fake: &FakeRex, env: &[(&str, &str)], expect: &[(&str,
     }
 }
 
-/// The call timeout of the M2 cases, in seconds.
-const SHORT_CALL: (&str, &str) = ("TMUX_TOOLS_TEST_REX_CALL_TIMEOUT", "1");
+/// The test-only control that gives the calls whose command line contains its value
+/// the 2-second limit and every other `rex` call, address checks included, no limit,
+/// so a case times out only the call it targets, whatever time each fake call takes.
+const TIMEOUT_ONLY: &str = "TMUX_TOOLS_TEST_REX_TIMEOUT_ONLY";
+/// A [`TIMEOUT_ONLY`] value that no call contains: no call reaches a limit.
+const NO_TIMEOUT: (&str, &str) = (TIMEOUT_ONLY, "no call times out");
 
 /// Acceptance (P4.3): a `rex ls --json` that times out or answers output that does not
 /// parse makes the listing incomplete: records stay, rows are `unknown`, `list
@@ -903,10 +926,11 @@ const SHORT_CALL: (&str, &str) = ("TMUX_TOOLS_TEST_REX_CALL_TIMEOUT", "1");
 /// <name>`.
 #[test]
 fn a_timed_out_or_unparseable_rex_ls_makes_the_listing_incomplete() {
-    for (case, change) in [
-        ("timeout", json!({"ls_sleep": 5})),
-        ("garbage", json!({"ls_garbage": true})),
+    for (case, change, timeout) in [
+        ("timeout", json!({"ls_sleep": 5}), "ls --json"),
+        ("garbage", json!({"ls_garbage": true}), NO_TIMEOUT.1),
     ] {
+        let env = [(TIMEOUT_ONLY, timeout)];
         let fake = FakeRex::start(&format!("rex-ls-{case}"));
         two_session_records(&fake);
         fake.edit_server(INSTANCE, |server| {
@@ -914,8 +938,8 @@ fn a_timed_out_or_unparseable_rex_ls_makes_the_listing_incomplete() {
                 server[key] = value.clone();
             }
         });
-        assert_incomplete_list(&fake, &[SHORT_CALL], &[("a", "unknown"), ("b", "unknown")]);
-        let out = fake.cli_with(&["capture", "--target", "a"], &[SHORT_CALL], &[]);
+        assert_incomplete_list(&fake, &env, &[("a", "unknown"), ("b", "unknown")]);
+        let out = fake.cli_unlimited(&["capture", "--target", "a"], &env);
         assert_eq!(out.status, 1, "{case}: {out:?}");
         assert!(
             out.stderr.contains("pane list incomplete: a"),
@@ -930,22 +954,24 @@ fn a_timed_out_or_unparseable_rex_ls_makes_the_listing_incomplete() {
 /// stay listed, so only that session's record is `unknown` and fails by name.
 #[test]
 fn a_timed_out_or_unparseable_block_ls_keeps_the_other_sessions() {
-    for (case, key) in [
-        ("timeout", "block_ls_sleep"),
-        ("garbage", "block_ls_garbage"),
+    let timed_out = format!("block ls -s {SESSION2}");
+    for (case, key, timeout) in [
+        ("timeout", "block_ls_sleep", timed_out.as_str()),
+        ("garbage", "block_ls_garbage", NO_TIMEOUT.1),
     ] {
+        let env = [(TIMEOUT_ONLY, timeout)];
         let fake = FakeRex::start(&format!("rex-block-ls-{case}"));
         two_session_records(&fake);
         fake.edit_server(INSTANCE, |server| server[key] = json!([SESSION2]));
-        assert_incomplete_list(&fake, &[SHORT_CALL], &[("a", "running"), ("b", "unknown")]);
-        let out = fake.cli_with(&["capture", "--target", "b"], &[SHORT_CALL], &[]);
+        assert_incomplete_list(&fake, &env, &[("a", "running"), ("b", "unknown")]);
+        let out = fake.cli_unlimited(&["capture", "--target", "b"], &env);
         assert_eq!(out.status, 1, "{case}: {out:?}");
         assert!(
             out.stderr.contains("pane list incomplete: b"),
             "{case}: {}",
             out.stderr
         );
-        fake.cli_with(&["capture", "--target", "a"], &[SHORT_CALL], &[])
+        fake.cli_unlimited(&["capture", "--target", "a"], &env)
             .assert_success("a listed name still resolves");
     }
 }
@@ -1136,6 +1162,12 @@ fn sweep_fake(label: &str) -> FakeRex {
 /// every address check passes `--autostart=false`.
 fn assert_swept_to_live(fake: &FakeRex) {
     fake.cli(&["list"]).assert_success("list sweeps");
+    assert_only_live_left(fake);
+}
+
+/// Require that only the live server's directory remains after a sweep; every address
+/// check passes `--autostart=false`.
+fn assert_only_live_left(fake: &FakeRex) {
     assert_eq!(fake.server_dirs(), ["inst-live"], "{:?}", fake.log());
     for call in fake.calls(&["server", "status"]) {
         assert!(has(&call, "--autostart=false"), "{call:?}");
@@ -1151,21 +1183,19 @@ fn the_sweep_deletes_a_directory_whose_address_check_fails() {
     assert_swept_to_live(&fake);
 }
 
-/// Acceptance (P4.1): a directory whose address check runs past 2 seconds is deleted;
-/// a live server's directory survives.
+/// Acceptance (P4.1): a directory whose address check times out is deleted; a live
+/// server's directory survives. Only the slow address's check has the 2-second limit,
+/// so the live server's check never times out however slow the fake is; the 2-second
+/// value itself is a unit test of `core/src/host/rex.rs`.
 #[test]
 fn the_sweep_deletes_a_directory_whose_address_check_times_out() {
     let fake = sweep_fake("rex-sweep-slow");
     fake.add_server(&["unix:///tmp/tt-slow.sock"], "inst-slow");
     fake.edit_server("inst-slow", |server| server["status_sleep"] = json!(5));
     fake.write_record("inst-slow", "unix:///tmp/tt-slow.sock", "s", None);
-    let started = Instant::now();
-    assert_swept_to_live(&fake);
-    assert!(
-        started.elapsed() < Duration::from_secs(5),
-        "the slow check times out after 2 s: {:?}",
-        started.elapsed()
-    );
+    fake.cli_unlimited(&["list"], &[(TIMEOUT_ONLY, "-S unix:///tmp/tt-slow.sock")])
+        .assert_success("list sweeps");
+    assert_only_live_left(&fake);
     assert!(
         fake.calls(&["server", "status"])
             .iter()
@@ -1244,10 +1274,9 @@ fn a_directory_published_meanwhile_is_used_as_it_is() {
         "[ \"$1\" = before-rename ] && mkdir -p '{dir}' && printf other > '{dir}/server-address'",
         dir = target.display()
     );
-    fake.cli_with(
+    fake.cli_unlimited(
         &["launch", "--name", "raced", "--cmd", "true"],
-        &[("TMUX_TOOLS_TEST_REX_HOOK", &hook)],
-        &[],
+        &[("TMUX_TOOLS_TEST_REX_HOOK", &hook), NO_TIMEOUT],
     )
     .assert_success("launch while another invocation publishes");
     assert!(fake.record(INSTANCE, "raced").unwrap()["handle"].is_string());
@@ -1270,7 +1299,7 @@ fn a_sweep_during_publication_keeps_the_new_directory() {
     let sweep = fake
         .command(
             &["list"],
-            &[("REX_SERVER", "unix:///tmp/tt-other.sock")],
+            &[("REX_SERVER", "unix:///tmp/tt-other.sock"), NO_TIMEOUT],
             &[],
         )
         .get_envs()
@@ -1281,10 +1310,9 @@ fn a_sweep_during_publication_keeps_the_new_directory() {
         "[ \"$1\" = before-rename ] && cd '{}' && env -u TMUX -u TMUX_PANE {sweep} '{BIN}' list >/dev/null 2>&1",
         fake.dir.join("work").display()
     );
-    fake.cli_with(
+    fake.cli_unlimited(
         &["launch", "--name", "fresh", "--cmd", "true"],
-        &[("TMUX_TOOLS_TEST_REX_HOOK", &hook)],
-        &[],
+        &[("TMUX_TOOLS_TEST_REX_HOOK", &hook), NO_TIMEOUT],
     )
     .assert_success("launch while another server sweeps");
     let sweeps = fake
@@ -1303,15 +1331,17 @@ fn a_sweep_during_publication_keeps_the_new_directory() {
         fake.server_dirs()
     );
     // Another sweep from the other server keeps the published directory.
-    fake.cli_with(
+    fake.cli_unlimited(
         &["list"],
-        &[("REX_SERVER", "unix:///tmp/tt-other.sock")],
-        &[],
+        &[("REX_SERVER", "unix:///tmp/tt-other.sock"), NO_TIMEOUT],
     )
     .assert_success("a second sweep");
     assert!(fake.record(INSTANCE, "fresh").is_some());
     let blocks = fake.block_count();
-    let out = fake.cli(&["launch", "--name", "fresh", "--cmd", "true"]);
+    let out = fake.cli_unlimited(
+        &["launch", "--name", "fresh", "--cmd", "true"],
+        &[NO_TIMEOUT],
+    );
     assert_eq!(out.status, 1, "{out:?}");
     assert_eq!(fake.block_count(), blocks);
 }
