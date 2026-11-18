@@ -2,7 +2,7 @@
 id: ISSUE-261118-0414-02
 kind: issue
 category: bug
-status: needs-triage
+status: ready-for-agent
 brief_contract: agent-brief.v3
 context: tmux-tools
 summary: the test harness clears every host and team variable a test does not set on purpose from each CLI it starts (default, private-server, and live runs), so the default suite passes unchanged inside tmux, Orca, Herdr, Rex, and team sessions
@@ -35,3 +35,4 @@ contract:
 **Out of scope:** Rex fake-host tests that fail on a loaded machine because a fake `rex` call takes longer than its timeout.
 
 ## Triage Notes
+- 2026-11-18: draft → needs-triage (mint check passed) → ready-for-agent (dispatch readiness passed).
