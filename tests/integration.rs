@@ -12970,6 +12970,91 @@ impl Drop for FakeOrca {
     }
 }
 
+/// Launch an anchor pane on the fake Orca and return its handle; a split needs one.
+fn orca_split_anchor(fake: &FakeOrca) -> String {
+    fake.cli(&["launch", "--name", "c-anchor", "--cmd", "sleep 30"], &[])
+        .assert_success("launch the split anchor");
+    fake.record("c-anchor").expect("the anchor's record")["handle"]
+        .as_str()
+        .expect("the anchor's handle")
+        .to_owned()
+}
+
+/// The `--retry-split` value of every `terminal split` call the CLI made.
+fn orca_retry_split_ids(fake: &FakeOrca) -> Vec<String> {
+    fake.log()
+        .into_iter()
+        .filter(|call| call.starts_with(&["terminal".to_owned(), "split".to_owned()]))
+        .filter_map(|call| {
+            let at = call.iter().position(|arg| arg == "--retry-split")?;
+            call.get(at + 1).cloned()
+        })
+        .collect()
+}
+
+/// P4.4: Orca's split-outcome error (`runtime_error` with `splitId` and
+/// `splitMayStillComplete: true`) is recovered with `--retry-split <splitId>`; the
+/// pane it returns is the spawned pane, and the split is never repeated.
+#[test]
+fn an_orca_split_that_may_still_complete_is_recovered_with_its_split_id() {
+    let fake = FakeOrca::start("orca-split-pending");
+    let anchor = orca_split_anchor(&fake);
+    let out = fake.cli(
+        &[
+            "launch", "--name", "c-split", "--cmd", "sleep 30", "--split", "h", "--target", &anchor,
+        ],
+        &[("FAKE_ORCA_SPLIT_PENDING", "1")],
+    );
+    out.assert_success("launch --split h through a split that may still complete");
+    assert_eq!(
+        orca_retry_split_ids(&fake),
+        vec!["split-pending".to_owned()],
+        "one retry, with the splitId from the error: {:?}",
+        fake.log()
+    );
+    let handles = fake.open_handles();
+    assert_eq!(
+        handles.len(),
+        2,
+        "the anchor and one split pane: {handles:?}"
+    );
+    let record = fake.record("c-split").expect("the record of c-split");
+    assert_eq!(
+        record["handle"],
+        handles[1].as_str(),
+        "the record holds the recovered pane's handle: {record}"
+    );
+}
+
+/// P4.4: when the `--retry-split` answer still says the split may complete, the
+/// outcome is unknown and the name stays reserved, so a pane that opens later is
+/// never orphaned under a reused name.
+#[test]
+fn an_orca_split_still_pending_after_the_retry_keeps_the_reservation() {
+    let fake = FakeOrca::start("orca-split-late");
+    let anchor = orca_split_anchor(&fake);
+    let out = fake.cli(
+        &[
+            "launch", "--name", "c-split", "--cmd", "sleep 30", "--split", "h", "--target", &anchor,
+        ],
+        &[("FAKE_ORCA_SPLIT_LATE", "8")],
+    );
+    assert_eq!(out.status, 1, "{out:?}");
+    assert!(
+        out.stderr.contains("spawn outcome unknown: c-split"),
+        "{}",
+        out.stderr
+    );
+    assert_eq!(
+        orca_retry_split_ids(&fake),
+        vec!["split-late".to_owned()],
+        "one retry, with the splitId from the error: {:?}",
+        fake.log()
+    );
+    let reservation = fake.record("c-split").expect("the reservation stays");
+    assert!(reservation["handle"].is_null(), "{reservation}");
+}
+
 /// P3.1: a present but empty `TMUX_TOOLS_HOST` is an invalid value; it never selects
 /// a host.
 #[test]

@@ -21,9 +21,14 @@ It never reaches a real Orca runtime. Its panes live in the JSON file FAKE_ORCA_
 - FAKE_ORCA_SCROLLBACK=<n>: every pane holds the lines `line1`..`line<n>`; its
   screen is the last 5, `terminal read --limit <k>` answers the last k, and a read
   without either answers all.
-- FAKE_ORCA_SPLIT_LATE=<n>: `terminal split` answers a timeout error without a
-  leafId; its untitled pane opens in the target's tab only on the <n>-th
-  `terminal list` after it.
+- FAKE_ORCA_SPLIT_LATE=<n>: `terminal split` answers Orca's split-outcome error
+  (`runtime_error`, data `splitId`, `tabId`, `splitMayStillComplete: true`); its
+  untitled pane opens in the target's tab only on the <n>-th `terminal list` after
+  it, and `--retry-split <splitId>` answers the same error until then.
+- FAKE_ORCA_SPLIT_PENDING=1: `terminal split` answers the same split-outcome error
+  and opens no pane; `--retry-split <splitId>` then opens it and answers its handle.
+  A `--retry-split` with an unknown id answers Orca's "no record of split" error
+  (`splitMayStillComplete: false`).
 
 - FAKE_ORCA_EMPTY_LISTS=<n>: the first <n> `terminal list` calls (counted in the
   state as `empty_lists`) exit 0 with empty stdout, as Orca 1.4.253 did for a few
@@ -161,11 +166,44 @@ def split_tab():
     fail("terminal_not_found", "no terminal " + str(handle))
 
 
+def split_outcome_error(split_id, tab, may_still_complete=True):
+    """Orca 1.4.263's TerminalSplitOutcomeError, as `orca` reports it."""
+    if may_still_complete:
+        message = ("Timed out waiting for split pane handle: pane %s in tab %s may "
+                   "still open and run its command." % (split_id, tab))
+    else:
+        message = ("This Orca host has no record of split %s from this terminal; it "
+                   "was not split again." % split_id)
+    fail("runtime_error", message, {"splitId": split_id, "tabId": tab,
+                                    "splitMayStillComplete": may_still_complete})
+
+
+if path == ["terminal", "split"] and flag("--retry-split"):
+    split_id = flag("--retry-split")
+    tab = split_tab()
+    late = state.get("late")
+    if late and late.get("split") == split_id:
+        split_outcome_error(split_id, tab)
+    pending = state.get("pending_split")
+    if pending and pending["split"] == split_id:
+        state["pending_split"] = None
+        terminal = open_pane(state, "", pending["tab"])
+        save(state)
+        answer({"split": {"handle": terminal["handle"]}})
+    split_outcome_error(split_id, tab, may_still_complete=False)
+
 if path == ["terminal", "split"] and os.environ.get("FAKE_ORCA_SPLIT_LATE"):
+    tab = split_tab()
     state["late"] = {"lists": int(os.environ["FAKE_ORCA_SPLIT_LATE"]),
-                     "title": "", "tab": split_tab()}
+                     "title": "", "tab": tab, "split": "split-late"}
     save(state)
-    fail("timeout", "terminal split timed out (fake)")
+    split_outcome_error("split-late", tab)
+
+if path == ["terminal", "split"] and os.environ.get("FAKE_ORCA_SPLIT_PENDING") == "1":
+    tab = split_tab()
+    state["pending_split"] = {"split": "split-pending", "tab": tab}
+    save(state)
+    split_outcome_error("split-pending", tab)
 
 if path == ["terminal", "split"]:
     terminal = open_pane(state, "", split_tab())

@@ -1179,12 +1179,19 @@ impl HostPort for OrcaHost {
                     // The call could not complete: the pane may exist.
                     return Err(self.outcome_unknown(&name, &placement, &error));
                 };
-                let leaf = find_key(&orca_error.data, "leafId")
+                // Orca names the split to retry `splitId` (TerminalSplitOutcomeError,
+                // code `runtime_error`); `leafId` and `newLeafId` are older fallbacks.
+                let split_id = find_key(&orca_error.data, "splitId")
+                    .or_else(|| find_key(&orca_error.data, "leafId"))
                     .or_else(|| find_key(&orca_error.data, "newLeafId"))
                     .and_then(Value::as_str)
                     .map(str::to_owned);
-                match (&placement, leaf) {
-                    (Placement::Split { handle, direction }, Some(leaf)) => {
+                let may_still_complete = orca_error.code.contains("timeout")
+                    || find_key(&orca_error.data, "splitMayStillComplete")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false);
+                match (&placement, split_id) {
+                    (Placement::Split { handle, direction }, Some(split_id)) => {
                         // P4.4: recover that same pane; creation is never repeated.
                         match self.call(&[
                             "terminal",
@@ -1196,7 +1203,7 @@ impl HostPort for OrcaHost {
                             "--command",
                             command,
                             "--retry-split",
-                            &leaf,
+                            &split_id,
                         ]) {
                             Ok(result) => find_key(&result, "handle")
                                 .and_then(Value::as_str)
@@ -1206,7 +1213,7 @@ impl HostPort for OrcaHost {
                             }
                         }
                     }
-                    _ if orca_error.code.contains("timeout") => {
+                    _ if may_still_complete => {
                         return Err(self.outcome_unknown(&name, &placement, &error));
                     }
                     _ => {

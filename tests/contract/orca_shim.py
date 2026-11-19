@@ -9,7 +9,10 @@ what a live Orca does not produce on demand:
   create` or `terminal split` returns, also when the shim then answers an error; the
   run's evidence that the pane is its own.
 - TT_SHIM_SPLIT_TIMEOUT_STATE: the first `terminal split` without `--retry-split`
-  runs the real split, then answers a timeout error carrying the new pane's leafId.
+  runs the real split, keeps its answer in this file, then answers Orca's
+  split-outcome error (`runtime_error`, data `splitId`, `tabId`,
+  `splitMayStillComplete: true`). A `--retry-split` with that splitId answers the
+  kept real answer; the real Orca has no record of the shim's splitId.
 - TT_SHIM_LIST_TRUNCATED=1 / TT_SHIM_LIST_OMIT=1: `terminal list` reports
   `truncated: true` / a non-empty `hostScope.omittedHostIds`.
 - TT_SHIM_STATUS_DROP: `status` reports its capabilities without this one.
@@ -73,20 +76,30 @@ def flag(name):
 
 log()
 
+SHIM_SPLIT_ID = "shim-split-1"
+
 if path == ["terminal", "split"] and "--retry-split" not in args:
     state = os.environ.get("TT_SHIM_SPLIT_TIMEOUT_STATE")
     if state and not os.path.exists(state):
         code, out, err = real(args)
         open(state, "w").write(out)
-        parsed = json.loads(out)
-        split = parsed.get("result", {}).get("split", {})
-        leaf = split.get("leafId")
-        if not leaf and split.get("handle"):
+        split = json.loads(out).get("result", {}).get("split", {})
+        tab = None
+        if split.get("handle"):
             _, shown, _ = real(["terminal", "show", "--terminal", split["handle"], "--json"])
-            leaf = json.loads(shown)["result"]["terminal"]["leafId"]
-        answer({"ok": False, "error": {"code": "timeout",
-                                        "message": "split timed out (shim)",
-                                        "data": {"leafId": leaf}}})
+            tab = json.loads(shown)["result"]["terminal"]["tabId"]
+        answer({"ok": False, "error": {
+            "code": "runtime_error",
+            "message": "Timed out waiting for split pane handle: pane %s in tab %s may "
+                       "still open and run its command. (shim)" % (SHIM_SPLIT_ID, tab),
+            "data": {"splitId": SHIM_SPLIT_ID, "tabId": tab,
+                     "splitMayStillComplete": True}}})
+
+if path == ["terminal", "split"] and flag("--retry-split") == SHIM_SPLIT_ID:
+    state = os.environ.get("TT_SHIM_SPLIT_TIMEOUT_STATE")
+    if state and os.path.exists(state):
+        sys.stdout.write(open(state).read())
+        sys.exit(0)
 
 if path == ["terminal", "send"] and "--enter" in args and os.environ.get("TT_SHIM_SEND_RECEIPT"):
     answer(json.load(open(os.environ["TT_SHIM_SEND_RECEIPT"])))
