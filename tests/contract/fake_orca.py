@@ -4,6 +4,8 @@
 It never reaches a real Orca runtime. Its panes live in the JSON file FAKE_ORCA_STATE.
 
 - FAKE_ORCA_LOG: append each call's argv as one JSON line.
+- FAKE_ORCA_ENV_LOG: append the names of each call's environment variables, which
+  it inherits from the calling CLI, as one JSON line.
 - FAKE_ORCA_UNAVAILABLE=1: every command answers `runtime_unavailable`.
 - FAKE_ORCA_ON_LIST_SPAWN=<name>: the first `terminal list` takes its answer, then
   acts as a concurrent spawn of <name> (opens a pane and writes its Pane record)
@@ -93,6 +95,11 @@ log = os.environ.get("FAKE_ORCA_LOG")
 if log:
     with open(log, "a") as handle:
         handle.write(json.dumps(args) + "\n")
+
+env_log = os.environ.get("FAKE_ORCA_ENV_LOG")
+if env_log:
+    with open(env_log, "a") as handle:
+        handle.write(json.dumps(sorted(os.environ)) + "\n")
 
 if os.environ.get("FAKE_ORCA_UNAVAILABLE") == "1":
     fail("runtime_unavailable", "Orca is not running (fake)")

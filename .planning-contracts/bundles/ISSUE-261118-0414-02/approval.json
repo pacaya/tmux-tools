@@ -1,0 +1,15 @@
+{
+  "approval_id": "accepted-20261118T051729Z",
+  "impact_disposition": {
+    "checked_revisions": [],
+    "status": "accepted"
+  },
+  "issue": {
+    "revision": "bfc43be3d2500ef11684c3f86ca187b58946575e",
+    "sha256": "6955f94bdb5f9da42a192b8502e7e17f8e7dbded4fb57c9a93fe4af74d9f5d93",
+    "target": "tmux-tools:ISSUE-261118-0414-02"
+  },
+  "resolution_mode": "canonical",
+  "schema": "planning-contracts.revision.v2",
+  "sources": []
+}

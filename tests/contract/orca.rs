@@ -19,6 +19,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Value};
 
+use super::test_child_env::is_caller_var;
 use super::{original_environment, wait_for_child, CmdOutput, BIN, FAKE_TUI_BIN};
 
 /// The opt-in switch of the live Orca run.
@@ -89,6 +90,11 @@ struct Run {
     late_wait: Duration,
     /// Environment set on every CLI and direct `orca` call (the fake-CLI runs).
     extra_env: Vec<(String, String)>,
+    /// The environment the run was started from; each CLI call starts from it,
+    /// without the variables [`is_caller_var`] names.
+    caller: std::collections::HashMap<String, String>,
+    /// The caller variables every CLI call passes on purpose (the live run, P10.2).
+    caller_vars: Vec<(String, String)>,
 }
 
 /// Per-call options of a CLI invocation.
@@ -111,7 +117,12 @@ impl Run {
             .map(|entry| Path::new(entry).join("orca"))
             .find(|candidate| candidate.exists())
             .expect("the live Orca run needs `orca` on PATH");
-        Run::with_orca(real_orca, Vec::new(), Duration::from_secs(30))
+        let mut run = Run::with_orca(real_orca, Vec::new(), Duration::from_secs(30));
+        run.caller_vars = ["ORCA_TERMINAL_HANDLE", "ORCA_WORKTREE_ID"]
+            .into_iter()
+            .filter_map(|key| original(key).map(|value| (key.to_owned(), value)))
+            .collect();
+        run
     }
 
     fn with_orca(real_orca: PathBuf, extra_env: Vec<(String, String)>, late_wait: Duration) -> Run {
@@ -134,9 +145,17 @@ impl Run {
             split_tabs: std::cell::RefCell::new(Vec::new()),
             late_wait,
             extra_env,
+            caller: original_environment().clone(),
+            caller_vars: Vec::new(),
         };
         run.write_agents();
         run
+    }
+
+    /// This run, with each CLI call started from the caller environment `caller`.
+    fn started_from(mut self, caller: std::collections::HashMap<String, String>) -> Run {
+        self.caller = caller;
+        self
     }
 
     /// The run-unique pane name for `base`. Orca shows it as the pane's `paneTitle`,
@@ -221,7 +240,12 @@ args = []
         let mut command = Command::new(BIN);
         command.args(args);
         command.env_clear();
-        for (key, value) in original_environment() {
+        for (key, value) in &self.caller {
+            if !is_caller_var(key) {
+                command.env(key, value);
+            }
+        }
+        for (key, value) in &self.caller_vars {
             command.env(key, value);
         }
         command
@@ -2843,6 +2867,11 @@ impl FakeCli {
     }
 
     fn run(&self) -> Run {
+        self.run_from(original_environment().clone())
+    }
+
+    /// [`FakeCli::run`], started from the caller environment `caller`.
+    fn run_from(&self, caller: std::collections::HashMap<String, String>) -> Run {
         let path = format!(
             "{}:{}",
             self.dir.join("bin").display(),
@@ -2861,6 +2890,7 @@ impl FakeCli {
             ],
             Duration::from_secs(5),
         )
+        .started_from(caller)
     }
 
     fn state(&self) -> Value {
@@ -3141,7 +3171,21 @@ fn a_nul_key_is_refused_naming_orca() {
     let name = run.n("c-nul");
     run.launch(&name, "sleep 30");
     let log = fake.dir.join("log.jsonl");
-    for key in ["C-@", "C-Space"] {
+    // ISSUE-261118-0414-01 (decision Q331): the refusal names the argument as written.
+    for (key, expected) in [
+        (
+            "C-@",
+            "cannot send C-@: it is the NUL byte, which Orca cannot carry as text",
+        ),
+        (
+            "C-Space",
+            "cannot send C-Space: it is the NUL byte, which Orca cannot carry as text",
+        ),
+        (
+            "M-C-@",
+            "cannot send M-C-@: it is the NUL byte, which Orca cannot carry as text",
+        ),
+    ] {
         let out = run.cli(
             &["send", "--target", &name, key],
             Call {
@@ -3151,21 +3195,10 @@ fn a_nul_key_is_refused_naming_orca() {
         );
         assert_eq!(out.status, 1, "{key}: {out:?}");
         assert!(
-            out.stderr
-                .contains("it is the NUL byte, which Orca cannot carry as text")
-                && !out.stderr.contains("Rex"),
+            out.stderr.contains(expected) && !out.stderr.contains("Rex"),
             "{key}: {}",
             out.stderr
         );
-        if key == "C-@" {
-            assert!(
-                out.stderr.contains(
-                    "cannot send C-@: it is the NUL byte, which Orca cannot carry as text"
-                ),
-                "{}",
-                out.stderr
-            );
-        }
     }
     let sends = std::fs::read_to_string(&log)
         .unwrap_or_default()
@@ -3173,4 +3206,41 @@ fn a_nul_key_is_refused_naming_orca() {
         .filter(|line| line.contains("\"send\""))
         .count();
     assert_eq!(sends, 0, "nothing is sent");
+}
+
+/// ISSUE-261118-0414-02: a CLI started from a `claude-teams` Leader's environment
+/// (`TT_TEAM`, `TT_HOST`) sees neither variable when the test does not set it.
+#[test]
+fn the_cli_does_not_inherit_the_callers_team_variables_on_orca() {
+    let fake = FakeCli::start("caller-env");
+    let mut caller = original_environment().clone();
+    caller.insert("TT_TEAM".to_owned(), "tt-no-such-team".to_owned());
+    caller.insert("TT_HOST".to_owned(), "rex".to_owned());
+    let run = fake.run_from(caller);
+    let log = fake.dir.join("env.jsonl");
+    let out = run.cli(
+        &["list", "--format", "json"],
+        Call {
+            env: vec![("FAKE_ORCA_ENV_LOG", log.display().to_string())],
+            ..Call::default()
+        },
+    );
+    let calls: Vec<Vec<String>> = std::fs::read_to_string(&log)
+        .unwrap_or_default()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert!(!calls.is_empty(), "the CLI calls the fake orca: {out:?}");
+    for names in &calls {
+        assert!(
+            names.iter().any(|name| name == "FAKE_ORCA_STATE"),
+            "{names:?}"
+        );
+        assert!(
+            !names
+                .iter()
+                .any(|name| name == "TT_TEAM" || name == "TT_HOST"),
+            "the CLI sees no caller Team variable: {names:?}"
+        );
+    }
 }

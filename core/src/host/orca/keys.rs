@@ -10,10 +10,11 @@ pub(in crate::host) const SHIFT: u8 = 1;
 
 /// The bytes one `send` argument stands for: the key's bytes when tmux parses the
 /// argument as a key, else the argument as literal text. `host` names the host that
-/// refuses a key that gives the NUL byte (`Orca`, `Rex`).
+/// refuses a key that gives the NUL byte (`Orca`, `Rex`); the refusal names `argument`
+/// as written.
 pub(in crate::host) fn translate(argument: &str, host: &str) -> Result<String> {
     match parse(argument) {
-        Some((modifiers, key)) => key_bytes(modifiers, key, host),
+        Some((modifiers, key)) => key_bytes(modifiers, key, argument, host),
         None => Ok(argument.to_owned()),
     }
 }
@@ -150,14 +151,14 @@ fn parameter(modifiers: u8) -> u8 {
     1 + modifiers
 }
 
-fn key_bytes(modifiers: u8, key: Key, host: &str) -> Result<String> {
+fn key_bytes(modifiers: u8, key: Key, argument: &str, host: &str) -> Result<String> {
     match key {
-        Key::Char(c) => char_bytes(modifiers, c, host),
-        Key::Named(named) => named_bytes(modifiers, named, host),
+        Key::Char(c) => char_bytes(modifiers, c, argument, host),
+        Key::Named(named) => named_bytes(modifiers, named, argument, host),
     }
 }
 
-fn char_bytes(modifiers: u8, c: char, host: &str) -> Result<String> {
+fn char_bytes(modifiers: u8, c: char, argument: &str, host: &str) -> Result<String> {
     let mut c = c;
     if modifiers & SHIFT != 0 {
         c = c.to_ascii_uppercase();
@@ -182,7 +183,7 @@ fn char_bytes(modifiers: u8, c: char, host: &str) -> Result<String> {
             }
         };
         if control == 0 {
-            bail!("cannot send C-{c}: it is the NUL byte, which {host} cannot carry as text");
+            bail!("cannot send {argument}: it is the NUL byte, which {host} cannot carry as text");
         }
         out.push(control as char);
         return Ok(out);
@@ -191,7 +192,7 @@ fn char_bytes(modifiers: u8, c: char, host: &str) -> Result<String> {
     Ok(out)
 }
 
-fn named_bytes(modifiers: u8, named: Named, host: &str) -> Result<String> {
+fn named_bytes(modifiers: u8, named: Named, argument: &str, host: &str) -> Result<String> {
     let modified = modifiers != 0;
     let p = parameter(modifiers);
     // Keys whose modified form is `ESC [ 1 ; <p> <final>`.
@@ -245,7 +246,7 @@ fn named_bytes(modifiers: u8, named: Named, host: &str) -> Result<String> {
         Named::Enter => meta_prefixed("\r"),
         Named::Escape => meta_prefixed("\x1b"),
         Named::Tab => meta_prefixed("\t"),
-        Named::Space => return char_bytes(modifiers, ' ', host),
+        Named::Space => return char_bytes(modifiers, ' ', argument, host),
         Named::BSpace => meta_prefixed("\x7f"),
         Named::Keypad(bytes) => meta_prefixed(bytes),
     })
