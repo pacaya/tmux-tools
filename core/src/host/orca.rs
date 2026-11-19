@@ -156,9 +156,10 @@ impl TerminalList {
 /// What one `orca` run printed on stdout.
 enum Answer {
     Json(Value),
-    /// Empty or non-JSON stdout, with the exit code and stderr.
+    /// Empty or non-JSON stdout, with the exit code, the parse error, and stderr.
     NotJson {
         code: Option<i32>,
+        parse_error: String,
         stderr: String,
     },
 }
@@ -204,10 +205,14 @@ impl OrcaHost {
         loop {
             match self.call_once(args, &command_name, timeout)? {
                 Answer::Json(parsed) => return self.result(parsed, command_name),
-                Answer::NotJson { code, stderr } => match pauses.next() {
+                Answer::NotJson {
+                    code,
+                    parse_error,
+                    stderr,
+                } => match pauses.next() {
                     Some(pause) if code == Some(0) => std::thread::sleep(*pause),
                     _ => bail!(
-                        "orca {command_name} exited {} without a JSON answer: {}",
+                        "orca {command_name} exited {} without a JSON answer ({parse_error}): {}",
                         code.unwrap_or(-1),
                         stderr
                     ),
@@ -255,10 +260,11 @@ impl OrcaHost {
         };
         let stdout = out_reader.join().unwrap_or_default();
         let stderr = err_reader.join().unwrap_or_default();
-        Ok(match serde_json::from_slice(&stdout) {
+        Ok(match parse_answer(&stdout) {
             Ok(parsed) => Answer::Json(parsed),
-            Err(_) => Answer::NotJson {
+            Err(error) => Answer::NotJson {
                 code: status.code(),
+                parse_error: error.to_string(),
                 stderr: String::from_utf8_lossy(&stderr).trim().to_owned(),
             },
         })
@@ -1445,10 +1451,93 @@ impl OrcaHost {
     }
 }
 
+/// Parse one `orca --json` answer. Orca cuts a terminal `preview` at 300 UTF-16 units,
+/// so a cut through an emoji leaves a lone surrogate escape (`\ud83d`), which
+/// `serde_json` refuses. Such an answer is parsed again with each lone surrogate escape
+/// read as U+FFFD; nothing else in the answer changes.
+fn parse_answer(stdout: &[u8]) -> serde_json::Result<Value> {
+    serde_json::from_slice(stdout).or_else(|error| match replace_lone_surrogates(stdout) {
+        Some(repaired) => serde_json::from_slice(&repaired),
+        None => Err(error),
+    })
+}
+
+/// `json` with every `\uXXXX` escape of an unpaired UTF-16 surrogate inside a string
+/// replaced by `\ufffd`, or `None` when it has none.
+fn replace_lone_surrogates(json: &[u8]) -> Option<Vec<u8>> {
+    fn escape_at(json: &[u8], at: usize) -> Option<u16> {
+        let hex = json.get(at..at + 6)?;
+        if hex[0] != b'\\' || hex[1] != b'u' {
+            return None;
+        }
+        u16::from_str_radix(std::str::from_utf8(&hex[2..]).ok()?, 16).ok()
+    }
+    let is_high = |unit: u16| (0xD800..0xDC00).contains(&unit);
+    let is_low = |unit: u16| (0xDC00..0xE000).contains(&unit);
+    let mut out = Vec::with_capacity(json.len());
+    let mut changed = false;
+    let mut in_string = false;
+    let mut at = 0;
+    while at < json.len() {
+        let byte = json[at];
+        if !in_string {
+            in_string = byte == b'"';
+            out.push(byte);
+            at += 1;
+            continue;
+        }
+        match byte {
+            b'"' => {
+                in_string = false;
+                out.push(byte);
+                at += 1;
+            }
+            b'\\' => match escape_at(json, at) {
+                Some(unit) if is_high(unit) && escape_at(json, at + 6).is_some_and(is_low) => {
+                    out.extend_from_slice(&json[at..at + 12]);
+                    at += 12;
+                }
+                Some(unit) if is_high(unit) || is_low(unit) => {
+                    out.extend_from_slice(b"\\ufffd");
+                    changed = true;
+                    at += 6;
+                }
+                _ => {
+                    let end = (at + 2).min(json.len());
+                    out.extend_from_slice(&json[at..end]);
+                    at = end;
+                }
+            },
+            _ => {
+                out.push(byte);
+                at += 1;
+            }
+        }
+    }
+    changed.then_some(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn an_answer_with_a_lone_surrogate_escape_parses_with_u_fffd_in_its_place() {
+        let parse = |json: &str| parse_answer(json.as_bytes()).map_err(|error| error.to_string());
+        assert_eq!(
+            parse(r#"{"p":"cut \ud83d","q":"\ude00 x","r":"\ud83d\ude00"}"#),
+            Ok(json!({"p": "cut \u{fffd}", "q": "\u{fffd} x", "r": "\u{1f600}"}))
+        );
+        // An escaped backslash before `ud83d` is text, not an escape.
+        assert_eq!(parse(r#"{"p":"\\ud83d"}"#), Ok(json!({"p": "\\ud83d"})));
+        assert_eq!(
+            parse(r#"{"p":"high then high \ud83d\ud83d\ude00"}"#),
+            Ok(json!({"p": "high then high \u{fffd}\u{1f600}"}))
+        );
+        assert!(parse("").is_err());
+        assert!(parse("not json").is_err());
+    }
 
     #[test]
     fn host_state_follows_the_p9_10_mapping() {

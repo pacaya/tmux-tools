@@ -33,6 +33,10 @@ It never reaches a real Orca runtime. Its panes live in the JSON file FAKE_ORCA_
 - FAKE_ORCA_EMPTY_LISTS=<n>: the first <n> `terminal list` calls (counted in the
   state as `empty_lists`) exit 0 with empty stdout, as Orca 1.4.253 did for a few
   seconds after a pane was created.
+- FAKE_ORCA_PREVIEW=<json string>: every `terminal list` row carries this
+  `preview` (decoded from a JSON string literal, so it can hold a lone UTF-16
+  surrogate such as `"abc\\ud83d"`, as Orca 1.4.263 sends when its 300-character
+  preview cut splits an emoji).
 
 A split pane opens in the tab of the pane it splits, without a title.
 """
@@ -131,6 +135,10 @@ if path == ["terminal", "list"]:
         save(state)
     result = {"terminals": [dict(t) for t in state["terminals"]], "truncated": False,
               "hostScope": {"omittedHostIds": []}}
+    if os.environ.get("FAKE_ORCA_PREVIEW"):
+        preview = json.loads(os.environ["FAKE_ORCA_PREVIEW"])
+        for terminal in result["terminals"]:
+            terminal["preview"] = preview
     name = os.environ.get("FAKE_ORCA_ON_LIST_SPAWN")
     if name and "on-list-spawn" not in state["flags"]:
         state["flags"].append("on-list-spawn")
