@@ -1,0 +1,79 @@
+---
+id: ISSUE-261118-0616-01
+kind: issue
+category: bug
+status: done
+claimed_by: implement-issue@agentmac
+claimed_at: 2026-11-18T06:40:43Z
+brief_contract: agent-brief.v3
+context: tmux-tools
+summary: five Rex fake-host contract tests pass or fail on the behaviour they check, not on how fast each fake `rex` call answers on a loaded machine; the production Rex time limits do not change
+terms: [Host]
+contract:
+  schema: planning-contracts.record.v1
+  clauses:
+    - id: acceptance
+      heading: Agent Brief
+  references:
+    - relation: requires
+      repository: tmux-tools
+      record: PRD-261112-2108-01
+      clause: p4-registration
+    - relation: requires
+      repository: tmux-tools
+      record: PRD-261112-2108-01
+      clause: p8-tests
+---
+
+## Agent Brief
+
+**Outcome and scope:** These five tests in `tests/contract/rex.rs` give the same result whatever time each fake `rex` call takes to answer (maintainer decision Q337; the address-check timeout test added by lead decision under Q337): `a_timed_out_or_unparseable_rex_ls_makes_the_listing_incomplete`, `a_timed_out_or_unparseable_block_ls_keeps_the_other_sessions`, `a_directory_published_meanwhile_is_used_as_it_is`, `a_sweep_during_publication_keeps_the_new_directory`, and `the_sweep_deletes_a_directory_whose_address_check_times_out`. The last one keeps the P8.2 deletion trigger of an address check that times out; acceptance item 4 checks the 2-second value. Tests only; the scope is the fake `rex` (`tests/contract/fake_rex.py`), the test harness, and test-only (`test-fixtures`) controls in `core/src/host/rex.rs`.
+
+**Required sources:** `tmux-tools:PRD-261112-2108-01#p4-registration` (the production 2-second address-check limit of P4.1 and the incomplete-listing rule of P4.3 that the tests check); `tmux-tools:PRD-261112-2108-01#p8-tests` (the cases these tests own, and the deterministic publication/sweep interleave).
+
+**Current observable:** On a loaded machine the two listing tests fail with exit 1 and stderr `host rex (selected by REX_BLOCK) is unreachable: rex server status: no answer within 1s`: the 1-second test call limit applies to every fake call, not only to the call that the case makes time out. When every fake call is 2.5 s slow, the sweep test fails: the sweep's 2-second address check of the publishing server's directory times out.
+
+**Required change:** In each of the five tests, the call that a case makes time out reaches its time limit at any fake speed, and no other fake call of the test reaches a time limit, whatever its speed; the implementer chooses the method. Any test-only control that changes a time limit exists only in a `test-fixtures` build and applies only in the cases that set it. In a build without `test-fixtures`, the `rex` call limit (120 s) and the P4.1 address-check limit (2 s) are unchanged.
+
+**Acceptance:**
+- [ ] Given a fake `rex` that delays each call by 3 s before it answers, when the five tests run, then all five pass. Observable in the result of those five tests with that delay applied (the delay control is part of this issue).
+- [ ] Given the same delay, when each case of the two listing tests runs, then `list` exits 0, stderr contains `list incomplete: rex`, and the rows have the statuses that the tests already require. Observable in the same tests.
+- [ ] Given a production change that makes a timed-out or unparseable `rex ls` or `rex block ls` produce a complete listing, when the two listing tests run, then they fail. Given a sweep that deletes a directory whose publication is in progress, when the sweep test runs, then it fails. Given a production change that, when `rex/<instance_id>/` appears after the missing-directory check and before the rename, fails the spawn, puts the record outside the existing directory, changes that directory's `server-address`, or leaves a `.init-` directory, when `a_directory_published_meanwhile_is_used_as_it_is` runs, then it fails. Given a production change that keeps another server directory whose address check times out, or that deletes the directory of a live server, when `the_sweep_deletes_a_directory_whose_address_check_times_out` runs, then it fails. Observable as a failing `cargo test` run for that change.
+- [ ] Given no test-only control set, when the backend runs a P4.1 address check, then its limit is 2 s. Observable in a test of the default `cargo test --workspace --features test-fixtures` run that fails when that limit is not 2 s and otherwise passes, whatever time each fake `rex` call and the run take.
+- [ ] Given a build without `test-fixtures`, when the backend runs a `rex` call, then its limit is 120 s. Observable in the unit tests of `core/src/host/rex.rs` or by inspection of the constant.
+
+**Verification and release:** `cargo test --workspace --features test-fixtures` passes with no delay, and every other fake-`rex` test keeps its current limits and passes unchanged; the five tests pass with the 3 s delay of the first acceptance item. Test-only change; no release.
+
+**Out of scope:** Other Rex tests that use wall-clock limits. Changes to the production Rex time limits or listing behaviour.
+
+## Triage Notes
+
+- 2026-11-18: draft → needs-triage (mint check passed) → ready-for-agent (dispatch readiness passed); → needs-triage (scope adds `the_sweep_deletes_a_directory_whose_address_check_times_out`, lead decision under Q337) → ready-for-agent (targeted mint and readiness rechecks passed).
+- 2026-11-18: maintainer decision Q359 — each CLI run of the five named tests (no wait limit after c05ea5e) has a hang backstop of 600 s (`HANG_BACKSTOP` in `tests/contract/rex.rs`); a run past it fails the test with a message naming the test and the backstop. All other tests keep their 60 s limit; production limits do not change.
+
+## Context Pack — canonical at claim (2026-11-18T06:40:43Z)
+
+**Contract approval:** `dispatch-20261118T063816Z` · canonical · revision check complete
+
+**Issue binding:** `tmux-tools:ISSUE-261118-0616-01` · revision `a83add182840da34d8111bc6d04864978858cad8` · sha256 `8952d9b55db620e8a3ef75042b259c784b49c468b1cde93379edfffb0b6f59b4`
+
+**Required source objects:**
+- `tmux-tools:PRD-261112-2108-01#p4-registration` · revision `736df60faf5d636d160ec29b0a42f082b38ed442` · sha256 `21b2c9c7820f2ddbdde9b6c386bff5e4b594d4f7e94d5794a33efc95594733d2` · `objects/21b2c9c7820f2ddbdde9b6c386bff5e4b594d4f7e94d5794a33efc95594733d2.md`
+- `tmux-tools:PRD-261112-2108-01#p8-tests` · revision `736df60faf5d636d160ec29b0a42f082b38ed442` · sha256 `f7102c0030dc591e4e076dd53421ebefc580298b4f3d957455311ea547996684` · `objects/f7102c0030dc591e4e076dd53421ebefc580298b4f3d957455311ea547996684.md`
+
+**Bundle manifest:** `.planning-contracts/bundles/ISSUE-261118-0616-01/manifest.json`
+
+**Test seam:** results of the five named tests in `tests/contract/rex.rs` (Rex fake-host harness, `tests/contract/fake_rex.py`) under a 3 s per-call fake `rex` delay and with no delay; `list` exit status/stderr; the address-check and `rex` call limits in `core/src/host/rex.rs`
+
+## Code Review
+
+Review: `issue-261118-0616-01-code-review-20261118-071200.md` — Outcome: ACCEPTED
+
+## Resolution
+
+- Commit: `fix: five Rex fake-host contract tests pass or fail on the behaviour they check, not on how fast each fake rex call answers (ISSUE-261118-0616-01)`.
+- Route: `claude — deepseek-suspended` (tests-only code work; Opus, effort medium); one implementation batch and one correction batch (same route).
+- TDD: red-green at the five named tests under `FAKE_REX_DELAY=3` (four failed before the change; all five pass after).
+- Review: dual review; one finding (M1, the five tests still had fixed 60 s CLI and 120 s non-target call limits) fixed and verified by both reviewers; outcome ACCEPTED.
+- Suite: `cargo test --workspace --features test-fixtures` PASS (590 passed, 0 failed); the five tests also pass with `FAKE_REX_DELAY=3`.
+- Date: 2026-11-18 (UTC).

@@ -44,6 +44,8 @@ const LABEL_CHARS: usize = 128;
 const PROMPT_API_REVISION: u64 = 12;
 /// How long the address check of another server directory may run (P4.1).
 const ADDRESS_CHECK_TIMEOUT: Duration = Duration::from_secs(2);
+/// The P4.1 address check of another server directory.
+const ADDRESS_CHECK_ARGS: [&str; 3] = ["server", "status", "--json"];
 /// How long one `rex` call may run.
 const CALL_TIMEOUT: Duration = Duration::from_secs(120);
 /// The file of a server directory that holds its server address (P4.1).
@@ -247,8 +249,9 @@ impl RexHost {
     // --- The CLI -------------------------------------------------------------------
 
     /// Run `rex --autostart=false [-S <address>] <args>`. Not reaching the CLI names the
-    /// host and the selection source (P2.4).
-    fn exec(&self, server: Server<'_>, args: &[&str], timeout: Duration) -> Result<Ran> {
+    /// host and the selection source (P2.4). A `timeout` of `None` sets no limit
+    /// (only a `test-fixtures` build gives one; see [`limit`]).
+    fn exec(&self, server: Server<'_>, args: &[&str], timeout: Option<Duration>) -> Result<Ran> {
         let mut command = Command::new("rex");
         command.arg("--autostart=false");
         match server {
@@ -283,12 +286,12 @@ impl RexHost {
             let _ = stderr.read_to_end(&mut buffer);
             buffer
         });
-        let deadline = Instant::now() + timeout;
+        let deadline = timeout.map(|timeout| Instant::now() + timeout);
         let status = loop {
             if let Some(status) = child.try_wait()? {
                 break Some(status);
             }
-            if Instant::now() >= deadline {
+            if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
                 let _ = child.kill();
                 let _ = child.wait();
                 break None;
@@ -310,7 +313,7 @@ impl RexHost {
     /// Run `rex <args>` against the caller's server; its stdout, or a [`RexError`].
     fn call(&self, args: &[&str]) -> Result<Vec<u8>> {
         let name = command_name(args);
-        let timeout = call_timeout();
+        let timeout = limit(Server::Caller, args, CALL_TIMEOUT);
         match self.exec(Server::Caller, args, timeout)? {
             Ran::Exited {
                 code: Some(0),
@@ -325,7 +328,7 @@ impl RexHost {
             .into()),
             Ran::TimedOut => Err(NoAnswer(format!(
                 "rex {name}: no answer within {}s",
-                timeout.as_secs_f64()
+                timeout.unwrap_or_default().as_secs_f64()
             ))
             .into()),
         }
@@ -596,8 +599,8 @@ impl RexHost {
     fn address_reaches(&self, address: &str, instance_id: &str) -> bool {
         match self.exec(
             Server::Stored(address),
-            &["server", "status", "--json"],
-            ADDRESS_CHECK_TIMEOUT,
+            &ADDRESS_CHECK_ARGS,
+            address_check_limit(address),
         ) {
             Ok(Ran::Exited {
                 code: Some(0),
@@ -887,17 +890,46 @@ fn env_value(name: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
-/// How long one `rex` call may run; `TMUX_TOOLS_TEST_REX_CALL_TIMEOUT` (seconds)
-/// overrides it in a `test-fixtures` build so a contract test can time a call out.
-fn call_timeout() -> Duration {
+/// The time limit of one `rex` call whose production limit is `production`
+/// ([`CALL_TIMEOUT`], or [`ADDRESS_CHECK_TIMEOUT`] for a P4.1 address check).
+///
+/// In a `test-fixtures` build, `TMUX_TOOLS_TEST_REX_TIMEOUT_ONLY=<text>` lets a
+/// contract test time out exactly the calls it targets, whatever time each fake call
+/// takes: a call whose command line (`[-S <address>] <args>`, joined by spaces)
+/// contains `<text>` has the address-check limit (2 s), and every other call, address
+/// checks included, has no limit (`None`). A `<text>` that no call contains gives no
+/// call a limit. Without the control, every call has its production limit.
+fn limit(server: Server<'_>, args: &[&str], production: Duration) -> Option<Duration> {
     #[cfg(feature = "test-fixtures")]
-    if let Some(seconds) = env_value("TMUX_TOOLS_TEST_REX_CALL_TIMEOUT")
-        .and_then(|value| value.parse::<f64>().ok())
-        .filter(|seconds| seconds.is_finite() && *seconds >= 0.0)
-    {
-        return Duration::from_secs_f64(seconds);
+    if let Some(only) = env_value("TMUX_TOOLS_TEST_REX_TIMEOUT_ONLY") {
+        let mut line: Vec<String> = Vec::new();
+        match server {
+            Server::Caller => {
+                if let Some(address) = env_value(REX_SERVER) {
+                    line.extend(["-S".to_owned(), address]);
+                }
+            }
+            Server::Stored(UNSET_ADDRESS) => {}
+            Server::Stored(address) => line.extend(["-S".to_owned(), address.to_owned()]),
+        }
+        line.extend(args.iter().map(|arg| (*arg).to_owned()));
+        return line
+            .join(" ")
+            .contains(&only)
+            .then_some(ADDRESS_CHECK_TIMEOUT);
     }
-    CALL_TIMEOUT
+    #[cfg(not(feature = "test-fixtures"))]
+    let _ = (server, args);
+    Some(production)
+}
+
+/// The time limit of the P4.1 address check of a server directory stored as `address`.
+fn address_check_limit(address: &str) -> Option<Duration> {
+    limit(
+        Server::Stored(address),
+        &ADDRESS_CHECK_ARGS,
+        ADDRESS_CHECK_TIMEOUT,
+    )
 }
 
 fn now_ms() -> u64 {
@@ -1487,7 +1519,11 @@ impl HostPort for RexHost {
             "-c",
             command,
         ]);
-        let created = self.exec(Server::Caller, &args, CALL_TIMEOUT)?;
+        let created = self.exec(
+            Server::Caller,
+            &args,
+            limit(Server::Caller, &args, CALL_TIMEOUT),
+        )?;
         let handle = match created {
             Ran::Exited {
                 code: Some(0),
@@ -1713,6 +1749,20 @@ mod tests {
         assert_eq!(
             relabel("lead.tm1.respawn-1", "lead.tm1").as_deref(),
             Some("lead.tm1")
+        );
+    }
+
+    /// P4.1: with no test-only control set, the address check of another server
+    /// directory may run 2 seconds and every other `rex` call 120 seconds.
+    #[test]
+    fn with_no_test_control_an_address_check_has_2_s_and_a_call_120_s() {
+        assert!(std::env::var_os("TMUX_TOOLS_TEST_REX_TIMEOUT_ONLY").is_none());
+        for address in ["unix:///tmp/tt-x.sock", UNSET_ADDRESS] {
+            assert_eq!(address_check_limit(address), Some(Duration::from_secs(2)));
+        }
+        assert_eq!(
+            limit(Server::Caller, &["ls", "--json"], CALL_TIMEOUT),
+            Some(Duration::from_secs(120))
         );
     }
 
