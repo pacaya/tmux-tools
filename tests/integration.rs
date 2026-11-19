@@ -13464,6 +13464,26 @@ fn list_on_orca_retries_an_empty_terminal_list_answer() {
     assert_eq!(lists, 5, "at most 5 attempts: {:?}", fake.log());
 }
 
+/// Orca 1.4.263 cuts a terminal's `preview` at 300 UTF-16 units, so a cut through an
+/// emoji leaves a lone surrogate escape (`"\\ud83d"`). The answer is still JSON that
+/// Orca and Python accept; `list` and `capture` must still work, and the preview keeps
+/// its other text.
+#[test]
+fn list_on_orca_accepts_a_preview_cut_through_an_emoji() {
+    let fake = FakeOrca::start("orca-split-emoji-preview");
+    fake.cli(&["launch", "--name", "c-one", "--cmd", "sleep 30"], &[])
+        .assert_success("launch c-one");
+
+    let preview = [("FAKE_ORCA_PREVIEW", r#""ok \ud83d\ude00 cut \ud83d""#)];
+    let rows = json_payload(
+        &fake.cli(&["list", "--format", "json"], &preview),
+        "list with a lone surrogate in a preview",
+    );
+    assert_eq!(rows[0]["name"], "c-one", "{rows}");
+    fake.cli(&["capture", "--target", "c-one"], &preview)
+        .assert_success("capture with a lone surrogate in a preview");
+}
+
 /// PRD-261108-0447-01 P9.1/P9.2: the trigger is the binary basename, not the agent
 /// name; on tmux an agent whose binary basename is not `claude` runs its own argv.
 #[cfg(feature = "test-fixtures")]
